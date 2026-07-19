@@ -82,6 +82,10 @@ func newRootCmd() *cobra.Command {
 		newIndexCmd(),
 		newInspectCmd(),
 		newStatusCmd(),
+		newDoctorCmd(),
+		newStandaloneLLMCmd(),
+		newConfigCmd(),
+		newCompileCmd(),
 	)
 	return root
 }

@@ -1,0 +1,245 @@
+package store
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+)
+
+// SceneRow is scene metadata read from the index.
+type SceneRow struct {
+	ID             string
+	ChapterID      string
+	ParagraphStart string
+	ParagraphEnd   string
+	Ordinal        int
+	BoundarySource string // "explicit", "model", "manual"
+	Status         string // "generated", "verified", "accepted", "rejected"
+}
+
+// SceneCardRow is a scene card record read from the index.
+type SceneCardRow struct {
+	SceneID         string
+	Title           string
+	Summary         string
+	Evidence        []string
+	GenerationRun   string
+	GenerationModel string
+	PromptVersion   string
+	Status          string
+	RawJSON         string
+}
+
+// InsertScene inserts one scene row.  Duplicate scene IDs are replaced.
+func (s *Store) InsertScene(r SceneRow) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO scenes
+			(id, chapter_id, paragraph_start, paragraph_end, ordinal, boundary_source, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.ChapterID, r.ParagraphStart, r.ParagraphEnd,
+		r.Ordinal, r.BoundarySource, r.Status,
+	)
+	if err != nil {
+		return fmt.Errorf("insert scene %s: %w", r.ID, err)
+	}
+	return nil
+}
+
+// InsertSceneCard inserts or replaces a scene card row.
+func (s *Store) InsertSceneCard(r SceneCardRow) error {
+	evJSON, err := json.Marshal(r.Evidence)
+	if err != nil {
+		return fmt.Errorf("marshal evidence for scene card %s: %w", r.SceneID, err)
+	}
+	_, err = s.db.Exec(
+		`INSERT OR REPLACE INTO scene_cards
+			(scene_id, title, summary, evidence_json, generation_run, generation_model,
+			 prompt_version, status, raw_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.SceneID, r.Title, r.Summary, string(evJSON),
+		r.GenerationRun, r.GenerationModel, r.PromptVersion, r.Status, r.RawJSON,
+	)
+	if err != nil {
+		return fmt.Errorf("insert scene card %s: %w", r.SceneID, err)
+	}
+	return nil
+}
+
+// ScenesByChapter returns all scenes for a chapter, ordered by ordinal.
+func (s *Store) ScenesByChapter(chapterID string) ([]SceneRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, chapter_id, paragraph_start, paragraph_end, ordinal, boundary_source, status
+		 FROM scenes WHERE chapter_id = ? ORDER BY ordinal`,
+		chapterID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("scenes for chapter %s: %w", chapterID, err)
+	}
+	defer rows.Close()
+	return scanScenes(rows)
+}
+
+// AllScenes returns all scenes ordered by chapter ordinal then scene ordinal.
+func (s *Store) AllScenes() ([]SceneRow, error) {
+	rows, err := s.db.Query(
+		`SELECT s.id, s.chapter_id, s.paragraph_start, s.paragraph_end,
+		        s.ordinal, s.boundary_source, s.status
+		 FROM scenes s
+		 JOIN chapters c ON s.chapter_id = c.id
+		 ORDER BY c.ordinal, s.ordinal`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("all scenes: %w", err)
+	}
+	defer rows.Close()
+	return scanScenes(rows)
+}
+
+func scanScenes(rows *sql.Rows) ([]SceneRow, error) {
+	var out []SceneRow
+	for rows.Next() {
+		var r SceneRow
+		if err := rows.Scan(&r.ID, &r.ChapterID, &r.ParagraphStart, &r.ParagraphEnd,
+			&r.Ordinal, &r.BoundarySource, &r.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ParagraphsByChapter returns all paragraph rows for a chapter, ordered by
+// ordinal.
+func (s *Store) ParagraphsByChapter(chapterID string) ([]ParagraphRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, chapter_id, ordinal, block_type, text, text_hash,
+		        source_file, source_line_start, source_line_end
+		 FROM paragraphs WHERE chapter_id = ? ORDER BY ordinal`,
+		chapterID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("paragraphs for chapter %s: %w", chapterID, err)
+	}
+	defer rows.Close()
+	var out []ParagraphRow
+	for rows.Next() {
+		var p ParagraphRow
+		if err := rows.Scan(&p.ID, &p.ChapterID, &p.Ordinal, &p.BlockType,
+			&p.Text, &p.TextHash, &p.SourceFile, &p.SourceLineStart, &p.SourceLineEnd); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// AllChapters returns all chapter rows ordered by ordinal.
+func (s *Store) AllChapters() ([]ChapterRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, ordinal, title, file, source_key FROM chapters ORDER BY ordinal`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("all chapters: %w", err)
+	}
+	defer rows.Close()
+	var out []ChapterRow
+	for rows.Next() {
+		var c ChapterRow
+		if err := rows.Scan(&c.ID, &c.Ordinal, &c.Title, &c.File, &c.SourceKey); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// InspectScene returns a scene by ID.
+func (s *Store) InspectScene(id string) (SceneRow, error) {
+	var r SceneRow
+	err := s.db.QueryRow(
+		`SELECT id, chapter_id, paragraph_start, paragraph_end, ordinal, boundary_source, status
+		 FROM scenes WHERE id = ?`, id,
+	).Scan(&r.ID, &r.ChapterID, &r.ParagraphStart, &r.ParagraphEnd,
+		&r.Ordinal, &r.BoundarySource, &r.Status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SceneRow{}, fmt.Errorf("scene %s: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return SceneRow{}, fmt.Errorf("inspect scene %s: %w", id, err)
+	}
+	return r, nil
+}
+
+// InspectSceneCard returns a scene card by scene ID.
+func (s *Store) InspectSceneCard(sceneID string) (SceneCardRow, error) {
+	var r SceneCardRow
+	var evJSON string
+	err := s.db.QueryRow(
+		`SELECT scene_id, title, summary, evidence_json, generation_run,
+		        generation_model, prompt_version, status, raw_json
+		 FROM scene_cards WHERE scene_id = ?`, sceneID,
+	).Scan(&r.SceneID, &r.Title, &r.Summary, &evJSON,
+		&r.GenerationRun, &r.GenerationModel, &r.PromptVersion, &r.Status, &r.RawJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SceneCardRow{}, fmt.Errorf("scene card %s: %w", sceneID, ErrNotFound)
+	}
+	if err != nil {
+		return SceneCardRow{}, fmt.Errorf("inspect scene card %s: %w", sceneID, err)
+	}
+	if err := json.Unmarshal([]byte(evJSON), &r.Evidence); err != nil {
+		return SceneCardRow{}, fmt.Errorf("parse evidence for scene card %s: %w", sceneID, err)
+	}
+	return r, nil
+}
+
+// SceneCounts returns the number of scenes and scene cards in the index.
+func (s *Store) SceneCounts() (scenes, cards int, err error) {
+	if err = s.db.QueryRow(`SELECT COUNT(*) FROM scenes`).Scan(&scenes); err != nil {
+		return 0, 0, fmt.Errorf("count scenes: %w", err)
+	}
+	if err = s.db.QueryRow(`SELECT COUNT(*) FROM scene_cards`).Scan(&cards); err != nil {
+		return 0, 0, fmt.Errorf("count scene cards: %w", err)
+	}
+	return scenes, cards, nil
+}
+
+// DeleteScenesForChapter removes all scenes (and their cards) for a chapter.
+func (s *Store) DeleteScenesForChapter(chapterID string) error {
+	// scene_cards references scenes by scene_id, so delete cards first.
+	_, err := s.db.Exec(
+		`DELETE FROM scene_cards WHERE scene_id IN
+		 (SELECT id FROM scenes WHERE chapter_id = ?)`, chapterID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete scene cards for chapter %s: %w", chapterID, err)
+	}
+	_, err = s.db.Exec(`DELETE FROM scenes WHERE chapter_id = ?`, chapterID)
+	if err != nil {
+		return fmt.Errorf("delete scenes for chapter %s: %w", chapterID, err)
+	}
+	return nil
+}
+
+// SceneBreakOrdinals returns the block ordinals (1-based) of all scene_break
+// blocks for the given chapter.  This is used by the compiler to detect
+// explicit scene boundaries without importing the full manuscript package.
+func (s *Store) SceneBreakOrdinals(chapterID string) ([]int, error) {
+	rows, err := s.db.Query(
+		`SELECT ordinal FROM blocks WHERE chapter_id = ? AND block_type = 'scene_break' ORDER BY ordinal`,
+		chapterID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("scene break ordinals for chapter %s: %w", chapterID, err)
+	}
+	defer rows.Close()
+	var out []int
+	for rows.Next() {
+		var ord int
+		if err := rows.Scan(&ord); err != nil {
+			return nil, err
+		}
+		out = append(out, ord)
+	}
+	return out, rows.Err()
+}

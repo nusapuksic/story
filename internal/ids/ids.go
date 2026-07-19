@@ -31,6 +31,21 @@ func NewImportRunID() string {
 	return "import-" + NewULID()
 }
 
+// NewSceneID returns a new scene identifier of the form sc-<ULID>.
+func NewSceneID() string {
+	return "sc-" + NewULID()
+}
+
+// NewCompileRunID returns a new compilation run identifier of the form compile-<ULID>.
+func NewCompileRunID() string {
+	return "compile-" + NewULID()
+}
+
+// NewTaskID returns a new compilation task identifier of the form task-<ULID>.
+func NewTaskID() string {
+	return "task-" + NewULID()
+}
+
 // ChapterID returns the stable chapter identifier for a 1-based order,
 // e.g. ch-0001.
 func ChapterID(order int) string {
