@@ -1,0 +1,14 @@
+version = 1
+title = "The Unopened Letter"
+
+[[chapter]]
+file = "prologue.md"
+title = "Prologue"
+
+[[chapter]]
+file = "01-road.md"
+title = "The Road"
+
+[[chapter]]
+file = "02-house.md"
+title = "The House"
