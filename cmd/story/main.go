@@ -20,11 +20,12 @@ var version = "0.1.0-dev"
 
 // Stable exit codes (docs/cli-spec.md §15).
 const (
-	exitGeneralFailure     = 1
-	exitInvalidArguments   = 2
-	exitInvalidProject     = 10
-	exitAmbiguousImport    = 11
-	exitManuscriptConflict = 13
+	exitGeneralFailure       = 1
+	exitInvalidArguments     = 2
+	exitInvalidProject       = 10
+	exitAmbiguousImport      = 11
+	exitManuscriptConflict   = 13
+	exitInsufficientEvidence = 40
 )
 
 type globalFlags struct {
@@ -55,9 +56,17 @@ func exitCodeFor(err error) int {
 		return exitInvalidProject
 	case errors.Is(err, errInvalidArguments):
 		return exitInvalidArguments
+	case isInsufficientEvidence(err):
+		return exitInsufficientEvidence
 	default:
 		return exitGeneralFailure
 	}
+}
+
+// isInsufficientEvidence reports whether err is an insufficientEvidenceError.
+func isInsufficientEvidence(err error) bool {
+	var e *insufficientEvidenceError
+	return errors.As(err, &e)
 }
 
 var errInvalidArguments = errors.New("invalid arguments")
@@ -86,6 +95,8 @@ func newRootCmd() *cobra.Command {
 		newStandaloneLLMCmd(),
 		newConfigCmd(),
 		newCompileCmd(),
+		newSearchCmd(),
+		newAskCmd(),
 	)
 	return root
 }

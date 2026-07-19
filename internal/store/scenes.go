@@ -63,6 +63,14 @@ func (s *Store) InsertSceneCard(r SceneCardRow) error {
 	if err != nil {
 		return fmt.Errorf("insert scene card %s: %w", r.SceneID, err)
 	}
+	// Sync FTS: delete any existing entry then insert the new one.
+	s.db.Exec(`DELETE FROM scene_cards_fts WHERE scene_id = ?`, r.SceneID) //nolint:errcheck
+	if _, err := s.db.Exec(
+		`INSERT INTO scene_cards_fts(scene_id, title, summary) VALUES (?, ?, ?)`,
+		r.SceneID, r.Title, r.Summary,
+	); err != nil {
+		return fmt.Errorf("index scene card FTS %s: %w", r.SceneID, err)
+	}
 	return nil
 }
 
@@ -206,8 +214,32 @@ func (s *Store) SceneCounts() (scenes, cards int, err error) {
 
 // DeleteScenesForChapter removes all scenes (and their cards) for a chapter.
 func (s *Store) DeleteScenesForChapter(chapterID string) error {
+	// Collect scene IDs first so we can clean FTS.
+	rows, err := s.db.Query(`SELECT id FROM scenes WHERE chapter_id = ?`, chapterID)
+	if err != nil {
+		return fmt.Errorf("list scenes for chapter %s: %w", chapterID, err)
+	}
+	var sceneIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		sceneIDs = append(sceneIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Remove FTS entries for the affected scene cards.
+	for _, id := range sceneIDs {
+		s.db.Exec(`DELETE FROM scene_cards_fts WHERE scene_id = ?`, id) //nolint:errcheck
+	}
+
 	// scene_cards references scenes by scene_id, so delete cards first.
-	_, err := s.db.Exec(
+	_, err = s.db.Exec(
 		`DELETE FROM scene_cards WHERE scene_id IN
 		 (SELECT id FROM scenes WHERE chapter_id = ?)`, chapterID,
 	)
@@ -240,6 +272,74 @@ func (s *Store) SceneBreakOrdinals(chapterID string) ([]int, error) {
 			return nil, err
 		}
 		out = append(out, ord)
+	}
+	return out, rows.Err()
+}
+
+// AllSceneCards returns all scene card rows ordered by their scene's chapter
+// ordinal and scene ordinal.
+func (s *Store) AllSceneCards() ([]SceneCardRow, error) {
+	rows, err := s.db.Query(
+		`SELECT sc.scene_id, sc.title, sc.summary, sc.evidence_json,
+		        sc.generation_run, sc.generation_model, sc.prompt_version,
+		        sc.status, sc.raw_json
+		 FROM scene_cards sc
+		 JOIN scenes sn ON sn.id = sc.scene_id
+		 JOIN chapters c ON c.id = sn.chapter_id
+		 ORDER BY c.ordinal, sn.ordinal`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("all scene cards: %w", err)
+	}
+	defer rows.Close()
+	return scanSceneCardRows(rows)
+}
+
+// ParagraphsInRange returns all paragraphs whose ordinal falls between startOrd
+// and endOrd (inclusive), for a specific chapter.
+func (s *Store) ParagraphsInRange(chapterID string, startOrd, endOrd int) ([]ParagraphRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, chapter_id, ordinal, block_type, text, text_hash,
+		        source_file, source_line_start, source_line_end
+		 FROM paragraphs
+		 WHERE chapter_id = ? AND ordinal >= ? AND ordinal <= ?
+		 ORDER BY ordinal`,
+		chapterID, startOrd, endOrd,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("paragraphs in range for chapter %s: %w", chapterID, err)
+	}
+	defer rows.Close()
+	var out []ParagraphRow
+	for rows.Next() {
+		var p ParagraphRow
+		if err := rows.Scan(&p.ID, &p.ChapterID, &p.Ordinal, &p.BlockType,
+			&p.Text, &p.TextHash, &p.SourceFile, &p.SourceLineStart, &p.SourceLineEnd); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// scanSceneCardRows scans rows from the scene_cards table.
+func scanSceneCardRows(rows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}) ([]SceneCardRow, error) {
+	var out []SceneCardRow
+	for rows.Next() {
+		var r SceneCardRow
+		var evJSON string
+		if err := rows.Scan(&r.SceneID, &r.Title, &r.Summary, &evJSON,
+			&r.GenerationRun, &r.GenerationModel, &r.PromptVersion, &r.Status, &r.RawJSON); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(evJSON), &r.Evidence); err != nil {
+			return nil, fmt.Errorf("parse evidence for scene card %s: %w", r.SceneID, err)
+		}
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }

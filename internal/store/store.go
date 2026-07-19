@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS projects (
 	title      TEXT NOT NULL,
 	language   TEXT NOT NULL
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS paragraphs_fts USING fts5(id UNINDEXED, chapter_id UNINDEXED, text);
+CREATE VIRTUAL TABLE IF NOT EXISTS scene_cards_fts USING fts5(scene_id UNINDEXED, title, summary);
 CREATE TABLE IF NOT EXISTS imports (
 	run_id      TEXT PRIMARY KEY,
 	type        TEXT NOT NULL,
