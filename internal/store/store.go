@@ -60,6 +60,36 @@ CREATE TABLE IF NOT EXISTS paragraphs (
 	source_line_end   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS paragraphs_chapter ON paragraphs(chapter_id, ordinal);
+CREATE TABLE IF NOT EXISTS scenes (
+	id               TEXT PRIMARY KEY,
+	chapter_id       TEXT NOT NULL REFERENCES chapters(id),
+	paragraph_start  TEXT NOT NULL REFERENCES paragraphs(id),
+	paragraph_end    TEXT NOT NULL REFERENCES paragraphs(id),
+	ordinal          INTEGER NOT NULL,
+	boundary_source  TEXT NOT NULL,
+	status           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS scenes_chapter ON scenes(chapter_id, ordinal);
+CREATE TABLE IF NOT EXISTS scene_cards (
+	scene_id         TEXT PRIMARY KEY REFERENCES scenes(id),
+	title            TEXT NOT NULL,
+	summary          TEXT NOT NULL,
+	evidence_json    TEXT NOT NULL,
+	generation_run   TEXT NOT NULL,
+	generation_model TEXT NOT NULL,
+	prompt_version   TEXT NOT NULL,
+	status           TEXT NOT NULL,
+	raw_json         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS model_runs (
+	run_id      TEXT PRIMARY KEY,
+	run_type    TEXT NOT NULL,
+	started_at  TEXT NOT NULL,
+	finished_at TEXT,
+	status      TEXT NOT NULL,
+	model       TEXT NOT NULL,
+	prompt_ver  TEXT NOT NULL
+);
 `
 
 // Open opens (creating if necessary) the SQLite index at path.
