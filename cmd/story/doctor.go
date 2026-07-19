@@ -153,7 +153,11 @@ func runLLMDoctor() error {
 		isLocal := strings.HasPrefix(pc.BaseURL, "http://127.") ||
 			strings.HasPrefix(pc.BaseURL, "http://localhost") ||
 			strings.HasPrefix(pc.BaseURL, "http://[::1]")
-		check("endpoint type", isLocal, "remote endpoint (ensure API key is set via "+pc.APIKeyEnv+")")
+		remoteMsg := "remote endpoint"
+		if pc.APIKeyEnv != "" {
+			remoteMsg += " (ensure the API key environment variable is set)"
+		}
+		check("endpoint type", isLocal, remoteMsg)
 
 		prov := provider.NewOpenAI(pc.BaseURL, pc.APIKeyEnv, pc.RequestTimeoutSeconds)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
