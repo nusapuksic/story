@@ -46,6 +46,11 @@ func NewTaskID() string {
 	return "task-" + NewULID()
 }
 
+// NewQueryRunID returns a new query run identifier of the form query-<ULID>.
+func NewQueryRunID() string {
+	return "query-" + NewULID()
+}
+
 // ChapterID returns the stable chapter identifier for a 1-based order,
 // e.g. ch-0001.
 func ChapterID(order int) string {

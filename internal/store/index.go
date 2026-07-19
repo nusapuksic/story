@@ -112,7 +112,12 @@ func (s *Store) IndexChapters(chapters []*manuscript.Chapter) (retErr error) {
 			tx.Rollback()
 		}
 	}()
-	for _, stmt := range []string{`DELETE FROM paragraphs`, `DELETE FROM blocks`, `DELETE FROM chapters`} {
+	for _, stmt := range []string{
+		`DELETE FROM paragraphs_fts`,
+		`DELETE FROM paragraphs`,
+		`DELETE FROM blocks`,
+		`DELETE FROM chapters`,
+	} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("index chapters: %w", err)
 		}
@@ -147,6 +152,12 @@ func (s *Store) IndexChapters(chapters []*manuscript.Chapter) (retErr error) {
 				manuscript.TextHash(blk.Text), filepath.ToSlash(ch.File), blk.LineStart, blk.LineEnd,
 			); err != nil {
 				return fmt.Errorf("index paragraph %s: %w", blk.ParagraphID, err)
+			}
+			if _, err := tx.Exec(
+				`INSERT INTO paragraphs_fts(id, chapter_id, text) VALUES (?, ?, ?)`,
+				blk.ParagraphID, ch.ID, blk.Text,
+			); err != nil {
+				return fmt.Errorf("index paragraph FTS %s: %w", blk.ParagraphID, err)
 			}
 		}
 	}

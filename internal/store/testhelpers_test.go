@@ -1,16 +1,6 @@
 package store
 
-// InsertChapterForTest inserts a minimal chapter row for testing.
-// It is only available during test builds.
-func (s *Store) InsertChapterForTest(id string, ordinal int, title string) error {
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO chapters (id, ordinal, title, file, source_key) VALUES (?, ?, ?, ?, ?)`,
-		id, ordinal, title, "chapters/"+id+".md", id,
-	)
-	return err
-}
-
-// InsertParagraphForTest inserts a minimal paragraph row for testing.
+// InsertParagraphForTest inserts a minimal paragraph row for testing (no FTS sync).
 func (s *Store) InsertParagraphForTest(id, chapterID string, ordinal int) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO paragraphs
