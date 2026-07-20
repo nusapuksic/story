@@ -92,6 +92,10 @@ CREATE TABLE IF NOT EXISTS model_runs (
 	model       TEXT NOT NULL,
 	prompt_ver  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chapter_scene_snapshots (
+	chapter_id   TEXT PRIMARY KEY REFERENCES chapters(id),
+	committed_at TEXT NOT NULL
+);
 `
 
 // Open opens (creating if necessary) the SQLite index at path.

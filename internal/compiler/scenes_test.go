@@ -85,3 +85,63 @@ func TestDetectScenesEmpty(t *testing.T) {
 		t.Errorf("want 0 scenes, got %d", len(scenes))
 	}
 }
+
+func TestValidateScenePartitionComplete(t *testing.T) {
+	paragraphs := []store.ParagraphRow{
+		{ID: "p-001", Ordinal: 1},
+		{ID: "p-002", Ordinal: 2},
+		{ID: "p-003", Ordinal: 3},
+	}
+	ch := store.ChapterRow{ID: "ch-0001", Ordinal: 1, Title: "T"}
+	scenes, err := compiler.DetectScenesNoLLM(ch, paragraphs, []int{2}) // break after p-001
+	if err != nil {
+		t.Fatalf("DetectScenesNoLLM: %v", err)
+	}
+	if err := compiler.ValidateScenePartition(paragraphs, scenes); err != nil {
+		t.Errorf("ValidateScenePartition on complete partition: %v", err)
+	}
+}
+
+func TestValidateScenePartitionMissingLastParagraph(t *testing.T) {
+	paragraphs := []store.ParagraphRow{
+		{ID: "p-001", Ordinal: 1},
+		{ID: "p-002", Ordinal: 2},
+		{ID: "p-003", Ordinal: 3},
+	}
+	// Scene only covers p1..p2; p3 is missing from the partition.
+	scenes := []compiler.SceneRecord{
+		{ID: "sc-1", ChapterID: "ch-0001", ParagraphStart: "p-001", ParagraphEnd: "p-002", Ordinal: 1, BoundarySource: "explicit"},
+	}
+	if err := compiler.ValidateScenePartition(paragraphs, scenes); err == nil {
+		t.Error("expected error for partition missing last paragraph, got nil")
+	}
+}
+
+func TestValidateScenePartitionGapBetweenScenes(t *testing.T) {
+	paragraphs := []store.ParagraphRow{
+		{ID: "p-001", Ordinal: 1},
+		{ID: "p-002", Ordinal: 2},
+		{ID: "p-003", Ordinal: 3},
+	}
+	// Scene 1 ends at p1, scene 2 starts at p3: p2 is skipped.
+	scenes := []compiler.SceneRecord{
+		{ID: "sc-1", ParagraphStart: "p-001", ParagraphEnd: "p-001", Ordinal: 1},
+		{ID: "sc-2", ParagraphStart: "p-003", ParagraphEnd: "p-003", Ordinal: 2},
+	}
+	if err := compiler.ValidateScenePartition(paragraphs, scenes); err == nil {
+		t.Error("expected error for gap between scenes, got nil")
+	}
+}
+
+func TestValidateScenePartitionNoParagraphsNoScenes(t *testing.T) {
+	if err := compiler.ValidateScenePartition(nil, nil); err != nil {
+		t.Errorf("empty partition should be valid: %v", err)
+	}
+}
+
+func TestValidateScenePartitionNoParagraphsWithScenes(t *testing.T) {
+	scenes := []compiler.SceneRecord{{ID: "sc-1", ParagraphStart: "p-001", ParagraphEnd: "p-001"}}
+	if err := compiler.ValidateScenePartition(nil, scenes); err == nil {
+		t.Error("expected error for scenes with no paragraphs, got nil")
+	}
+}

@@ -156,6 +156,84 @@ func TestSceneCounts(t *testing.T) {
 	}
 }
 
+func TestMarkAndCheckChapterSnapshotCommitted(t *testing.T) {
+	s := openTestStore(t)
+	insertChapter(t, s, "ch-0001", 1, "Chapter One")
+
+	committed, err := s.IsChapterSnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsChapterSnapshotCommitted (before): %v", err)
+	}
+	if committed {
+		t.Error("chapter should not be committed before MarkChapterSnapshotCommitted")
+	}
+
+	if err := s.MarkChapterSnapshotCommitted("ch-0001", "2024-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("MarkChapterSnapshotCommitted: %v", err)
+	}
+
+	committed, err = s.IsChapterSnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsChapterSnapshotCommitted (after): %v", err)
+	}
+	if !committed {
+		t.Error("chapter should be committed after MarkChapterSnapshotCommitted")
+	}
+
+	// Idempotent: calling again should succeed (REPLACE semantics).
+	if err := s.MarkChapterSnapshotCommitted("ch-0001", "2024-01-02T00:00:00Z"); err != nil {
+		t.Errorf("MarkChapterSnapshotCommitted (idempotent): %v", err)
+	}
+}
+
+func TestDeleteChapterSnapshot(t *testing.T) {
+	s := openTestStore(t)
+	insertChapter(t, s, "ch-0001", 1, "Chapter One")
+
+	if err := s.MarkChapterSnapshotCommitted("ch-0001", "2024-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("MarkChapterSnapshotCommitted: %v", err)
+	}
+	if err := s.DeleteChapterSnapshot("ch-0001"); err != nil {
+		t.Fatalf("DeleteChapterSnapshot: %v", err)
+	}
+	committed, err := s.IsChapterSnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsChapterSnapshotCommitted: %v", err)
+	}
+	if committed {
+		t.Error("chapter snapshot should be gone after DeleteChapterSnapshot")
+	}
+}
+
+func TestDeleteScenesForChapterAlsoClearsSnapshot(t *testing.T) {
+	s := openTestStore(t)
+	insertChapter(t, s, "ch-0001", 1, "Chapter One")
+	insertParagraph(t, s, "p-001", "ch-0001", 1)
+
+	if err := s.InsertScene(store.SceneRow{
+		ID: "sc-001", ChapterID: "ch-0001",
+		ParagraphStart: "p-001", ParagraphEnd: "p-001",
+		Ordinal: 1, BoundarySource: "chapter_end", Status: "generated",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkChapterSnapshotCommitted("ch-0001", "2024-01-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteScenesForChapter("ch-0001"); err != nil {
+		t.Fatalf("DeleteScenesForChapter: %v", err)
+	}
+
+	committed, err := s.IsChapterSnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsChapterSnapshotCommitted: %v", err)
+	}
+	if committed {
+		t.Error("DeleteScenesForChapter should also clear the chapter snapshot marker")
+	}
+}
+
 // helpers
 
 func insertChapter(t *testing.T, s *store.Store, id string, ordinal int, title string) {
