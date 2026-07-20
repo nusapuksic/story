@@ -236,8 +236,9 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 	var finalScenes []sceneJSONLRecord
 	finalSceneByID := make(map[string]sceneJSONLRecord)
 	for _, ch := range chapters {
-		chMap := committedByChapter[ch.ID]
-		if len(chMap) == 0 {
+		chMap, committed := committedByChapter[ch.ID]
+		if !committed {
+			// No chapter_snapshot record in the JSONL: chapter is uncompiled, skip.
 			continue
 		}
 		ordinals := make([]int, 0, len(chMap))
