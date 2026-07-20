@@ -260,7 +260,11 @@ func TestRebuildUsesLatestReplacementSnapshot(t *testing.T) {
 	}
 }
 
-func TestRebuildCommittedEmptySnapshotReplacesPrevious(t *testing.T) {
+// TestRebuildFailsOnEmptyCommittedSnapshotForNonEmptyChapter verifies that an
+// empty committed snapshot for a chapter that contains paragraphs is rejected.
+// Previously the empty-snapshot path was silently skipped, bypassing partition
+// validation (issue #10).
+func TestRebuildFailsOnEmptyCommittedSnapshotForNonEmptyChapter(t *testing.T) {
 	p, p1, _, p3 := newProjectWithChapter(t)
 	writeScenesJSONL(t, p, []any{
 		map[string]any{
@@ -279,11 +283,31 @@ func TestRebuildCommittedEmptySnapshotReplacesPrevious(t *testing.T) {
 			"scene_count":  1,
 			"committed_at": "2024-01-01T00:00:00Z",
 		},
+		// Second snapshot commits 0 scenes, but the chapter still has paragraphs.
 		map[string]any{
 			"record_type":  "chapter_snapshot",
 			"chapter_id":   "ch-0001",
 			"scene_count":  0,
 			"committed_at": "2024-01-02T00:00:00Z",
+		},
+	})
+
+	err := store.Rebuild(p)
+	if err == nil || !strings.Contains(err.Error(), "no committed scenes") {
+		t.Fatalf("Rebuild error = %v, want 'no committed scenes' error", err)
+	}
+}
+
+// TestRebuildEmptyCommittedSnapshotForEmptyChapterSucceeds verifies that an
+// empty committed snapshot is valid for a chapter that has no paragraphs.
+func TestRebuildEmptyCommittedSnapshotForEmptyChapterSucceeds(t *testing.T) {
+	p := newProjectWithEmptyChapter(t)
+	writeScenesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"scene_count":  0,
+			"committed_at": "2024-01-01T00:00:00Z",
 		},
 	})
 
@@ -304,7 +328,7 @@ func TestRebuildCommittedEmptySnapshotReplacesPrevious(t *testing.T) {
 		t.Fatalf("IsChapterSnapshotCommitted: %v", err)
 	}
 	if !committed {
-		t.Fatal("chapter should remain committed after empty replacement snapshot")
+		t.Fatal("chapter should be marked committed after an empty snapshot for an empty chapter")
 	}
 }
 
@@ -683,6 +707,38 @@ func newProjectWithChapter(t *testing.T) (*project.Project, string, string, stri
 		t.Fatalf("SaveTOC: %v", err)
 	}
 	return p, p1, p2, p3
+}
+
+// newProjectWithEmptyChapter creates a minimal test project containing one
+// chapter that has no paragraph blocks.
+func newProjectWithEmptyChapter(t *testing.T) *project.Project {
+	t.Helper()
+	dir := t.TempDir()
+	p, err := project.Init(dir, project.InitOptions{Title: "Test", Language: "en"})
+	if err != nil {
+		t.Fatalf("project.Init: %v", err)
+	}
+	ch := &manuscript.Chapter{
+		ID:        "ch-0001",
+		Order:     1,
+		Title:     "Empty Chapter",
+		File:      "chapters/ch-0001.md",
+		SourceKey: "01-empty.md",
+		Blocks:    nil,
+	}
+	if err := manuscript.WriteChapter(p.Path(project.ManuscriptDir), ch); err != nil {
+		t.Fatalf("WriteChapter: %v", err)
+	}
+	toc := manuscript.TOC{
+		Version: 1,
+		Chapters: []manuscript.TOCEntry{
+			{ID: ch.ID, Order: ch.Order, Title: ch.Title, File: ch.File, SourceKey: ch.SourceKey},
+		},
+	}
+	if err := manuscript.SaveTOC(p.Path(project.TOCPath), toc); err != nil {
+		t.Fatalf("SaveTOC: %v", err)
+	}
+	return p
 }
 
 func writeScenesJSONL(t *testing.T, p *project.Project, records []any) {
