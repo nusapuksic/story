@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/nusapuksic/story/internal/project"
 	"github.com/nusapuksic/story/internal/provider"
@@ -164,17 +165,23 @@ func compileScenes(
 	total := 0
 	for _, ch := range chapters {
 		if opts.Force {
+			// --force: delete existing scenes (including snapshot marker) and recompute.
 			if err := st.DeleteScenesForChapter(ch.ID); err != nil {
 				return total, err
 			}
 		} else {
-			existing, err := st.ScenesByChapter(ch.ID)
+			committed, err := st.IsChapterSnapshotCommitted(ch.ID)
 			if err != nil {
 				return total, err
 			}
-			if len(existing) > 0 {
-				// Already compiled; skip unless --force.
+			if committed {
+				// A complete, validated snapshot already exists; skip this chapter.
 				continue
+			}
+			// No committed snapshot: a previous run may have left partial scenes.
+			// Discard them so detection starts fresh.
+			if err := st.DeleteScenesForChapter(ch.ID); err != nil {
+				return total, err
 			}
 		}
 
@@ -194,6 +201,11 @@ func compileScenes(
 			return total, fmt.Errorf("detect scenes for chapter %s: %w", ch.ID, err)
 		}
 
+		// Validate the detected scenes form a complete partition before committing.
+		if err := ValidateScenePartition(paragraphs, scenes); err != nil {
+			return total, fmt.Errorf("scene partition invalid for chapter %s: %w", ch.ID, err)
+		}
+
 		for _, sc := range scenes {
 			row := store.SceneRow{
 				ID:             sc.ID,
@@ -211,6 +223,22 @@ func compileScenes(
 				return total, err
 			}
 			total++
+		}
+
+		// Explicitly commit the snapshot: append a chapter_snapshot record to the
+		// JSONL and mark the chapter as committed in the store.  Both writes must
+		// succeed for the snapshot to be considered complete.
+		committedAt := time.Now().UTC().Format(time.RFC3339)
+		snap := ChapterSnapshotRecord{
+			RecordType:  "chapter_snapshot",
+			ChapterID:   ch.ID,
+			CommittedAt: committedAt,
+		}
+		if err := appendJSONL(scenesFile, snap); err != nil {
+			return total, fmt.Errorf("write chapter_snapshot for %s: %w", ch.ID, err)
+		}
+		if err := st.MarkChapterSnapshotCommitted(ch.ID, committedAt); err != nil {
+			return total, err
 		}
 	}
 	return total, nil

@@ -23,6 +23,16 @@ type SceneRecord struct {
 	Status         string `json:"status"`          // "generated"
 }
 
+// ChapterSnapshotRecord marks that all scenes for a chapter have been fully
+// written to model/scenes.jsonl.  It is appended immediately after the last
+// scene record for the chapter so that IndexScenesJSONL can identify the
+// preceding scene records as a committed, valid snapshot.
+type ChapterSnapshotRecord struct {
+	RecordType  string `json:"record_type"` // "chapter_snapshot"
+	ChapterID   string `json:"chapter_id"`
+	CommittedAt string `json:"committed_at"` // RFC3339
+}
+
 // boundaryProposal is one candidate scene boundary returned by the LLM.
 type boundaryProposal struct {
 	AfterParagraphID string  `json:"after_paragraph_id"`
@@ -308,4 +318,55 @@ func runID(r *Run) string {
 // It uses explicit-only boundary detection (no LLM).
 func DetectScenesNoLLM(ch store.ChapterRow, paragraphs []store.ParagraphRow, explicitBreakOrdinals []int) ([]SceneRecord, error) {
 	return detectScenes(context.Background(), ch, paragraphs, nil, explicitBreakOrdinals, nil, "", sceneDetectConfig{Mode: "explicit"}, nil)
+}
+
+// ValidateScenePartition verifies that scenes form a complete, non-overlapping
+// cover of all paragraphs in a chapter.  paragraphs must be ordered by ordinal.
+// It returns a descriptive error if any gap, overlap, or uncovered paragraph is
+// found, or nil if the partition is valid.
+func ValidateScenePartition(paragraphs []store.ParagraphRow, scenes []SceneRecord) error {
+	if len(paragraphs) == 0 {
+		if len(scenes) != 0 {
+			return fmt.Errorf("chapter has no paragraphs but %d scene(s)", len(scenes))
+		}
+		return nil
+	}
+	if len(scenes) == 0 {
+		return fmt.Errorf("chapter has %d paragraph(s) but no scenes", len(paragraphs))
+	}
+
+	ordByID := make(map[string]int, len(paragraphs))
+	for _, p := range paragraphs {
+		ordByID[p.ID] = p.Ordinal
+	}
+
+	// First scene must start at the first paragraph.
+	if scenes[0].ParagraphStart != paragraphs[0].ID {
+		return fmt.Errorf("first scene %s starts at paragraph %q but first paragraph is %q",
+			scenes[0].ID, scenes[0].ParagraphStart, paragraphs[0].ID)
+	}
+	// Last scene must end at the last paragraph.
+	lastPara := paragraphs[len(paragraphs)-1]
+	if scenes[len(scenes)-1].ParagraphEnd != lastPara.ID {
+		return fmt.Errorf("last scene %s ends at paragraph %q but last paragraph is %q",
+			scenes[len(scenes)-1].ID, scenes[len(scenes)-1].ParagraphEnd, lastPara.ID)
+	}
+	// Consecutive scenes must chain with no gap or overlap.
+	for i := 1; i < len(scenes); i++ {
+		prevEndOrd, ok := ordByID[scenes[i-1].ParagraphEnd]
+		if !ok {
+			return fmt.Errorf("scene %s paragraph_end %q not found in chapter",
+				scenes[i-1].ID, scenes[i-1].ParagraphEnd)
+		}
+		curStartOrd, ok := ordByID[scenes[i].ParagraphStart]
+		if !ok {
+			return fmt.Errorf("scene %s paragraph_start %q not found in chapter",
+				scenes[i].ID, scenes[i].ParagraphStart)
+		}
+		if curStartOrd != prevEndOrd+1 {
+			return fmt.Errorf("partition gap: scene %s ends at paragraph ordinal %d but scene %s starts at ordinal %d",
+				scenes[i-1].ID, prevEndOrd, scenes[i].ID, curStartOrd)
+		}
+	}
+	return nil
 }

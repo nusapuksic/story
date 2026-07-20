@@ -250,6 +250,10 @@ func (s *Store) DeleteScenesForChapter(chapterID string) error {
 	if err != nil {
 		return fmt.Errorf("delete scenes for chapter %s: %w", chapterID, err)
 	}
+	_, err = s.db.Exec(`DELETE FROM chapter_scene_snapshots WHERE chapter_id = ?`, chapterID)
+	if err != nil {
+		return fmt.Errorf("delete chapter snapshot %s: %w", chapterID, err)
+	}
 	return nil
 }
 
@@ -274,6 +278,45 @@ func (s *Store) SceneBreakOrdinals(chapterID string) ([]int, error) {
 		out = append(out, ord)
 	}
 	return out, rows.Err()
+}
+
+// MarkChapterSnapshotCommitted records that all scenes for chapterID have been
+// fully written.  committedAt is the RFC3339 timestamp from the
+// chapter_snapshot record in model/scenes.jsonl.
+func (s *Store) MarkChapterSnapshotCommitted(chapterID, committedAt string) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO chapter_scene_snapshots (chapter_id, committed_at) VALUES (?, ?)`,
+		chapterID, committedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("mark chapter snapshot %s: %w", chapterID, err)
+	}
+	return nil
+}
+
+// IsChapterSnapshotCommitted reports whether an explicit snapshot has been
+// committed for chapterID, meaning all scenes were written and validated.
+func (s *Store) IsChapterSnapshotCommitted(chapterID string) (bool, error) {
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM chapter_scene_snapshots WHERE chapter_id = ?`, chapterID,
+	).Scan(&n); err != nil {
+		return false, fmt.Errorf("check chapter snapshot %s: %w", chapterID, err)
+	}
+	return n > 0, nil
+}
+
+// DeleteChapterSnapshot removes the snapshot commitment record for a chapter.
+// It does not remove the scenes themselves; call DeleteScenesForChapter for
+// that.
+func (s *Store) DeleteChapterSnapshot(chapterID string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM chapter_scene_snapshots WHERE chapter_id = ?`, chapterID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete chapter snapshot %s: %w", chapterID, err)
+	}
+	return nil
 }
 
 // AllSceneCards returns all scene card rows ordered by their scene's chapter

@@ -36,6 +36,15 @@ type sceneCardJSONLRecord struct {
 	Status string `json:"status"`
 }
 
+// chapterSnapshotJSONLRecord is the explicit commit marker appended to
+// model/scenes.jsonl after all scene records for a chapter have been written.
+// Only chapters with this marker are treated as fully snapshotted.
+type chapterSnapshotJSONLRecord struct {
+	RecordType  string `json:"record_type"` // "chapter_snapshot"
+	ChapterID   string `json:"chapter_id"`
+	CommittedAt string `json:"committed_at"`
+}
+
 type paragraphRef struct {
 	ChapterID string
 	Ordinal   int
@@ -55,12 +64,18 @@ type sceneCardCandidate struct {
 // IndexScenesJSONL replays model/scenes.jsonl into scenes and scene_cards.
 //
 // Canonical conflict handling is deterministic:
-//   - scene records are keyed by (chapter_id, ordinal)
-//   - a scene record with ordinal==1 starts a replacement snapshot for that chapter
-//   - within a snapshot, the latest valid line for a key wins
+//   - scene records are keyed by (chapter_id, ordinal) in a per-chapter
+//     pending buffer; a scene with ordinal==1 resets the pending buffer for
+//     that chapter
+//   - a "chapter_snapshot" record explicitly commits the pending buffer for
+//     that chapter; only committed chapters are loaded into the index
+//   - within a committed snapshot, the latest valid line for each ordinal wins
 //   - scene cards are keyed by scene_id and latest valid line wins
 //
 // Scene cards that reference superseded historical scene IDs are ignored.
+//
+// Partition validation: the committed scenes for each chapter must form a
+// complete, non-overlapping cover of all paragraphs in that chapter.
 func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -99,7 +114,15 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 		return fmt.Errorf("index scenes jsonl: %w", err)
 	}
 
-	sceneByChapterOrdinal := make(map[string]map[int]sceneCandidate)
+	// pendingByChapter accumulates scene records for a chapter since the last
+	// ordinal==1 reset.  An ordinal==1 scene resets the pending buffer so that
+	// a re-run of a chapter overwrites the previous incomplete attempt.
+	pendingByChapter := make(map[string]map[int]sceneCandidate)
+	// committedByChapter holds the scenes that were explicitly committed via a
+	// chapter_snapshot record.  Only these are loaded into the index.
+	committedByChapter := make(map[string]map[int]sceneCandidate)
+	// committedAtByChapter records the RFC3339 timestamp from each chapter_snapshot.
+	committedAtByChapter := make(map[string]string)
 	historicalSceneIDs := make(map[string]bool)
 	latestCards := make(map[string]sceneCardCandidate)
 
@@ -132,12 +155,28 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 				return fmt.Errorf("index scenes jsonl: %s:%d: scene %s has invalid ordinal %d", path, lineNo, rec.ID, rec.Ordinal)
 			}
 			historicalSceneIDs[rec.ID] = true
-			chMap := sceneByChapterOrdinal[rec.ChapterID]
+			chMap := pendingByChapter[rec.ChapterID]
 			if rec.Ordinal == 1 || chMap == nil {
+				// An ordinal==1 record starts a fresh pending snapshot, discarding
+				// any previously accumulated (uncommitted) scenes for this chapter.
 				chMap = make(map[int]sceneCandidate)
-				sceneByChapterOrdinal[rec.ChapterID] = chMap
+				pendingByChapter[rec.ChapterID] = chMap
 			}
 			chMap[rec.Ordinal] = sceneCandidate{record: rec, line: lineNo}
+		case "chapter_snapshot":
+			var snap chapterSnapshotJSONLRecord
+			if err := json.Unmarshal(line, &snap); err != nil {
+				return fmt.Errorf("index scenes jsonl: %s:%d: malformed chapter_snapshot record: %w", path, lineNo, err)
+			}
+			if strings.TrimSpace(snap.ChapterID) == "" {
+				return fmt.Errorf("index scenes jsonl: %s:%d: chapter_snapshot missing chapter_id", path, lineNo)
+			}
+			pending := pendingByChapter[snap.ChapterID]
+			if pending != nil {
+				committedByChapter[snap.ChapterID] = pending
+				committedAtByChapter[snap.ChapterID] = snap.CommittedAt
+				delete(pendingByChapter, snap.ChapterID)
+			}
 		case "scene_card":
 			var rec sceneCardJSONLRecord
 			if err := json.Unmarshal(line, &rec); err != nil {
@@ -155,15 +194,16 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 		return fmt.Errorf("index scenes jsonl: %s: %w", path, err)
 	}
 
+	// Report scenes that reference a chapter not in the index.
 	unknownChapters := make([]string, 0)
-	for chapterID := range sceneByChapterOrdinal {
+	for chapterID := range committedByChapter {
 		if !chapterIDs[chapterID] {
 			unknownChapters = append(unknownChapters, chapterID)
 		}
 	}
 	sort.Strings(unknownChapters)
 	if len(unknownChapters) > 0 {
-		m := sceneByChapterOrdinal[unknownChapters[0]]
+		m := committedByChapter[unknownChapters[0]]
 		var minLine int
 		for _, cand := range m {
 			if minLine == 0 || cand.line < minLine {
@@ -173,10 +213,11 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 		return fmt.Errorf("index scenes jsonl: %s:%d: scene references missing chapter %q", path, minLine, unknownChapters[0])
 	}
 
+	// Build the final scene list from committed snapshots and validate partitions.
 	var finalScenes []sceneJSONLRecord
 	finalSceneByID := make(map[string]sceneJSONLRecord)
 	for _, ch := range chapters {
-		chMap := sceneByChapterOrdinal[ch.ID]
+		chMap := committedByChapter[ch.ID]
 		if len(chMap) == 0 {
 			continue
 		}
@@ -185,6 +226,7 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 			ordinals = append(ordinals, ord)
 		}
 		sort.Ints(ordinals)
+		var chScenes []sceneJSONLRecord
 		for _, ord := range ordinals {
 			cand := chMap[ord]
 			rec := cand.record
@@ -205,8 +247,15 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 			if _, exists := finalSceneByID[rec.ID]; exists {
 				return fmt.Errorf("index scenes jsonl: %s:%d: duplicate active scene id %q", path, cand.line, rec.ID)
 			}
-			finalScenes = append(finalScenes, rec)
-			finalSceneByID[rec.ID] = rec
+			chScenes = append(chScenes, rec)
+		}
+		// Validate that committed scenes form a complete partition of the chapter.
+		if err := validateJSONLScenePartition(ch.ID, chScenes, paragraphs); err != nil {
+			return fmt.Errorf("index scenes jsonl: committed scenes for chapter %s do not form a complete partition: %w", ch.ID, err)
+		}
+		for _, sc := range chScenes {
+			finalScenes = append(finalScenes, sc)
+			finalSceneByID[sc.ID] = sc
 		}
 	}
 
@@ -226,6 +275,7 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 		}
 	}()
 	for _, stmt := range []string{
+		`DELETE FROM chapter_scene_snapshots`,
 		`DELETE FROM scene_cards_fts`,
 		`DELETE FROM scene_cards`,
 		`DELETE FROM scenes`,
@@ -243,6 +293,18 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 			scn.Ordinal, scn.BoundarySource, scn.Status,
 		); err != nil {
 			return fmt.Errorf("index scenes jsonl: insert scene %s: %w", scn.ID, err)
+		}
+	}
+	// Re-populate chapter_scene_snapshots from committed chapter_snapshot records.
+	for chapterID, committedAt := range committedAtByChapter {
+		if !chapterIDs[chapterID] {
+			continue // already reported as error above; skip stale entries
+		}
+		if _, err := tx.Exec(
+			`INSERT OR REPLACE INTO chapter_scene_snapshots (chapter_id, committed_at) VALUES (?, ?)`,
+			chapterID, committedAt,
+		); err != nil {
+			return fmt.Errorf("index scenes jsonl: update chapter snapshot %s: %w", chapterID, err)
 		}
 	}
 	for _, scn := range finalScenes {
@@ -285,4 +347,66 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 		}
 	}
 	return tx.Commit()
+}
+
+// validateJSONLScenePartition checks that the scenes for a chapter (sorted by
+// ordinal) form a complete, non-overlapping cover of all paragraphs in that
+// chapter.  paragraphs maps paragraph IDs to their chapter and ordinal.
+func validateJSONLScenePartition(chapterID string, scenes []sceneJSONLRecord, paragraphs map[string]paragraphRef) error {
+	// Collect paragraphs belonging to this chapter, sorted by ordinal.
+	type paraEntry struct {
+		id      string
+		ordinal int
+	}
+	var paras []paraEntry
+	for id, ref := range paragraphs {
+		if ref.ChapterID == chapterID {
+			paras = append(paras, paraEntry{id: id, ordinal: ref.Ordinal})
+		}
+	}
+	sort.Slice(paras, func(i, j int) bool { return paras[i].ordinal < paras[j].ordinal })
+
+	if len(paras) == 0 {
+		if len(scenes) != 0 {
+			return fmt.Errorf("chapter has no paragraphs but %d committed scene(s)", len(scenes))
+		}
+		return nil
+	}
+	if len(scenes) == 0 {
+		return fmt.Errorf("chapter has %d paragraph(s) but no committed scenes", len(paras))
+	}
+
+	ordByID := make(map[string]int, len(paras))
+	for _, p := range paras {
+		ordByID[p.id] = p.ordinal
+	}
+
+	// First scene must start at the first paragraph.
+	if scenes[0].ParagraphStart != paras[0].id {
+		return fmt.Errorf("first scene starts at paragraph %q but first paragraph is %q",
+			scenes[0].ParagraphStart, paras[0].id)
+	}
+	// Last scene must end at the last paragraph.
+	if scenes[len(scenes)-1].ParagraphEnd != paras[len(paras)-1].id {
+		return fmt.Errorf("last scene ends at paragraph %q but last paragraph is %q",
+			scenes[len(scenes)-1].ParagraphEnd, paras[len(paras)-1].id)
+	}
+	// Consecutive scenes must chain with no gap or overlap.
+	for i := 1; i < len(scenes); i++ {
+		prevEndOrd, ok := ordByID[scenes[i-1].ParagraphEnd]
+		if !ok {
+			return fmt.Errorf("scene %s paragraph_end %q not in chapter",
+				scenes[i-1].ID, scenes[i-1].ParagraphEnd)
+		}
+		curStartOrd, ok := ordByID[scenes[i].ParagraphStart]
+		if !ok {
+			return fmt.Errorf("scene %s paragraph_start %q not in chapter",
+				scenes[i].ID, scenes[i].ParagraphStart)
+		}
+		if curStartOrd != prevEndOrd+1 {
+			return fmt.Errorf("partition gap between scene %s (ends at paragraph ordinal %d) and scene %s (starts at ordinal %d)",
+				scenes[i-1].ID, prevEndOrd, scenes[i].ID, curStartOrd)
+		}
+	}
+	return nil
 }

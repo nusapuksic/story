@@ -37,6 +37,11 @@ func TestRebuildRestoresScenesAndCardsFromJSONL(t *testing.T) {
 			"status":          "generated",
 		},
 		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"committed_at": "2024-01-01T00:00:00Z",
+		},
+		map[string]any{
 			"record_type": "scene_card",
 			"scene_id":    "sc-01",
 			"title":       "Mara hides the letter",
@@ -130,6 +135,11 @@ func TestRebuildFailsOnMissingSceneParagraph(t *testing.T) {
 			"boundary_source": "explicit",
 			"status":          "generated",
 		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"committed_at": "2024-01-01T00:00:00Z",
+		},
 	})
 	err := store.Rebuild(p)
 	if err == nil || !strings.Contains(err.Error(), "missing paragraph_start") {
@@ -161,17 +171,23 @@ func TestRebuildFailsOnMissingSceneForCard(t *testing.T) {
 }
 
 func TestRebuildUsesLatestReplacementSnapshot(t *testing.T) {
-	p, p1, p2, _ := newProjectWithChapter(t)
+	p, p1, p2, p3 := newProjectWithChapter(t)
 	writeScenesJSONL(t, p, []any{
+		// First compile run: one scene covering the full chapter.
 		map[string]any{
 			"record_type":     "scene",
 			"id":              "sc-old",
 			"chapter_id":      "ch-0001",
 			"paragraph_start": p1,
-			"paragraph_end":   p2,
+			"paragraph_end":   p3,
 			"ordinal":         1,
-			"boundary_source": "explicit",
+			"boundary_source": "chapter_end",
 			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"committed_at": "2024-01-01T00:00:00Z",
 		},
 		map[string]any{
 			"record_type": "scene_card",
@@ -186,15 +202,21 @@ func TestRebuildUsesLatestReplacementSnapshot(t *testing.T) {
 			},
 			"status": "generated",
 		},
+		// Second compile run: new scene replaces old via ordinal==1 reset + new snapshot.
 		map[string]any{
 			"record_type":     "scene",
 			"id":              "sc-new",
 			"chapter_id":      "ch-0001",
 			"paragraph_start": p1,
-			"paragraph_end":   p2,
+			"paragraph_end":   p3,
 			"ordinal":         1,
-			"boundary_source": "explicit",
+			"boundary_source": "chapter_end",
 			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"committed_at": "2024-01-02T00:00:00Z",
 		},
 		map[string]any{
 			"record_type": "scene_card",
@@ -235,19 +257,25 @@ func TestRebuildUsesLatestReplacementSnapshot(t *testing.T) {
 }
 
 func TestRebuildFailureKeepsExistingIndex(t *testing.T) {
-	p, p1, _, _ := newProjectWithChapter(t)
+	p, p1, p2, p3 := newProjectWithChapter(t)
 	writeScenesJSONL(t, p, []any{
 		map[string]any{
 			"record_type":     "scene",
 			"id":              "sc-keep",
 			"chapter_id":      "ch-0001",
 			"paragraph_start": p1,
-			"paragraph_end":   p1,
+			"paragraph_end":   p3,
 			"ordinal":         1,
-			"boundary_source": "explicit",
+			"boundary_source": "chapter_end",
 			"status":          "generated",
 		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"committed_at": "2024-01-01T00:00:00Z",
+		},
 	})
+	_ = p2 // used via p1..p3 coverage
 	if err := store.Rebuild(p); err != nil {
 		t.Fatalf("initial Rebuild: %v", err)
 	}
@@ -267,6 +295,140 @@ func TestRebuildFailureKeepsExistingIndex(t *testing.T) {
 	}
 	if _, err := st.InspectScene("sc-keep"); err != nil {
 		t.Fatalf("expected previous index content to remain: %v", err)
+	}
+}
+
+// TestIncompleteJSONLSnapshotIsDiscarded verifies that scene records without a
+// following chapter_snapshot record are not loaded into the index.
+func TestIncompleteJSONLSnapshotIsDiscarded(t *testing.T) {
+	p, p1, _, p3 := newProjectWithChapter(t)
+	// Write scenes for ch-0001 WITHOUT a chapter_snapshot record.
+	writeScenesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-incomplete",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p1,
+			"paragraph_end":   p3,
+			"ordinal":         1,
+			"boundary_source": "chapter_end",
+			"status":          "generated",
+		},
+		// No chapter_snapshot: this represents an interrupted compile.
+	})
+	if err := store.Rebuild(p); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	st := openProjectStore(t, p)
+	scenes, cards, err := st.SceneCounts()
+	if err != nil {
+		t.Fatalf("SceneCounts: %v", err)
+	}
+	if scenes != 0 || cards != 0 {
+		t.Errorf("incomplete snapshot should produce no scenes/cards; got (%d, %d)", scenes, cards)
+	}
+}
+
+// TestExplicitChapterSnapshotCommitted verifies that scenes followed by a
+// chapter_snapshot record are loaded and marked committed in the index.
+func TestExplicitChapterSnapshotCommitted(t *testing.T) {
+	p, p1, _, p3 := newProjectWithChapter(t)
+	writeScenesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-full",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p1,
+			"paragraph_end":   p3,
+			"ordinal":         1,
+			"boundary_source": "chapter_end",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"committed_at": "2024-06-01T12:00:00Z",
+		},
+	})
+	if err := store.Rebuild(p); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	st := openProjectStore(t, p)
+	scenes, _, err := st.SceneCounts()
+	if err != nil {
+		t.Fatalf("SceneCounts: %v", err)
+	}
+	if scenes != 1 {
+		t.Errorf("expected 1 committed scene, got %d", scenes)
+	}
+	committed, err := st.IsChapterSnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsChapterSnapshotCommitted: %v", err)
+	}
+	if !committed {
+		t.Error("chapter_scene_snapshots should mark ch-0001 as committed after rebuild")
+	}
+}
+
+// TestInterruptedJSONLSnapshotDoesNotCorruptSubsequentCompleteRun verifies that
+// scenes from an interrupted first run are discarded when a complete second run
+// (with chapter_snapshot) follows in the same JSONL file.
+func TestInterruptedJSONLSnapshotDoesNotCorruptSubsequentCompleteRun(t *testing.T) {
+	p, p1, p2, p3 := newProjectWithChapter(t)
+	writeScenesJSONL(t, p, []any{
+		// First run (interrupted): only ordinal=1, no chapter_snapshot.
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-partial",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p1,
+			"paragraph_end":   p1,
+			"ordinal":         1,
+			"boundary_source": "explicit",
+			"status":          "generated",
+		},
+		// Second run (complete): ordinal=1 resets the pending buffer.
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-a",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p1,
+			"paragraph_end":   p1,
+			"ordinal":         1,
+			"boundary_source": "explicit",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-b",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p2,
+			"paragraph_end":   p3,
+			"ordinal":         2,
+			"boundary_source": "chapter_end",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"committed_at": "2024-06-02T00:00:00Z",
+		},
+	})
+	if err := store.Rebuild(p); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	st := openProjectStore(t, p)
+	allScenes, err := st.AllScenes()
+	if err != nil {
+		t.Fatalf("AllScenes: %v", err)
+	}
+	if len(allScenes) != 2 {
+		t.Fatalf("want 2 scenes from complete run, got %d", len(allScenes))
+	}
+	for _, sc := range allScenes {
+		if sc.ID == "sc-partial" {
+			t.Error("partial scene from interrupted run should not appear in index")
+		}
 	}
 }
 
