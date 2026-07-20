@@ -51,41 +51,80 @@ type ImportRow struct {
 // canonical chapter files).
 func Rebuild(p *project.Project) (retErr error) {
 	indexPath := p.Path(project.IndexPath)
-	if err := os.Remove(indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.MkdirAll(filepath.Dir(indexPath), 0o755); err != nil {
 		return fmt.Errorf("rebuild index: %w", err)
 	}
-	s, err := Open(indexPath)
+	tmpPath := indexPath + ".tmp"
+	_ = os.Remove(tmpPath)
+
+	s, err := Open(tmpPath)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if cerr := s.Close(); retErr == nil {
-			retErr = cerr
+		if s != nil {
+			if cerr := s.Close(); retErr == nil {
+				retErr = cerr
+			}
+		}
+		if retErr != nil {
+			_ = os.Remove(tmpPath)
 		}
 	}()
 
 	tocPath := p.Path(project.TOCPath)
 	if _, err := os.Stat(tocPath); errors.Is(err, os.ErrNotExist) {
 		// No manuscript imported yet: only index project metadata.
-		return s.IndexProject(p)
-	}
-	toc, err := manuscript.LoadTOC(tocPath)
-	if err != nil {
-		return err
-	}
-	markers := p.Config.Manuscript.SceneBreakMarkers
-	chapters := make([]*manuscript.Chapter, 0, len(toc.Chapters))
-	for _, entry := range toc.Chapters {
-		ch, err := manuscript.LoadChapter(p.Path(project.ManuscriptDir), entry, markers)
+		if err := s.IndexProject(p); err != nil {
+			return err
+		}
+	} else {
+		toc, err := manuscript.LoadTOC(tocPath)
 		if err != nil {
 			return err
 		}
-		chapters = append(chapters, ch)
+		markers := p.Config.Manuscript.SceneBreakMarkers
+		chapters := make([]*manuscript.Chapter, 0, len(toc.Chapters))
+		for _, entry := range toc.Chapters {
+			ch, err := manuscript.LoadChapter(p.Path(project.ManuscriptDir), entry, markers)
+			if err != nil {
+				return err
+			}
+			chapters = append(chapters, ch)
+		}
+		if err := s.IndexProject(p); err != nil {
+			return err
+		}
+		if err := s.IndexChapters(chapters); err != nil {
+			return err
+		}
+		if err := s.IndexScenesJSONL(p.Path(filepath.Join(project.ModelDir, "scenes.jsonl"))); err != nil {
+			return err
+		}
 	}
-	if err := s.IndexProject(p); err != nil {
+
+	if err := s.Close(); err != nil {
 		return err
 	}
-	return s.IndexChapters(chapters)
+	s = nil
+	var movedOld bool
+	backupPath := indexPath + ".bak"
+	_ = os.Remove(backupPath)
+	if err := os.Rename(indexPath, backupPath); err == nil {
+		movedOld = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("rebuild index: %w", err)
+	}
+	if err := os.Rename(tmpPath, indexPath); err != nil {
+		if movedOld {
+			_ = os.Rename(backupPath, indexPath)
+		}
+		return fmt.Errorf("rebuild index: %w", err)
+	}
+	if movedOld {
+		_ = os.Remove(backupPath)
+	}
+	return nil
 }
 
 // IndexProject stores project metadata in the index.
