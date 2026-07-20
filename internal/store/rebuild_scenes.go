@@ -42,6 +42,7 @@ type sceneCardJSONLRecord struct {
 type chapterSnapshotJSONLRecord struct {
 	RecordType  string `json:"record_type"` // "chapter_snapshot"
 	ChapterID   string `json:"chapter_id"`
+	SceneCount  *int   `json:"scene_count"`
 	CommittedAt string `json:"committed_at"`
 }
 
@@ -171,12 +172,30 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 			if strings.TrimSpace(snap.ChapterID) == "" {
 				return fmt.Errorf("index scenes jsonl: %s:%d: chapter_snapshot missing chapter_id", path, lineNo)
 			}
-			pending := pendingByChapter[snap.ChapterID]
-			if pending != nil {
-				committedByChapter[snap.ChapterID] = pending
-				committedAtByChapter[snap.ChapterID] = snap.CommittedAt
-				delete(pendingByChapter, snap.ChapterID)
+			if snap.SceneCount == nil {
+				return fmt.Errorf("index scenes jsonl: %s:%d: chapter_snapshot missing scene_count", path, lineNo)
 			}
+			if *snap.SceneCount < 0 {
+				return fmt.Errorf("index scenes jsonl: %s:%d: chapter_snapshot has invalid scene_count %d", path, lineNo, *snap.SceneCount)
+			}
+			pending := pendingByChapter[snap.ChapterID]
+			pendingCount := 0
+			if pending != nil {
+				pendingCount = len(pending)
+			}
+			if pendingCount != *snap.SceneCount {
+				return fmt.Errorf(
+					"index scenes jsonl: %s:%d: chapter_snapshot scene_count mismatch for %s: declared %d, pending %d",
+					path, lineNo, snap.ChapterID, *snap.SceneCount, pendingCount,
+				)
+			}
+			committed := make(map[int]sceneCandidate, pendingCount)
+			for ord, cand := range pending {
+				committed[ord] = cand
+			}
+			committedByChapter[snap.ChapterID] = committed
+			committedAtByChapter[snap.ChapterID] = snap.CommittedAt
+			delete(pendingByChapter, snap.ChapterID)
 		case "scene_card":
 			var rec sceneCardJSONLRecord
 			if err := json.Unmarshal(line, &rec); err != nil {
@@ -379,6 +398,12 @@ func validateJSONLScenePartition(chapterID string, scenes []sceneJSONLRecord, pa
 	ordByID := make(map[string]int, len(paras))
 	for _, p := range paras {
 		ordByID[p.id] = p.ordinal
+	}
+	for i, sc := range scenes {
+		want := i + 1
+		if sc.Ordinal != want {
+			return fmt.Errorf("scene %s has ordinal %d, expected %d", sc.ID, sc.Ordinal, want)
+		}
 	}
 
 	// First scene must start at the first paragraph.

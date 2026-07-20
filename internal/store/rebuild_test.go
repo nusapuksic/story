@@ -39,6 +39,7 @@ func TestRebuildRestoresScenesAndCardsFromJSONL(t *testing.T) {
 		map[string]any{
 			"record_type":  "chapter_snapshot",
 			"chapter_id":   "ch-0001",
+			"scene_count":  2,
 			"committed_at": "2024-01-01T00:00:00Z",
 		},
 		map[string]any{
@@ -138,6 +139,7 @@ func TestRebuildFailsOnMissingSceneParagraph(t *testing.T) {
 		map[string]any{
 			"record_type":  "chapter_snapshot",
 			"chapter_id":   "ch-0001",
+			"scene_count":  1,
 			"committed_at": "2024-01-01T00:00:00Z",
 		},
 	})
@@ -187,6 +189,7 @@ func TestRebuildUsesLatestReplacementSnapshot(t *testing.T) {
 		map[string]any{
 			"record_type":  "chapter_snapshot",
 			"chapter_id":   "ch-0001",
+			"scene_count":  1,
 			"committed_at": "2024-01-01T00:00:00Z",
 		},
 		map[string]any{
@@ -216,6 +219,7 @@ func TestRebuildUsesLatestReplacementSnapshot(t *testing.T) {
 		map[string]any{
 			"record_type":  "chapter_snapshot",
 			"chapter_id":   "ch-0001",
+			"scene_count":  1,
 			"committed_at": "2024-01-02T00:00:00Z",
 		},
 		map[string]any{
@@ -256,6 +260,214 @@ func TestRebuildUsesLatestReplacementSnapshot(t *testing.T) {
 	}
 }
 
+func TestRebuildCommittedEmptySnapshotReplacesPrevious(t *testing.T) {
+	p, p1, _, p3 := newProjectWithChapter(t)
+	writeScenesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-old",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p1,
+			"paragraph_end":   p3,
+			"ordinal":         1,
+			"boundary_source": "chapter_end",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"scene_count":  1,
+			"committed_at": "2024-01-01T00:00:00Z",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"scene_count":  0,
+			"committed_at": "2024-01-02T00:00:00Z",
+		},
+	})
+
+	if err := store.Rebuild(p); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+
+	st := openProjectStore(t, p)
+	scenes, cards, err := st.SceneCounts()
+	if err != nil {
+		t.Fatalf("SceneCounts: %v", err)
+	}
+	if scenes != 0 || cards != 0 {
+		t.Fatalf("counts = (%d, %d), want (0, 0)", scenes, cards)
+	}
+	committed, err := st.IsChapterSnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsChapterSnapshotCommitted: %v", err)
+	}
+	if !committed {
+		t.Fatal("chapter should remain committed after empty replacement snapshot")
+	}
+}
+
+func TestRebuildFailsOnSnapshotSceneCountMismatch(t *testing.T) {
+	p, p1, _, p3 := newProjectWithChapter(t)
+	writeScenesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-one",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p1,
+			"paragraph_end":   p3,
+			"ordinal":         1,
+			"boundary_source": "chapter_end",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"scene_count":  2,
+			"committed_at": "2024-01-01T00:00:00Z",
+		},
+	})
+
+	err := store.Rebuild(p)
+	if err == nil || !strings.Contains(err.Error(), "scene_count mismatch") {
+		t.Fatalf("Rebuild error = %v, want scene_count mismatch", err)
+	}
+}
+
+func TestRebuildFailsOnSceneOrdinalGap(t *testing.T) {
+	p, p1, p2, p3 := newProjectWithChapter(t)
+	writeScenesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-1",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p1,
+			"paragraph_end":   p1,
+			"ordinal":         1,
+			"boundary_source": "explicit",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-2",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p2,
+			"paragraph_end":   p3,
+			"ordinal":         3,
+			"boundary_source": "chapter_end",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"scene_count":  2,
+			"committed_at": "2024-01-01T00:00:00Z",
+		},
+	})
+
+	err := store.Rebuild(p)
+	if err == nil || !strings.Contains(err.Error(), "expected 2") {
+		t.Fatalf("Rebuild error = %v, want ordinal sequence error", err)
+	}
+}
+
+func TestRebuildFailsOnSceneOrdinalStartingAtTwo(t *testing.T) {
+	p, p1, p2, p3 := newProjectWithChapter(t)
+	writeScenesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-1",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p1,
+			"paragraph_end":   p1,
+			"ordinal":         2,
+			"boundary_source": "explicit",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-2",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p2,
+			"paragraph_end":   p3,
+			"ordinal":         3,
+			"boundary_source": "chapter_end",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"scene_count":  2,
+			"committed_at": "2024-01-01T00:00:00Z",
+		},
+	})
+
+	err := store.Rebuild(p)
+	if err == nil || !strings.Contains(err.Error(), "expected 1") {
+		t.Fatalf("Rebuild error = %v, want ordinal sequence starting at 1 error", err)
+	}
+}
+
+func TestRebuildCompleteSnapshotSurvivesInterruptedReplacement(t *testing.T) {
+	p, p1, p2, p3 := newProjectWithChapter(t)
+	writeScenesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-old-1",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p1,
+			"paragraph_end":   p1,
+			"ordinal":         1,
+			"boundary_source": "explicit",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-old-2",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p2,
+			"paragraph_end":   p3,
+			"ordinal":         2,
+			"boundary_source": "chapter_end",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"scene_count":  2,
+			"committed_at": "2024-01-01T00:00:00Z",
+		},
+		// Replacement starts but is interrupted before chapter_snapshot.
+		map[string]any{
+			"record_type":     "scene",
+			"id":              "sc-new-partial",
+			"chapter_id":      "ch-0001",
+			"paragraph_start": p1,
+			"paragraph_end":   p2,
+			"ordinal":         1,
+			"boundary_source": "explicit",
+			"status":          "generated",
+		},
+	})
+
+	if err := store.Rebuild(p); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+
+	st := openProjectStore(t, p)
+	allScenes, err := st.AllScenes()
+	if err != nil {
+		t.Fatalf("AllScenes: %v", err)
+	}
+	if len(allScenes) != 2 {
+		t.Fatalf("want 2 scenes from last committed snapshot, got %d", len(allScenes))
+	}
+	if allScenes[0].ID != "sc-old-1" || allScenes[1].ID != "sc-old-2" {
+		t.Fatalf("active scenes = %+v, want [sc-old-1 sc-old-2]", allScenes)
+	}
+}
+
 func TestRebuildFailureKeepsExistingIndex(t *testing.T) {
 	p, p1, p2, p3 := newProjectWithChapter(t)
 	writeScenesJSONL(t, p, []any{
@@ -272,6 +484,7 @@ func TestRebuildFailureKeepsExistingIndex(t *testing.T) {
 		map[string]any{
 			"record_type":  "chapter_snapshot",
 			"chapter_id":   "ch-0001",
+			"scene_count":  1,
 			"committed_at": "2024-01-01T00:00:00Z",
 		},
 	})
@@ -347,6 +560,7 @@ func TestExplicitChapterSnapshotCommitted(t *testing.T) {
 		map[string]any{
 			"record_type":  "chapter_snapshot",
 			"chapter_id":   "ch-0001",
+			"scene_count":  1,
 			"committed_at": "2024-06-01T12:00:00Z",
 		},
 	})
@@ -411,6 +625,7 @@ func TestInterruptedJSONLSnapshotDoesNotCorruptSubsequentCompleteRun(t *testing.
 		map[string]any{
 			"record_type":  "chapter_snapshot",
 			"chapter_id":   "ch-0001",
+			"scene_count":  2,
 			"committed_at": "2024-06-02T00:00:00Z",
 		},
 	})
@@ -513,13 +728,18 @@ type sceneSnapshot struct {
 
 func readSceneSnapshot(t *testing.T, p *project.Project) sceneSnapshot {
 	t.Helper()
-	st := openProjectStore(t, p)
+	st, err := store.Open(p.Path(project.IndexPath))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
 	scenes, cards, err := st.SceneCounts()
 	if err != nil {
+		_ = st.Close()
 		t.Fatalf("SceneCounts: %v", err)
 	}
 	allScenes, err := st.AllScenes()
 	if err != nil {
+		_ = st.Close()
 		t.Fatalf("AllScenes: %v", err)
 	}
 	var sceneIDs []string
@@ -528,11 +748,15 @@ func readSceneSnapshot(t *testing.T, p *project.Project) sceneSnapshot {
 	}
 	found, err := st.SearchSceneCards("hides letter", 10)
 	if err != nil {
+		_ = st.Close()
 		t.Fatalf("SearchSceneCards: %v", err)
 	}
 	var searchIDs []string
 	for _, card := range found {
 		searchIDs = append(searchIDs, card.SceneID)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Store.Close: %v", err)
 	}
 	return sceneSnapshot{
 		scenes:    scenes,

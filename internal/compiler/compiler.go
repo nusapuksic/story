@@ -232,6 +232,7 @@ func compileScenes(
 		snap := ChapterSnapshotRecord{
 			RecordType:  "chapter_snapshot",
 			ChapterID:   ch.ID,
+			SceneCount:  len(scenes),
 			CommittedAt: committedAt,
 		}
 		if err := appendJSONL(scenesFile, snap); err != nil {

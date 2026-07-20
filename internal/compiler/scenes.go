@@ -30,6 +30,7 @@ type SceneRecord struct {
 type ChapterSnapshotRecord struct {
 	RecordType  string `json:"record_type"` // "chapter_snapshot"
 	ChapterID   string `json:"chapter_id"`
+	SceneCount  int    `json:"scene_count"`
 	CommittedAt string `json:"committed_at"` // RFC3339
 }
 
@@ -338,6 +339,12 @@ func ValidateScenePartition(paragraphs []store.ParagraphRow, scenes []SceneRecor
 	ordByID := make(map[string]int, len(paragraphs))
 	for _, p := range paragraphs {
 		ordByID[p.ID] = p.Ordinal
+	}
+	for i, sc := range scenes {
+		want := i + 1
+		if sc.Ordinal != want {
+			return fmt.Errorf("scene %s has ordinal %d, expected %d", sc.ID, sc.Ordinal, want)
+		}
 	}
 
 	// First scene must start at the first paragraph.
