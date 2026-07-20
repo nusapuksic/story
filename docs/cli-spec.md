@@ -567,6 +567,7 @@ Layer 2: Scenes
 A scene is a contiguous paragraph range within one chapter.
 
 {
+  "record_type": "scene",
   "id": "sc-01JZK...",
   "chapter_id": "ch-0007",
   "paragraph_start": "p-...",
@@ -574,6 +575,17 @@ A scene is a contiguous paragraph range within one chapter.
   "ordinal": 3,
   "boundary_source": "explicit",
   "status": "verified"
+}
+
+Scenes are append-only records in model/scenes.jsonl. A committed chapter snapshot is
+declared with an explicit marker that replaces the previous committed snapshot for
+that chapter, including empty replacements:
+
+{
+  "record_type": "chapter_snapshot",
+  "chapter_id": "ch-0007",
+  "scene_count": 0,
+  "committed_at": "2024-06-01T12:00:00Z"
 }
 
 boundary_source values:

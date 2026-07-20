@@ -133,6 +133,35 @@ func TestValidateScenePartitionGapBetweenScenes(t *testing.T) {
 	}
 }
 
+func TestValidateScenePartitionOrdinalGap(t *testing.T) {
+	paragraphs := []store.ParagraphRow{
+		{ID: "p-001", Ordinal: 1},
+		{ID: "p-002", Ordinal: 2},
+		{ID: "p-003", Ordinal: 3},
+	}
+	scenes := []compiler.SceneRecord{
+		{ID: "sc-1", ParagraphStart: "p-001", ParagraphEnd: "p-001", Ordinal: 1},
+		{ID: "sc-2", ParagraphStart: "p-002", ParagraphEnd: "p-003", Ordinal: 3},
+	}
+	if err := compiler.ValidateScenePartition(paragraphs, scenes); err == nil {
+		t.Error("expected error for ordinals 1,3, got nil")
+	}
+}
+
+func TestValidateScenePartitionOrdinalStartsAtTwo(t *testing.T) {
+	paragraphs := []store.ParagraphRow{
+		{ID: "p-001", Ordinal: 1},
+		{ID: "p-002", Ordinal: 2},
+	}
+	scenes := []compiler.SceneRecord{
+		{ID: "sc-1", ParagraphStart: "p-001", ParagraphEnd: "p-001", Ordinal: 2},
+		{ID: "sc-2", ParagraphStart: "p-002", ParagraphEnd: "p-002", Ordinal: 3},
+	}
+	if err := compiler.ValidateScenePartition(paragraphs, scenes); err == nil {
+		t.Error("expected error for ordinals starting at 2, got nil")
+	}
+}
+
 func TestValidateScenePartitionNoParagraphsNoScenes(t *testing.T) {
 	if err := compiler.ValidateScenePartition(nil, nil); err != nil {
 		t.Errorf("empty partition should be valid: %v", err)
