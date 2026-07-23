@@ -7,7 +7,7 @@ This repository implements story, a local-first Go CLI that compiles a fiction m
 The application imports either:
 
 * a folder of ordered Markdown files, normally one file per chapter; or
-* a DOCX manuscript.
+* one continuous Markdown file containing the full manuscript.
 
 It normalizes the manuscript into a portable project folder, assigns stable identifiers to chapters and paragraphs, builds a rebuildable SQLite index, invokes a configured LLM for bounded extraction tasks, and answers questions using exact manuscript evidence.
 
@@ -83,7 +83,6 @@ cmd/story/
 internal/project/
 internal/config/
 internal/importmd/
-internal/importdocx/
 internal/manuscript/
 internal/compiler/
 internal/provider/
@@ -115,7 +114,9 @@ Validate every identifier returned in an LLM response against the input task or 
 
 Import policy
 
-For Markdown-folder import:
+For Markdown import:
+
+Folder mode:
 
 * prefer an explicit toc.toml;
 * otherwise accept only unique numeric filename prefixes;
@@ -126,11 +127,13 @@ For Markdown-folder import:
 * write an actionable proposed TOC when import is ambiguous;
 * do not partially mutate the canonical manuscript after a failed import.
 
-For DOCX import:
+Continuous-file mode:
 
-* preserve the original DOCX;
-* chapter detection must be conservative;
-* ambiguous chapter detection must produce a report and fail safely.
+* split only on deterministic Markdown headings or an explicit --chapter-regex;
+* support --single-chapter for manuscripts intentionally stored as one chapter;
+* reject missing or ambiguous chapter boundaries unless --single-chapter is supplied;
+* preserve the original Markdown file;
+* do not partially mutate the canonical manuscript after a failed import.
 
 LLM policy
 
@@ -169,6 +172,8 @@ Important tests include:
 * deterministic chapter ordering;
 * numeric rather than lexicographic sorting;
 * rejection of duplicate chapter numbers;
+* continuous Markdown file chapter splitting;
+* --single-chapter Markdown import;
 * proposed TOC generation;
 * no partial import after failure;
 * stable paragraph identifiers;

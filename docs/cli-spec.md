@@ -11,10 +11,10 @@ Primary purpose: Compile a novel manuscript into a local, layered, source-addres
 
 story is a local-first command-line application for importing, decomposing, indexing, and discussing long-form fiction.
 
-It accepts either:
+It accepts Markdown manuscripts in either of two forms:
 
-1. a .docx manuscript; or
-2. a folder of Markdown files, normally one file per chapter.
+1. a folder of Markdown files, normally one file per chapter; or
+2. one continuous Markdown file containing the full manuscript.
 
 The imported manuscript is normalized into a canonical project folder. The application then uses deterministic parsing and a configured LLM to construct a layered representation of the novel:
 
@@ -49,7 +49,7 @@ Every concrete generated claim must cite one or more source paragraph identifier
 
 The application must never guess chapter order when multiple plausible orderings exist.
 
-When folder ordering is ambiguous, import fails and produces an actionable proposed table of contents.
+When source ordering or chapter boundaries are ambiguous, import fails and produces an actionable recovery artifact.
 
 2.4 Deterministic code owns structure
 
@@ -338,92 +338,52 @@ The command must fail when the destination is nonempty unless --force is provide
 
 ⸻
 
-7.2 Import DOCX
+7.2 Import Markdown
 
-story import docx <file.docx>
+story import md <path>
 
-Options:
+The path may point to either:
 
---chapter-style <style>
---chapter-regex <regex>
---single-chapter
+* a directory of Markdown files, normally one file per chapter; or
+* a single continuous Markdown file containing the full manuscript.
+
+Common options:
+
 --title <title>
 --replace
 --dry-run
 
-DOCX import procedure
-
-1. Validate that the input is a readable DOCX archive.
-2. Copy the original file to source/original/.
-3. Extract document paragraphs and basic formatting.
-4. identify candidate chapter boundaries;
-5. produce an import plan;
-6. reject ambiguous plans;
-7. normalize accepted chapters to Markdown;
-8. assign chapter and paragraph identifiers;
-9. write manuscript/toc.toml;
-10. build the source index;
-11. write an import report.
-
-Chapter-boundary precedence
-
-The importer checks, in order:
-
-1. explicit --chapter-style;
-2. configured DOCX styles;
-3. headings such as Heading 1;
-4. explicit --chapter-regex;
-5. conservative built-in patterns such as:
-
-Chapter 1
-Chapter One
-CHAPTER I
-Part Two
-Prologue
-Epilogue
-
-A DOCX table of contents may be used as a hint, but not as sole authority because it may be stale.
-
-Ambiguity policy
-
-Import must fail when:
-
-* no chapter boundaries are found and --single-chapter was not supplied;
-* several heading styles produce materially different chapter structures;
-* duplicate chapter boundaries occur;
-* a substantial amount of text falls outside all proposed chapters;
-* chapter headings cannot be ordered deterministically.
-
-The importer writes:
-
-source/import-records/<run-id>/
-  report.json
-  proposed-toc.toml
-  warnings.txt
-
-No partial canonical manuscript is written after an ambiguous import.
-
-Dry run
-
-story import docx manuscript.docx --dry-run
-
-The command performs detection and writes an import report without modifying the canonical manuscript.
-
-⸻
-
-7.3 Import a Markdown folder
-
-story import md <folder>
-
-Options:
+Folder options:
 
 --toc <path>
 --pattern <glob>
---title <title>
---replace
---dry-run
 
-The expected input is one Markdown file per chapter.
+Single-file options:
+
+--chapter-heading-level <1-6>
+--chapter-regex <regex>
+--single-chapter
+
+Markdown import procedure
+
+1. Validate that the input path is a readable Markdown file or readable directory.
+2. Copy the original source file or source files to source/original/.
+3. Determine chapter boundaries using deterministic rules only.
+4. Produce an import plan.
+5. Reject ambiguous plans.
+6. Normalize accepted chapters to canonical Markdown.
+7. Assign chapter and paragraph identifiers.
+8. Write manuscript/toc.toml.
+9. Build the source index.
+10. Write an import report.
+
+The LLM is never used to determine import order, split chapters, or assign identifiers.
+
+7.2.1 Markdown folder mode
+
+story import md <folder>
+
+The expected directory input is one Markdown file per chapter.
 
 Authoritative manifest mode
 
@@ -510,6 +470,77 @@ LICENSE.md
 files outside the selected glob
 subdirectories unless explicitly listed in the manifest
 
+7.2.2 Continuous Markdown file mode
+
+story import md <file.md>
+
+The expected file input is one Markdown document containing the complete manuscript.
+The importer splits the file into canonical chapter files before indexing.
+
+Chapter-boundary precedence
+
+The importer checks, in order:
+
+1. --single-chapter, which imports the entire file as ch-0001;
+2. explicit --chapter-regex, matched against individual source lines;
+3. Markdown headings at --chapter-heading-level, defaulting to level 1 (#).
+
+When --chapter-regex contains a capture group, the first capture group is used
+as the chapter title. Otherwise the full matched line is normalized as the title.
+
+Default heading mode
+
+By default, level-one headings are treated as hard chapter boundaries:
+
+# Prologue
+# Chapter One
+# Chapter Two
+
+Each detected chapter is written to:
+
+manuscript/chapters/ch-0001.md
+manuscript/chapters/ch-0002.md
+
+The source_key for each chapter records the original file and the detected
+chapter position, for example:
+
+manuscript.md#chapter-0001
+
+Single-chapter mode
+
+story import md manuscript.md --single-chapter
+
+This imports the entire Markdown file as one canonical chapter. The chapter title
+comes from --title, then from the first level-one heading if present, then from
+the source filename.
+
+Ambiguity policy
+
+Single-file import must fail when:
+
+* no chapter boundaries are found and --single-chapter was not supplied;
+* non-empty manuscript body text appears before the first detected chapter;
+* duplicate or empty chapter headings make the split unclear;
+* a chapter boundary regex matches overlapping or zero-length sections;
+* the detected chapter order cannot be represented deterministically.
+
+When single-file chapter detection is ambiguous:
+
+1. import fails;
+2. no canonical manuscript is changed;
+3. the tool writes an import report and warnings under:
+
+source/import-records/<run-id>/
+  report.json
+  warnings.txt
+
+The recovery command should identify the least ambiguous next step, normally one
+of:
+
+story import md manuscript.md --single-chapter
+story import md manuscript.md --chapter-heading-level 2
+story import md manuscript.md --chapter-regex <regex>
+
 ⸻
 
 8. Import record
@@ -518,8 +549,8 @@ Every import creates a record:
 
 {
   "run_id": "import-01JZK...",
-  "type": "docx",
-  "source_path": "/home/user/book.docx",
+  "type": "md",
+  "source_path": "/home/user/book.md",
   "source_hash": "sha256:...",
   "imported_at": "2026-07-19T15:00:00+02:00",
   "chapters": 24,
@@ -972,8 +1003,8 @@ configured model availability
 
 12.2 Import commands
 
-story import docx <file>
 story import md <folder>
+story import md <file.md>
 story import report [<run-id>]
 
 ⸻
@@ -1263,7 +1294,7 @@ For v0.1:
 * replacement invalidates derived records whose source paragraph hashes no longer exist;
 * old import records and model-run provenance are retained.
 
-A later version should reconcile changed DOCX manuscripts against existing paragraphs using:
+A later version should reconcile changed Markdown source manuscripts against existing paragraphs using:
 
 * stable embedded identifiers where available;
 * exact text hashes;
@@ -1327,9 +1358,9 @@ The application must never:
 The first complete vertical slice includes:
 
 1. project initialization;
-2. DOCX import;
-3. ordered Markdown-folder import;
-4. ambiguity detection and proposed TOC generation;
+2. ordered Markdown-folder import;
+3. continuous Markdown-file import;
+4. ambiguity detection with proposed TOC or recovery-report generation;
 5. canonical Markdown generation;
 6. stable chapter and paragraph identifiers;
 7. SQLite indexing;
@@ -1361,12 +1392,13 @@ The first version does not include:
 * multi-book libraries;
 * translation alignment;
 * EPUB export;
+* DOCX import;
+* complete DOCX layout preservation;
+* reliable tracked-change import;
 * automatic Git operations;
 * plugin execution;
 * mobile applications;
 * autonomous agents;
-* complete DOCX layout preservation;
-* reliable tracked-change import;
 * automatic acceptance of literary interpretations.
 
 ⸻
@@ -1375,19 +1407,20 @@ The first version does not include:
 
 The CLI is considered functionally complete for v0.1 when it can:
 
-1. import a DOCX novel with recognizable chapter headings;
-2. import a folder of numerically ordered Markdown chapters;
-3. reject an ambiguously ordered folder without partial import;
-4. generate a usable proposed TOC for that folder;
-5. preserve the original source;
-6. produce canonical chapter Markdown with paragraph identifiers;
-7. compile the manuscript incrementally through a configured local model;
-8. recover from an interrupted compile;
-9. produce scenes and structured records with valid source evidence;
-10. answer factual and continuity questions with inspectable paragraph citations;
-11. state that the text does not establish something when evidence is insufficient;
-12. rebuild SQLite from the canonical project files;
-13. move the complete project folder to another machine without an application-specific export.
+1. import a folder of numerically ordered Markdown chapters;
+2. import a continuous Markdown manuscript split by deterministic chapter headings;
+3. import a continuous Markdown manuscript as a single chapter when --single-chapter is supplied;
+4. reject ambiguous source ordering or chapter boundaries without partial import;
+5. generate a usable proposed TOC or recovery report for ambiguous input;
+6. preserve the original source;
+7. produce canonical chapter Markdown with paragraph identifiers;
+8. compile the manuscript incrementally through a configured local model;
+9. recover from an interrupted compile;
+10. produce scenes and structured records with valid source evidence;
+11. answer factual and continuity questions with inspectable paragraph citations;
+12. state that the text does not establish something when evidence is insufficient;
+13. rebuild SQLite from the canonical project files;
+14. move the complete project folder to another machine without an application-specific export.
 
 ⸻
 
@@ -1398,7 +1431,6 @@ cmd/
 internal/
   project/
   config/
-  importdocx/
   importmd/
   manuscript/
   segmentation/
@@ -1443,18 +1475,18 @@ The core can be implemented in the following order:
 
 1. init and project validation
 2. Markdown-folder import
-3. canonical manuscript and paragraph IDs
-4. SQLite indexing and inspection
-5. OpenAI-compatible provider
-6. scene extraction for one chapter
-7. resumable whole-book compilation
-8. DOCX import
+3. continuous Markdown-file import
+4. canonical manuscript and paragraph IDs
+5. SQLite indexing and inspection
+6. OpenAI-compatible provider
+7. scene extraction for one chapter
+8. resumable whole-book compilation
 9. entities and narrative records
 10. evidence-backed ask
 11. review commands
 12. synthesis layers
 
-Markdown import should precede DOCX because it provides a simple fixture format for testing the rest of the compiler.
+Markdown import provides the fixture format for testing the rest of the compiler.
 
 The first end-to-end test should use a small known novel fixture and prove:
 

@@ -14,6 +14,7 @@ go build ./cmd/story
 ```
 story init ./my-novel --title "My Novel"
 story --project ./my-novel import md ./chapters
+story --project ./my-novel import md ./manuscript.md
 story --project ./my-novel status
 story --project ./my-novel inspect chapter ch-0001
 story --project ./my-novel inspect paragraph p-<ULID>
@@ -29,7 +30,7 @@ story --project ./my-novel ask --mode continuity "What has the detective already
 story --project ./my-novel ask --mode style "How is the fog used as a motif?"
 ```
 
-Markdown-folder import is deterministic: it uses an explicit `toc.toml`/`book.toml` manifest when present (or `--toc <path>`), and otherwise requires unique numeric filename prefixes (`01-road.md`, `2-house.md`). When ordering is ambiguous, the import fails without touching the canonical manuscript and writes a proposed table of contents under `source/import-records/<run-id>/proposed-toc.toml` for review.
+Markdown import accepts either a folder of chapter files or one continuous `.md` manuscript. Folder import is deterministic: it uses an explicit `toc.toml`/`book.toml` manifest when present (or `--toc <path>`), and otherwise requires unique numeric filename prefixes (`01-road.md`, `2-house.md`). Continuous-file import splits on deterministic chapter headings, or imports the whole file as one chapter with `--single-chapter`. When ordering or chapter boundaries are ambiguous, the import fails without touching the canonical manuscript and writes an actionable report under `source/import-records/<run-id>/` for review.
 
 The SQLite index at `.story/index.sqlite` is a rebuildable projection of the canonical project files; deleting it never loses data (`story index rebuild` reconstructs it).
 
