@@ -138,6 +138,27 @@ func Open(dir string) (*Project, error) {
 	return &Project{Dir: dir, Config: cfg}, nil
 }
 
+// OpenOrInit loads an existing project rooted at dir, or initializes the
+// canonical layout when story.toml is missing.
+func OpenOrInit(dir string, opts InitOptions) (*Project, bool, error) {
+	if _, err := os.Stat(filepath.Join(dir, config.FileName)); err == nil {
+		p, err := Open(dir)
+		return p, false, err
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, false, fmt.Errorf("open %s: %w: %v", dir, ErrInvalidProject, err)
+	}
+
+	p, err := Init(dir, InitOptions{
+		Title:    opts.Title,
+		Language: opts.Language,
+		Force:    true,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return p, true, nil
+}
+
 // Path returns an absolute path inside the project.
 func (p *Project) Path(rel string) string {
 	return filepath.Join(p.Dir, rel)

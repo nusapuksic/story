@@ -53,11 +53,14 @@ func TestParseSceneCardResponseUnknownParagraphID(t *testing.T) {
 }
 
 func TestParseSceneCardResponseMissingTitle(t *testing.T) {
-	raw := `{"summary": "Summary.", "evidence": []}`
+	raw := `{"summary": "Mara receives a letter and hides it.", "evidence": []}`
 	pidSet := map[string]bool{}
-	_, err := compiler.ParseSceneCardResponseForTest(raw, "sc-001", pidSet, "run-001", "model")
-	if err == nil {
-		t.Fatal("expected error for missing title")
+	card, err := compiler.ParseSceneCardResponseForTest(raw, "sc-001", pidSet, "run-001", "model")
+	if err != nil {
+		t.Fatalf("expected missing title to be derived, got %v", err)
+	}
+	if card.Title != "Mara receives a letter and hides it" {
+		t.Errorf("Title = %q", card.Title)
 	}
 }
 

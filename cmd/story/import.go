@@ -30,9 +30,12 @@ func newImportMDCmd() *cobra.Command {
 		Short: "Import Markdown from a chapter folder or continuous file",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := openProject()
+			p, initialized, err := project.OpenOrInit(flags.projectDir, project.InitOptions{Title: opts.Title})
 			if err != nil {
 				return err
+			}
+			if initialized && !flags.jsonOut {
+				info("Initialized project %q (%s) in %s", p.Config.Title, p.Config.ProjectID, flags.projectDir)
 			}
 			res, err := importmd.Run(p, args[0], opts)
 			if err != nil {

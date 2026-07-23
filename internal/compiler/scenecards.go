@@ -141,11 +141,13 @@ func parseSceneCardResponse(
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
 		return nil, fmt.Errorf("parse scene card response for %s: %w", sceneID, err)
 	}
-	if strings.TrimSpace(raw.Title) == "" {
-		return nil, fmt.Errorf("scene card for %s: missing title", sceneID)
-	}
-	if strings.TrimSpace(raw.Summary) == "" {
+	summary := strings.TrimSpace(raw.Summary)
+	if summary == "" {
 		return nil, fmt.Errorf("scene card for %s: missing summary", sceneID)
+	}
+	title := strings.TrimSpace(raw.Title)
+	if title == "" {
+		title = deriveSceneCardTitle(summary, sceneID)
 	}
 	// Validate evidence paragraph IDs.
 	for _, pid := range raw.Evidence {
@@ -157,8 +159,8 @@ func parseSceneCardResponse(
 	return &SceneCardRecord{
 		RecordType:   "scene_card",
 		SceneID:      sceneID,
-		Title:        strings.TrimSpace(raw.Title),
-		Summary:      strings.TrimSpace(raw.Summary),
+		Title:        title,
+		Summary:      summary,
 		POV:          raw.POV,
 		Participants: raw.Participants,
 		Locations:    raw.Locations,
@@ -171,6 +173,46 @@ func parseSceneCardResponse(
 		},
 		Status: "generated",
 	}, nil
+}
+
+func deriveSceneCardTitle(summary, sceneID string) string {
+	const (
+		maxTitleWords = 12
+		maxTitleRunes = 80
+	)
+
+	words := strings.Fields(summary)
+	if len(words) == 0 {
+		return fallbackSceneCardTitle(sceneID)
+	}
+	if len(words) > maxTitleWords {
+		words = words[:maxTitleWords]
+	}
+
+	title := trimDerivedTitle(strings.Join(words, " "))
+	if len([]rune(title)) > maxTitleRunes {
+		runes := []rune(title)
+		title = string(runes[:maxTitleRunes])
+		if i := strings.LastIndex(title, " "); i > 0 {
+			title = title[:i]
+		}
+		title = trimDerivedTitle(title)
+	}
+	if title == "" {
+		return fallbackSceneCardTitle(sceneID)
+	}
+	return title
+}
+
+func trimDerivedTitle(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, `"'`)
+	s = strings.TrimRight(s, ".,;:!?-")
+	return strings.TrimSpace(strings.Trim(s, `"'`))
+}
+
+func fallbackSceneCardTitle(sceneID string) string {
+	return "Scene " + sceneID
 }
 
 // buildSceneCardPrompt constructs the user-turn message for scene card
