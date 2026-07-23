@@ -11,8 +11,9 @@ import (
 
 // fakeProvider returns a fixed response for every Generate call.
 type fakeProvider struct {
-	response string
-	err      error
+	response      string
+	err           error
+	gotNilContext bool
 }
 
 func (f *fakeProvider) Health(_ context.Context) error { return f.err }
@@ -22,7 +23,8 @@ func (f *fakeProvider) Models(_ context.Context) ([]provider.ModelInfo, error) {
 func (f *fakeProvider) Capabilities(_ context.Context, _ string) (provider.Capabilities, error) {
 	return provider.Capabilities{Chat: true, JSONMode: true}, f.err
 }
-func (f *fakeProvider) Generate(_ context.Context, _ provider.GenerationRequest) (provider.GenerationResponse, error) {
+func (f *fakeProvider) Generate(ctx context.Context, _ provider.GenerationRequest) (provider.GenerationResponse, error) {
+	f.gotNilContext = ctx == nil
 	return provider.GenerationResponse{Content: f.response}, f.err
 }
 func (f *fakeProvider) Embed(_ context.Context, _ provider.EmbeddingRequest) (provider.EmbeddingResponse, error) {
@@ -72,6 +74,20 @@ func TestAskReturnsAnswer(t *testing.T) {
 	}
 	if ans.Evidence[0].ParagraphID != pid {
 		t.Errorf("expected evidence paragraph %s, got %s", pid, ans.Evidence[0].ParagraphID)
+	}
+}
+
+func TestAskNilContextUsesBackground(t *testing.T) {
+	st := openTestStore(t)
+	_ = seedStore(t, st)
+
+	fake := &fakeProvider{response: `{"answer":"She hides it.","evidence":[],"uncertainties":[]}`}
+	_, err := query.Ask(nil, st, fake, "fake-model", "Where does Mara put the letter?", query.Options{})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if fake.gotNilContext {
+		t.Fatal("provider received nil context")
 	}
 }
 

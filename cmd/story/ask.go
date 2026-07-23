@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -39,7 +40,7 @@ Modes:
   development     Character arcs and plot progression`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAsk(args[0], mode, chapterID, maxEvidence, includeGenerated)
+			return runAsk(cmd.Context(), args[0], mode, chapterID, maxEvidence, includeGenerated)
 		},
 	}
 	cmd.Flags().StringVar(&mode, "mode", "recall",
@@ -53,7 +54,7 @@ Modes:
 	return cmd
 }
 
-func runAsk(question, mode, chapterID string, maxEvidence int, includeGenerated bool) error {
+func runAsk(ctx context.Context, question, mode, chapterID string, maxEvidence int, includeGenerated bool) error {
 	p, err := openProject()
 	if err != nil {
 		return err
@@ -80,7 +81,7 @@ func runAsk(question, mode, chapterID string, maxEvidence int, includeGenerated 
 		IncludeGenerated: includeGenerated,
 	}
 
-	ans, err := query.Ask(nil, st, prov, model, question, opts)
+	ans, err := query.Ask(ctx, st, prov, model, question, opts)
 	if err != nil {
 		if errors.Is(err, query.ErrInsufficientEvidence) {
 			// Use a distinct error type so the CLI can return exit code 40.

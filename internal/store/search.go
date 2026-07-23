@@ -104,12 +104,12 @@ func (s *Store) queryFTSIDs(query string, args ...any) ([]string, error) {
 }
 
 // sanitizeFTSQuery converts a free-text user query into a safe FTS5 MATCH
-// expression.  It keeps letters, digits, and hyphens; replaces everything
-// else with spaces; then trims and collapses whitespace.
+// expression.  It keeps letters and digits; replaces everything else with
+// spaces; then trims and collapses whitespace.
 func sanitizeFTSQuery(q string) string {
 	var b strings.Builder
 	for _, r := range q {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			b.WriteRune(r)
 		} else {
 			b.WriteRune(' ')

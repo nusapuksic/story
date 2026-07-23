@@ -149,3 +149,23 @@ func TestSearchSanitizesSpecialChars(t *testing.T) {
 		t.Fatalf("Search with special chars: %v", err)
 	}
 }
+
+func TestSearchSanitizesHyphenatedTerms(t *testing.T) {
+	st := openTestStore(t)
+
+	if err := st.InsertChapterForTest("ch-0001", 1, "Chapter"); err != nil {
+		t.Fatalf("insert chapter: %v", err)
+	}
+	if err := st.InsertParagraphWithTextForTest("p-0001", "ch-0001", 1,
+		"The whole book was beautifully maintained."); err != nil {
+		t.Fatalf("insert paragraph: %v", err)
+	}
+
+	result, err := retrieval.Search(st, "whole-book", retrieval.Options{})
+	if err != nil {
+		t.Fatalf("Search with hyphenated term: %v", err)
+	}
+	if len(result.Paragraphs) == 0 || result.Paragraphs[0].ID != "p-0001" {
+		t.Fatalf("expected p-0001 for hyphenated query, got %+v", result.Paragraphs)
+	}
+}

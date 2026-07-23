@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/nusapuksic/story/internal/ids"
@@ -35,13 +36,120 @@ type SceneCardGeneration struct {
 
 // rawSceneCard is the LLM-returned JSON before validation.
 type rawSceneCard struct {
-	Title        string   `json:"title"`
-	Summary      string   `json:"summary"`
-	POV          []string `json:"pov"`
-	Participants []string `json:"participants"`
-	Locations    []string `json:"locations"`
-	Unresolved   []string `json:"unresolved"`
-	Evidence     []string `json:"evidence"`
+	Title        flexibleString     `json:"title"`
+	Summary      flexibleString     `json:"summary"`
+	POV          flexibleStringList `json:"pov"`
+	Participants flexibleStringList `json:"participants"`
+	Locations    flexibleStringList `json:"locations"`
+	Unresolved   flexibleStringList `json:"unresolved"`
+	Evidence     []string           `json:"evidence"`
+}
+
+type flexibleString string
+
+func (s *flexibleString) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*s = flexibleString(text)
+		return nil
+	}
+
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*s = flexibleString(jsonText(value))
+	return nil
+}
+
+type flexibleStringList []string
+
+func (s *flexibleStringList) UnmarshalJSON(data []byte) error {
+	var items []json.RawMessage
+	if err := json.Unmarshal(data, &items); err == nil {
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			var text flexibleString
+			if err := json.Unmarshal(item, &text); err != nil {
+				return err
+			}
+			if value := strings.TrimSpace(string(text)); value != "" {
+				out = append(out, value)
+			}
+		}
+		*s = out
+		return nil
+	}
+
+	var text flexibleString
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+	if value := strings.TrimSpace(string(text)); value != "" {
+		*s = []string{value}
+	} else {
+		*s = nil
+	}
+	return nil
+}
+
+func jsonText(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	case bool:
+		return fmt.Sprint(v)
+	case float64:
+		return fmt.Sprint(v)
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if text := jsonText(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "; ")
+	case map[string]any:
+		return objectText(v)
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func objectText(value map[string]any) string {
+	for _, key := range []string{
+		"plot_overview",
+		"summary",
+		"action",
+		"description",
+		"text",
+		"statement",
+		"title",
+		"name",
+		"value",
+		"paragraph_id",
+		"id",
+	} {
+		if text := jsonText(value[key]); text != "" {
+			return text
+		}
+	}
+
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if text := jsonText(value[key]); text != "" {
+			parts = append(parts, key+": "+text)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // extractSceneCard calls the LLM extraction prompt for one scene, validates
@@ -140,10 +248,13 @@ func parseSceneCardResponse(
 
 	var raw rawSceneCard
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+		if isTruncatedJSONError(err) {
+			return fallbackSceneCardFromSceneText(sceneID, paragraphs, runID, model), nil
+		}
 		return nil, fmt.Errorf("parse scene card response for %s: %w", sceneID, err)
 	}
-	title := strings.TrimSpace(raw.Title)
-	summary := strings.TrimSpace(raw.Summary)
+	title := strings.TrimSpace(string(raw.Title))
+	summary := strings.TrimSpace(string(raw.Summary))
 	if summary == "" {
 		summary = deriveSceneCardSummary(title, paragraphs, sceneID)
 	}
@@ -162,10 +273,10 @@ func parseSceneCardResponse(
 		SceneID:      sceneID,
 		Title:        title,
 		Summary:      summary,
-		POV:          raw.POV,
-		Participants: raw.Participants,
-		Locations:    raw.Locations,
-		Unresolved:   raw.Unresolved,
+		POV:          []string(raw.POV),
+		Participants: []string(raw.Participants),
+		Locations:    []string(raw.Locations),
+		Unresolved:   []string(raw.Unresolved),
 		Evidence:     raw.Evidence,
 		Generation: SceneCardGeneration{
 			RunID:         runID,
@@ -174,6 +285,31 @@ func parseSceneCardResponse(
 		},
 		Status: "generated",
 	}, nil
+}
+
+func isTruncatedJSONError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "unexpected end of JSON input") || strings.Contains(msg, "unexpected EOF")
+}
+
+func fallbackSceneCardFromSceneText(sceneID string, paragraphs []store.ParagraphRow, runID, model string) *SceneCardRecord {
+	summary, evidence := deriveSceneTextSummaryEvidence(paragraphs)
+	if summary == "" {
+		summary = fallbackSceneCardTitle(sceneID) + "."
+	}
+	return &SceneCardRecord{
+		RecordType: "scene_card",
+		SceneID:    sceneID,
+		Title:      deriveSceneCardTitle(summary, sceneID),
+		Summary:    summary,
+		Evidence:   evidence,
+		Generation: SceneCardGeneration{
+			RunID:         runID,
+			Model:         model,
+			PromptVersion: "scene-extraction-v1",
+		},
+		Status: "generated",
+	}
 }
 
 func deriveSceneCardSummary(title string, paragraphs []store.ParagraphRow, sceneID string) string {
@@ -187,6 +323,11 @@ func deriveSceneCardSummary(title string, paragraphs []store.ParagraphRow, scene
 }
 
 func deriveSceneTextSummary(paragraphs []store.ParagraphRow) string {
+	summary, _ := deriveSceneTextSummaryEvidence(paragraphs)
+	return summary
+}
+
+func deriveSceneTextSummaryEvidence(paragraphs []store.ParagraphRow) (string, []string) {
 	const maxSummaryRunes = 240
 
 	for _, p := range paragraphs {
@@ -205,9 +346,12 @@ func deriveSceneTextSummary(paragraphs []store.ParagraphRow) string {
 			}
 			text = strings.TrimSpace(text) + "..."
 		}
-		return text
+		if p.ID == "" {
+			return text, nil
+		}
+		return text, []string{p.ID}
 	}
-	return ""
+	return "", nil
 }
 
 func deriveSceneCardTitle(summary, sceneID string) string {

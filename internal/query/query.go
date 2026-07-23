@@ -80,6 +80,9 @@ func Ask(
 	question string,
 	opts Options,
 ) (*Answer, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if opts.Mode == "" {
 		opts.Mode = "recall"
 	}

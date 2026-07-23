@@ -64,6 +64,32 @@ func TestParseSceneCardResponseMissingTitle(t *testing.T) {
 	}
 }
 
+func TestParseSceneCardResponseObjectSummary(t *testing.T) {
+	raw := `{
+		"scene_cards": [{"id": "card_1", "action": "Mara finds a letter."}],
+		"summary": {
+			"plot_overview": "Mara finds the letter and hides it.",
+			"themes": ["secrecy", "fear"]
+		},
+		"participants": [{"name": "Mara", "role": "protagonist"}],
+		"evidence": []
+	}`
+	pidSet := map[string]bool{}
+	card, err := compiler.ParseSceneCardResponseForTest(raw, "sc-001", pidSet, "run-001", "model")
+	if err != nil {
+		t.Fatalf("expected object summary to be coerced, got %v", err)
+	}
+	if card.Summary != "Mara finds the letter and hides it." {
+		t.Errorf("Summary = %q", card.Summary)
+	}
+	if card.Title != "Mara finds the letter and hides it" {
+		t.Errorf("Title = %q", card.Title)
+	}
+	if len(card.Participants) != 1 || card.Participants[0] != "Mara" {
+		t.Errorf("Participants = %v", card.Participants)
+	}
+}
+
 func TestParseSceneCardResponseMissingSummary(t *testing.T) {
 	raw := `{"title": "Mara hides the letter", "evidence": []}`
 	pidSet := map[string]bool{}
@@ -147,6 +173,33 @@ func TestExtractSceneCardMissingTitleAndSummaryUsesSceneText(t *testing.T) {
 	}
 	if card.Title != "She found the letter" {
 		t.Errorf("Title = %q", card.Title)
+	}
+}
+
+func TestExtractSceneCardTruncatedJSONUsesSceneText(t *testing.T) {
+	paragraphs := []store.ParagraphRow{
+		{ID: "p-A", ChapterID: "ch-0001", Ordinal: 1, Text: "Mara accepts the key and enters the lower vault. The guard waits outside."},
+	}
+	scene := store.SceneRow{
+		ID:             "sc-001",
+		ChapterID:      "ch-0001",
+		ParagraphStart: "p-A",
+		ParagraphEnd:   "p-A",
+	}
+	fake := &fakeProvider{response: `{"scene_card":{"plot_summary":"Mara accepts the`}
+
+	card, err := compiler.ExtractSceneCardForTest(fake, scene, paragraphs, "test-model")
+	if err != nil {
+		t.Fatalf("expected truncated JSON to fall back to scene text, got %v", err)
+	}
+	if card.Summary != "Mara accepts the key and enters the lower vault." {
+		t.Errorf("Summary = %q", card.Summary)
+	}
+	if card.Title != "Mara accepts the key and enters the lower vault" {
+		t.Errorf("Title = %q", card.Title)
+	}
+	if len(card.Evidence) != 1 || card.Evidence[0] != "p-A" {
+		t.Errorf("Evidence = %v", card.Evidence)
 	}
 }
 
