@@ -13,7 +13,7 @@ func ParseSceneCardResponseForTest(
 	pidSet map[string]bool,
 	runID, model string,
 ) (*SceneCardRecord, error) {
-	return parseSceneCardResponse(content, sceneID, pidSet, runID, model)
+	return parseSceneCardResponse(content, sceneID, pidSet, nil, runID, model)
 }
 
 // ExtractSceneCardForTest exercises extractSceneCard with a real provider.

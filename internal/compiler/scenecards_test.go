@@ -65,11 +65,14 @@ func TestParseSceneCardResponseMissingTitle(t *testing.T) {
 }
 
 func TestParseSceneCardResponseMissingSummary(t *testing.T) {
-	raw := `{"title": "Title.", "evidence": []}`
+	raw := `{"title": "Mara hides the letter", "evidence": []}`
 	pidSet := map[string]bool{}
-	_, err := compiler.ParseSceneCardResponseForTest(raw, "sc-001", pidSet, "run-001", "model")
-	if err == nil {
-		t.Fatal("expected error for missing summary")
+	card, err := compiler.ParseSceneCardResponseForTest(raw, "sc-001", pidSet, "run-001", "model")
+	if err != nil {
+		t.Fatalf("expected missing summary to be derived, got %v", err)
+	}
+	if card.Summary != "Mara hides the letter" {
+		t.Errorf("Summary = %q", card.Summary)
 	}
 }
 
@@ -120,6 +123,30 @@ func TestExtractSceneCardWithFakeProvider(t *testing.T) {
 	}
 	if len(card.Evidence) != 2 {
 		t.Errorf("Evidence = %v", card.Evidence)
+	}
+}
+
+func TestExtractSceneCardMissingTitleAndSummaryUsesSceneText(t *testing.T) {
+	paragraphs := []store.ParagraphRow{
+		{ID: "p-A", ChapterID: "ch-0001", Ordinal: 1, Text: "She found the letter. She hid it under the stove."},
+	}
+	scene := store.SceneRow{
+		ID:             "sc-001",
+		ChapterID:      "ch-0001",
+		ParagraphStart: "p-A",
+		ParagraphEnd:   "p-A",
+	}
+	fake := &fakeProvider{response: `{"evidence": []}`}
+
+	card, err := compiler.ExtractSceneCardForTest(fake, scene, paragraphs, "test-model")
+	if err != nil {
+		t.Fatalf("expected missing title and summary to be derived, got %v", err)
+	}
+	if card.Summary != "She found the letter." {
+		t.Errorf("Summary = %q", card.Summary)
+	}
+	if card.Title != "She found the letter" {
+		t.Errorf("Title = %q", card.Title)
 	}
 }
 

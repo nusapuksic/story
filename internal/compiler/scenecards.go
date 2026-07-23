@@ -98,7 +98,7 @@ func extractSceneCard(
 		return nil, fmt.Errorf("scene card LLM call for scene %s: %w", scene.ID, err)
 	}
 
-	card, parseErr := parseSceneCardResponse(resp.Content, scene.ID, pidSet, runID(run), model)
+	card, parseErr := parseSceneCardResponse(resp.Content, scene.ID, pidSet, paragraphs, runID(run), model)
 	status := TaskStatusCompleted
 	errMsg := ""
 	if parseErr != nil {
@@ -123,6 +123,7 @@ func extractSceneCard(
 func parseSceneCardResponse(
 	content, sceneID string,
 	pidSet map[string]bool,
+	paragraphs []store.ParagraphRow,
 	runID, model string,
 ) (*SceneCardRecord, error) {
 	content = strings.TrimSpace(content)
@@ -141,11 +142,11 @@ func parseSceneCardResponse(
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
 		return nil, fmt.Errorf("parse scene card response for %s: %w", sceneID, err)
 	}
+	title := strings.TrimSpace(raw.Title)
 	summary := strings.TrimSpace(raw.Summary)
 	if summary == "" {
-		return nil, fmt.Errorf("scene card for %s: missing summary", sceneID)
+		summary = deriveSceneCardSummary(title, paragraphs, sceneID)
 	}
-	title := strings.TrimSpace(raw.Title)
 	if title == "" {
 		title = deriveSceneCardTitle(summary, sceneID)
 	}
@@ -173,6 +174,40 @@ func parseSceneCardResponse(
 		},
 		Status: "generated",
 	}, nil
+}
+
+func deriveSceneCardSummary(title string, paragraphs []store.ParagraphRow, sceneID string) string {
+	if title = strings.TrimSpace(title); title != "" {
+		return title
+	}
+	if summary := deriveSceneTextSummary(paragraphs); summary != "" {
+		return summary
+	}
+	return fallbackSceneCardTitle(sceneID) + "."
+}
+
+func deriveSceneTextSummary(paragraphs []store.ParagraphRow) string {
+	const maxSummaryRunes = 240
+
+	for _, p := range paragraphs {
+		text := strings.Join(strings.Fields(p.Text), " ")
+		if text == "" {
+			continue
+		}
+		if i := strings.IndexAny(text, ".!?"); i >= 0 {
+			text = text[:i+1]
+		}
+		runes := []rune(text)
+		if len(runes) > maxSummaryRunes {
+			text = string(runes[:maxSummaryRunes])
+			if i := strings.LastIndex(text, " "); i > 0 {
+				text = text[:i]
+			}
+			text = strings.TrimSpace(text) + "..."
+		}
+		return text
+	}
+	return ""
 }
 
 func deriveSceneCardTitle(summary, sceneID string) string {
