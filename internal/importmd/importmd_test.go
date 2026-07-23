@@ -179,6 +179,109 @@ func TestImportManifestMissingFileFails(t *testing.T) {
 	}
 }
 
+func TestImportSingleFileHeadingSplit(t *testing.T) {
+	p := newTestProject(t)
+	src := filepath.Join(t.TempDir(), "manuscript.md")
+	content := "# The Road\n\nMara walked the road.\n\n# The House\n\nThe house waited."
+	if err := os.WriteFile(src, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(p, src, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Chapters != 2 || res.Paragraphs != 2 {
+		t.Fatalf("result = %+v, want 2 chapters and 2 paragraphs", res)
+	}
+	got := chapterTitles(t, p)
+	want := []string{"The Road", "The House"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("chapter %d title = %q, want %q", i+1, got[i], want[i])
+		}
+	}
+	toc, err := manuscript.LoadTOC(p.Path(project.TOCPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if toc.Chapters[0].SourceKey != "manuscript.md#chapter-0001" {
+		t.Errorf("source key = %q", toc.Chapters[0].SourceKey)
+	}
+	preserved := p.Path(filepath.Join(project.SourceOriginalDir, res.RunID, "manuscript.md"))
+	if _, err := os.Stat(preserved); err != nil {
+		t.Errorf("original single-file source not preserved: %v", err)
+	}
+}
+
+func TestImportSingleFileSingleChapter(t *testing.T) {
+	p := newTestProject(t)
+	src := filepath.Join(t.TempDir(), "draft.md")
+	if err := os.WriteFile(src, []byte("Mara walked the road.\n\nThe house waited."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(p, src, Options{SingleChapter: true, Title: "Whole Draft"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Chapters != 1 || res.Paragraphs != 2 {
+		t.Fatalf("result = %+v, want 1 chapter and 2 paragraphs", res)
+	}
+	got := chapterTitles(t, p)
+	if got[0] != "Whole Draft" {
+		t.Errorf("chapter title = %q, want Whole Draft", got[0])
+	}
+}
+
+func TestImportSingleFileRegexSplit(t *testing.T) {
+	p := newTestProject(t)
+	src := filepath.Join(t.TempDir(), "manuscript.md")
+	content := "Chapter One\n\nMara walked the road.\n\nChapter Two\n\nThe house waited."
+	if err := os.WriteFile(src, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(p, src, Options{ChapterRegex: `^Chapter (.+)$`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Chapters != 2 || res.Paragraphs != 2 {
+		t.Fatalf("result = %+v, want 2 chapters and 2 paragraphs", res)
+	}
+	got := chapterTitles(t, p)
+	want := []string{"One", "Two"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("chapter %d title = %q, want %q", i+1, got[i], want[i])
+		}
+	}
+}
+
+func TestImportSingleFileAmbiguousNoHeading(t *testing.T) {
+	p := newTestProject(t)
+	src := filepath.Join(t.TempDir(), "manuscript.md")
+	if err := os.WriteFile(src, []byte("Mara walked the road without a chapter heading."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(p, src, Options{})
+	if !errors.Is(err, ErrAmbiguousOrder) {
+		t.Fatalf("err = %v, want ErrAmbiguousOrder", err)
+	}
+	if _, err := os.Stat(p.Path(project.TOCPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Error("canonical toc.toml was written on ambiguous single-file import")
+	}
+	report := p.Path(filepath.Join(project.ImportRecordsDir, res.RunID, "report.json"))
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("ambiguous import report: %v", err)
+	}
+	if !strings.Contains(string(data), `"status": "ambiguous"`) {
+		t.Errorf("report does not mark ambiguity: %s", data)
+	}
+}
+
 func TestImportConflictWithoutReplace(t *testing.T) {
 	p := newTestProject(t)
 	if _, err := Run(p, "testdata/ordered", Options{}); err != nil {

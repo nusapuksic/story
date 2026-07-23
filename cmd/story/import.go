@@ -26,8 +26,8 @@ func newImportCmd() *cobra.Command {
 func newImportMDCmd() *cobra.Command {
 	var opts importmd.Options
 	cmd := &cobra.Command{
-		Use:   "md <folder>",
-		Short: "Import a folder of Markdown chapter files",
+		Use:   "md <path>",
+		Short: "Import Markdown from a chapter folder or continuous file",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := openProject()
@@ -63,6 +63,9 @@ func newImportMDCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Title, "title", "", "project title override")
 	cmd.Flags().BoolVar(&opts.Replace, "replace", false, "replace an existing canonical manuscript")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "detect and report without modifying the manuscript")
+	cmd.Flags().IntVar(&opts.ChapterHeadingLevel, "chapter-heading-level", 1, "heading level for splitting a continuous Markdown file")
+	cmd.Flags().StringVar(&opts.ChapterRegex, "chapter-regex", "", "line regex for chapter boundaries in a continuous Markdown file")
+	cmd.Flags().BoolVar(&opts.SingleChapter, "single-chapter", false, "import a continuous Markdown file as one chapter")
 	return cmd
 }
 

@@ -16,13 +16,16 @@ import (
 	"github.com/nusapuksic/story/internal/store"
 )
 
-// Options control a Markdown-folder import.
+// Options control a Markdown import.
 type Options struct {
-	TOC     string // explicit manifest path (--toc)
-	Pattern string // source file glob (--pattern), default *.md
-	Title   string // project title override (--title)
-	Replace bool   // replace an existing canonical manuscript (--replace)
-	DryRun  bool   // detect and report without modifying the manuscript (--dry-run)
+	TOC                 string // explicit manifest path (--toc), folder mode only
+	Pattern             string // source file glob (--pattern), folder mode only, default *.md
+	Title               string // project title override (--title)
+	Replace             bool   // replace an existing canonical manuscript (--replace)
+	DryRun              bool   // detect and report without modifying the manuscript (--dry-run)
+	ChapterHeadingLevel int    // Markdown heading level for continuous files, default 1
+	ChapterRegex        string // line regex for continuous-file chapter boundaries
+	SingleChapter       bool   // import a continuous file as one chapter
 }
 
 // Result summarizes a completed (or dry-run) import.
@@ -51,17 +54,38 @@ type Report struct {
 	Status     string   `json:"status"`
 }
 
-// Run imports a folder of Markdown chapter files into the project's
-// canonical manuscript. On ambiguous ordering it writes a proposed manifest
-// under source/import-records/<run-id>/ and returns ErrAmbiguousOrder
-// without changing the canonical manuscript.
-func Run(p *project.Project, folder string, opts Options) (*Result, error) {
+type plannedChapter struct {
+	Title         string
+	FallbackTitle string
+	SourceKey     string
+	Content       string
+}
+
+type preserveFile struct {
+	Source string
+	Name   string
+}
+
+type preparedImport struct {
+	Chapters      []*manuscript.Chapter
+	Paragraphs    int
+	Warnings      []string
+	ManifestTitle string
+	Preserve      []preserveFile
+}
+
+// Run imports Markdown source into the project's canonical manuscript. The
+// source path may be either a folder of chapter files or one continuous
+// Markdown file. On ambiguous ordering or chapter detection it writes an
+// import record and returns ErrAmbiguousOrder without changing the canonical
+// manuscript.
+func Run(p *project.Project, sourcePath string, opts Options) (*Result, error) {
 	runID := ids.NewImportRunID()
 	res := &Result{RunID: runID, DryRun: opts.DryRun}
 
-	absFolder, err := filepath.Abs(folder)
+	absSource, err := filepath.Abs(sourcePath)
 	if err != nil {
-		absFolder = folder
+		absSource = sourcePath
 	}
 
 	tocExists := false
@@ -69,94 +93,31 @@ func Run(p *project.Project, folder string, opts Options) (*Result, error) {
 		tocExists = true
 	}
 	if tocExists && !opts.Replace && !opts.DryRun {
-		return nil, fmt.Errorf("import md %s: %w", folder, ErrManuscriptConflict)
+		return nil, fmt.Errorf("import md %s: %w", sourcePath, ErrManuscriptConflict)
 	}
 
-	eligible, err := discover(folder, opts.Pattern)
+	info, err := os.Stat(sourcePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("import md %s: %w", sourcePath, err)
 	}
 
-	manifestPath, err := findManifest(folder, opts.TOC)
-	if err != nil {
-		return nil, err
-	}
-
-	var (
-		sources       []sourceChapter
-		manifestTitle string
-	)
-	if manifestPath != "" {
-		m, err := loadManifest(manifestPath)
-		if err != nil {
-			return nil, err
-		}
-		manifestTitle = m.Title
-		var warnings []string
-		sources, warnings, err = orderFromManifest(folder, m, eligible)
-		if err != nil {
-			return nil, err
-		}
-		res.Warnings = append(res.Warnings, warnings...)
+	var prep *preparedImport
+	if info.IsDir() {
+		prep, err = prepareFolderImport(p, runID, res, sourcePath, absSource, opts)
 	} else {
-		sources, err = orderFromNumericPrefixes(eligible)
-		if errors.Is(err, ErrAmbiguousOrder) {
-			proposedPath, werr := writeAmbiguityRecord(p, runID, absFolder, eligible, err)
-			if werr != nil {
-				return nil, errors.Join(err, werr)
-			}
-			res.ProposedTOC = proposedPath
-			return res, fmt.Errorf("%w\nNo manuscript files were imported.\nA proposed table of contents was written to:\n%s\nReview the file and run:\nstory import md %s --toc %s",
-				err, proposedPath, folder, proposedPath)
-		}
-		if err != nil {
-			return nil, err
-		}
+		prep, err = prepareFileImport(p, runID, sourcePath, absSource, opts)
 	}
-
-	// Parse everything in memory before any canonical write so that a
-	// failed import never partially mutates the manuscript.
-	markers := p.Config.Manuscript.SceneBreakMarkers
-	chapters := make([]*manuscript.Chapter, 0, len(sources))
-	paragraphs := 0
-	for i, src := range sources {
-		raw, err := os.ReadFile(filepath.Join(folder, filepath.FromSlash(src.File)))
-		if err != nil {
-			return nil, fmt.Errorf("read chapter source %s: %w", src.File, err)
-		}
-		headingTitle, blocks := manuscript.ParseSource(string(raw), markers)
-		order := i + 1
-		title := src.Title
-		if title == "" {
-			title = headingTitle
-		}
-		if title == "" {
-			title = titleFromFilename(src.File)
-		}
-		id := ids.ChapterID(order)
-		ch := &manuscript.Chapter{
-			ID:        id,
-			Order:     order,
-			Title:     title,
-			File:      "chapters/" + id + ".md",
-			SourceKey: src.File,
-			Blocks:    blocks,
-		}
-		for bi := range ch.Blocks {
-			if ch.Blocks[bi].Type.Citable() {
-				ch.Blocks[bi].ParagraphID = ids.NewParagraphID()
-				paragraphs++
-			}
-		}
-		chapters = append(chapters, ch)
+	if err != nil {
+		return res, err
 	}
-	res.Chapters = len(chapters)
-	res.Paragraphs = paragraphs
+	res.Warnings = append(res.Warnings, prep.Warnings...)
+	res.Chapters = len(prep.Chapters)
+	res.Paragraphs = prep.Paragraphs
 
 	report := Report{
 		RunID:      runID,
 		Type:       "md",
-		SourcePath: absFolder,
+		SourcePath: absSource,
 		ImportedAt: time.Now().Format(time.RFC3339),
 		Chapters:   res.Chapters,
 		Paragraphs: res.Paragraphs,
@@ -177,14 +138,9 @@ func Run(p *project.Project, folder string, opts Options) (*Result, error) {
 	if err := os.MkdirAll(originalDir, 0o755); err != nil {
 		return nil, fmt.Errorf("preserve source: %w", err)
 	}
-	for _, src := range sources {
-		if err := copyFile(filepath.Join(folder, filepath.FromSlash(src.File)), filepath.Join(originalDir, filepath.Base(src.File))); err != nil {
-			return nil, fmt.Errorf("preserve source %s: %w", src.File, err)
-		}
-	}
-	if manifestPath != "" {
-		if err := copyFile(manifestPath, filepath.Join(originalDir, filepath.Base(manifestPath))); err != nil {
-			return nil, fmt.Errorf("preserve manifest: %w", err)
+	for _, src := range prep.Preserve {
+		if err := copyFile(src.Source, filepath.Join(originalDir, src.Name)); err != nil {
+			return nil, fmt.Errorf("preserve source %s: %w", src.Source, err)
 		}
 	}
 
@@ -199,7 +155,7 @@ func Run(p *project.Project, folder string, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("write manuscript: %w", err)
 	}
 	toc := manuscript.TOC{Version: 1}
-	for _, ch := range chapters {
+	for _, ch := range prep.Chapters {
 		if err := manuscript.WriteChapter(p.Path(project.ManuscriptDir), ch); err != nil {
 			return nil, err
 		}
@@ -214,7 +170,7 @@ func Run(p *project.Project, folder string, opts Options) (*Result, error) {
 	// Update the project title when the source provides one.
 	newTitle := opts.Title
 	if newTitle == "" {
-		newTitle = manifestTitle
+		newTitle = prep.ManifestTitle
 	}
 	if newTitle != "" && newTitle != p.Config.Title {
 		p.Config.Title = newTitle
@@ -248,6 +204,162 @@ func Run(p *project.Project, folder string, opts Options) (*Result, error) {
 		return nil, err
 	}
 	return res, nil
+}
+
+func prepareFolderImport(
+	p *project.Project,
+	runID string,
+	res *Result,
+	folder string,
+	absFolder string,
+	opts Options,
+) (*preparedImport, error) {
+	eligible, err := discover(folder, opts.Pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	manifestPath, err := findManifest(folder, opts.TOC)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		sources       []sourceChapter
+		manifestTitle string
+		warnings      []string
+	)
+	if manifestPath != "" {
+		m, err := loadManifest(manifestPath)
+		if err != nil {
+			return nil, err
+		}
+		manifestTitle = m.Title
+		sources, warnings, err = orderFromManifest(folder, m, eligible)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		sources, err = orderFromNumericPrefixes(eligible)
+		if errors.Is(err, ErrAmbiguousOrder) {
+			proposedPath, werr := writeAmbiguityRecord(p, runID, absFolder, eligible, err)
+			if werr != nil {
+				return nil, errors.Join(err, werr)
+			}
+			res.ProposedTOC = proposedPath
+			return nil, fmt.Errorf("%w\nNo manuscript files were imported.\nA proposed table of contents was written to:\n%s\nReview the file and run:\nstory import md %s --toc %s",
+				err, proposedPath, folder, proposedPath)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	planned := make([]plannedChapter, 0, len(sources))
+	preserve := make([]preserveFile, 0, len(sources)+1)
+	for _, src := range sources {
+		raw, err := os.ReadFile(filepath.Join(folder, filepath.FromSlash(src.File)))
+		if err != nil {
+			return nil, fmt.Errorf("read chapter source %s: %w", src.File, err)
+		}
+		planned = append(planned, plannedChapter{
+			Title:         src.Title,
+			FallbackTitle: titleFromFilename(src.File),
+			SourceKey:     src.File,
+			Content:       string(raw),
+		})
+		preserve = append(preserve, preserveFile{
+			Source: filepath.Join(folder, filepath.FromSlash(src.File)),
+			Name:   filepath.Base(src.File),
+		})
+	}
+	if manifestPath != "" {
+		preserve = append(preserve, preserveFile{
+			Source: manifestPath,
+			Name:   filepath.Base(manifestPath),
+		})
+	}
+
+	chapters, paragraphs := buildChaptersFromPlan(p, planned)
+	return &preparedImport{
+		Chapters:      chapters,
+		Paragraphs:    paragraphs,
+		Warnings:      warnings,
+		ManifestTitle: manifestTitle,
+		Preserve:      preserve,
+	}, nil
+}
+
+func prepareFileImport(
+	p *project.Project,
+	runID string,
+	path string,
+	absPath string,
+	opts Options,
+) (*preparedImport, error) {
+	if opts.TOC != "" {
+		return nil, fmt.Errorf("import md %s: --toc can only be used with a folder import", path)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read markdown source %s: %w", path, err)
+	}
+	planned, err := planContinuousFile(filepath.Base(path), string(raw), opts)
+	if errors.Is(err, ErrAmbiguousOrder) {
+		reportDir, werr := writeFileAmbiguityRecord(p, runID, absPath, err)
+		if werr != nil {
+			return nil, errors.Join(err, werr)
+		}
+		return nil, fmt.Errorf("%w\nNo manuscript files were imported.\nAn import report was written to:\n%s\nReview the report and run one of:\nstory import md %s --single-chapter\nstory import md %s --chapter-heading-level 2\nstory import md %s --chapter-regex <regex>",
+			err, reportDir, path, path, path)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	chapters, paragraphs := buildChaptersFromPlan(p, planned)
+	return &preparedImport{
+		Chapters:   chapters,
+		Paragraphs: paragraphs,
+		Preserve: []preserveFile{{
+			Source: path,
+			Name:   filepath.Base(path),
+		}},
+	}, nil
+}
+
+func buildChaptersFromPlan(p *project.Project, planned []plannedChapter) ([]*manuscript.Chapter, int) {
+	markers := p.Config.Manuscript.SceneBreakMarkers
+	chapters := make([]*manuscript.Chapter, 0, len(planned))
+	paragraphs := 0
+	for i, src := range planned {
+		headingTitle, blocks := manuscript.ParseSource(src.Content, markers)
+		order := i + 1
+		title := src.Title
+		if title == "" {
+			title = headingTitle
+		}
+		if title == "" {
+			title = src.FallbackTitle
+		}
+		id := ids.ChapterID(order)
+		ch := &manuscript.Chapter{
+			ID:        id,
+			Order:     order,
+			Title:     title,
+			File:      "chapters/" + id + ".md",
+			SourceKey: src.SourceKey,
+			Blocks:    blocks,
+		}
+		for bi := range ch.Blocks {
+			if ch.Blocks[bi].Type.Citable() {
+				ch.Blocks[bi].ParagraphID = ids.NewParagraphID()
+				paragraphs++
+			}
+		}
+		chapters = append(chapters, ch)
+	}
+	return chapters, paragraphs
 }
 
 // writeAmbiguityRecord writes report.json, warnings.txt, and a proposed
