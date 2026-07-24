@@ -19,6 +19,7 @@ import (
 const (
 	LayerScenes     = "scenes"
 	LayerSceneCards = "scene-cards"
+	LayerSummaries  = "summaries"
 )
 
 // Options controls a compilation run.
@@ -39,9 +40,10 @@ type Options struct {
 
 // Result summarizes a completed compilation run.
 type Result struct {
-	RunID       string
-	ScenesBuilt int
-	CardsBuilt  int
+	RunID          string
+	ScenesBuilt    int
+	CardsBuilt     int
+	SummariesBuilt int
 }
 
 // Compile runs the compilation pipeline for the given project.  It opens and
@@ -49,9 +51,9 @@ type Result struct {
 func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Options) (Result, error) {
 	ctx = contextOrBackground(ctx)
 
-	if opts.Layer != "" && opts.Layer != LayerScenes && opts.Layer != LayerSceneCards {
-		return Result{}, fmt.Errorf("unknown layer %q; supported: %s, %s",
-			opts.Layer, LayerScenes, LayerSceneCards)
+	if opts.Layer != "" && opts.Layer != LayerScenes && opts.Layer != LayerSceneCards && opts.Layer != LayerSummaries {
+		return Result{}, fmt.Errorf("unknown layer %q; supported: %s, %s, %s",
+			opts.Layer, LayerScenes, LayerSceneCards, LayerSummaries)
 	}
 
 	cfg := sceneDetectConfig{
@@ -73,7 +75,7 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 		return Result{}, err
 	}
 
-	scenesBuilt, cardsBuilt, compileErr := runLayers(ctx, p, st, opts, cfg, run)
+	scenesBuilt, cardsBuilt, summariesBuilt, compileErr := runLayers(ctx, p, st, opts, cfg, run)
 	if compileErr != nil {
 		_ = run.fail(compileErr)
 		return Result{RunID: run.Record.RunID}, compileErr
@@ -81,11 +83,12 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 	if err := run.complete(); err != nil {
 		return Result{RunID: run.Record.RunID}, err
 	}
-	_ = run.saveSummary(scenesBuilt, cardsBuilt)
+	_ = run.saveSummary(scenesBuilt, cardsBuilt, summariesBuilt)
 	return Result{
-		RunID:       run.Record.RunID,
-		ScenesBuilt: scenesBuilt,
-		CardsBuilt:  cardsBuilt,
+		RunID:          run.Record.RunID,
+		ScenesBuilt:    scenesBuilt,
+		CardsBuilt:     cardsBuilt,
+		SummariesBuilt: summariesBuilt,
 	}, nil
 }
 
@@ -97,21 +100,21 @@ func runLayers(
 	opts Options,
 	cfg sceneDetectConfig,
 	run *Run,
-) (scenesBuilt, cardsBuilt int, err error) {
+) (scenesBuilt, cardsBuilt, summariesBuilt int, err error) {
 	// Determine which chapters to process.
 	chapters, err := chaptersToProcess(st, opts.ChapterID)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if len(chapters) == 0 {
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
 
 	// Scenes layer (Layer 2).
 	if opts.Layer == "" || opts.Layer == LayerScenes {
 		n, err := compileScenes(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 		scenesBuilt = n
 	}
@@ -119,18 +122,32 @@ func runLayers(
 	// Scene-cards layer (Layer 3).
 	if opts.Layer == "" || opts.Layer == LayerSceneCards {
 		if opts.ExtractionProvider == nil {
-			return scenesBuilt, 0, errors.New(
+			return scenesBuilt, 0, 0, errors.New(
 				"no LLM provider configured: scene cards require an extraction provider; " +
 					"configure [llm] in story.toml")
 		}
 		n, err := compileSceneCards(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return scenesBuilt, 0, err
+			return scenesBuilt, 0, 0, err
 		}
 		cardsBuilt = n
 	}
 
-	return scenesBuilt, cardsBuilt, nil
+	// Summaries layer (Layer 6 MVP).
+	if opts.Layer == "" || opts.Layer == LayerSummaries {
+		if opts.ExtractionProvider == nil {
+			return scenesBuilt, cardsBuilt, 0, errors.New(
+				"no LLM provider configured: summaries require an extraction provider; " +
+					"configure [llm] in story.toml")
+		}
+		n, err := compileSummaries(ctx, p, st, chapters, opts, cfg, run)
+		if err != nil {
+			return scenesBuilt, cardsBuilt, 0, err
+		}
+		summariesBuilt = n
+	}
+
+	return scenesBuilt, cardsBuilt, summariesBuilt, nil
 }
 
 // chaptersToProcess returns the chapters to compile, optionally filtered to one.

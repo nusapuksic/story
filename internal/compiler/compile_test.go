@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nusapuksic/story/internal/compiler"
@@ -303,5 +304,255 @@ func TestSnapshotCommittedPreventsRecompile(t *testing.T) {
 	}
 	if second.ScenesBuilt != 0 {
 		t.Errorf("second compile should skip committed chapter, got ScenesBuilt=%d", second.ScenesBuilt)
+	}
+}
+
+type compileTestChapter struct {
+	title      string
+	paragraphs []string
+}
+
+func buildTestProjectWithChapters(t *testing.T, specs []compileTestChapter) (*project.Project, *store.Store) {
+	t.Helper()
+	dir := t.TempDir()
+
+	p, err := project.Init(dir, project.InitOptions{Title: "Test Novel", Language: "en"})
+	if err != nil {
+		t.Fatalf("project.Init: %v", err)
+	}
+
+	toc := manuscript.TOC{Version: 1}
+	for i, spec := range specs {
+		chapterID := ids.ChapterID(i + 1)
+		ch := &manuscript.Chapter{
+			ID:        chapterID,
+			Order:     i + 1,
+			Title:     spec.title,
+			File:      "chapters/" + chapterID + ".md",
+			SourceKey: chapterID + ".md",
+		}
+		for _, text := range spec.paragraphs {
+			ch.Blocks = append(ch.Blocks, manuscript.Block{
+				Type:        manuscript.BlockParagraph,
+				ParagraphID: ids.NewParagraphID(),
+				Text:        text,
+			})
+		}
+		if err := manuscript.WriteChapter(p.Path(project.ManuscriptDir), ch); err != nil {
+			t.Fatalf("WriteChapter %s: %v", chapterID, err)
+		}
+		toc.Chapters = append(toc.Chapters, manuscript.TOCEntry{
+			ID:        ch.ID,
+			Order:     ch.Order,
+			Title:     ch.Title,
+			File:      ch.File,
+			SourceKey: ch.SourceKey,
+		})
+	}
+	if err := manuscript.SaveTOC(p.Path(project.TOCPath), toc); err != nil {
+		t.Fatalf("SaveTOC: %v", err)
+	}
+	if err := store.Rebuild(p); err != nil {
+		t.Fatalf("store.Rebuild: %v", err)
+	}
+
+	st, err := store.Open(p.Path(project.IndexPath))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return p, st
+}
+
+func TestCompileSummariesSendsChaptersOneAtATime(t *testing.T) {
+	chapterOneText := "CHAPTER_ONE_ONLY Mara enters the archive."
+	chapterTwoText := "CHAPTER_TWO_ONLY Ilya locks the gate."
+	p, st := buildTestProjectWithChapters(t, []compileTestChapter{
+		{title: "The Archive", paragraphs: []string{chapterOneText}},
+		{title: "The Gate", paragraphs: []string{chapterTwoText}},
+	})
+
+	ch1Paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter ch-0001: %v", err)
+	}
+	ch2Paragraphs, err := st.ParagraphsByChapter("ch-0002")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter ch-0002: %v", err)
+	}
+	fake := &fakeProvider{responses: []string{
+		`{"summary":"Chapter one summary.","evidence":["` + ch1Paragraphs[0].ID + `"]}`,
+		`{"summary":"Chapter two summary.","evidence":["` + ch2Paragraphs[0].ID + `"]}`,
+		`{"summary":"Book summary.","evidence":["` + ch1Paragraphs[0].ID + `"]}`,
+	}}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSummaries,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile summaries: %v", err)
+	}
+	if result.SummariesBuilt != 3 {
+		t.Fatalf("SummariesBuilt = %d, want 3 (two chapters + book)", result.SummariesBuilt)
+	}
+	if len(fake.requests) != 3 {
+		t.Fatalf("Generate calls = %d, want 3", len(fake.requests))
+	}
+
+	firstPrompt := fake.requests[0].Messages[1].Content
+	if !strings.Contains(firstPrompt, "Chapter ID: ch-0001") || !strings.Contains(firstPrompt, chapterOneText) {
+		t.Fatalf("first chapter prompt missing chapter one content: %s", firstPrompt)
+	}
+	if strings.Contains(firstPrompt, chapterTwoText) {
+		t.Fatalf("first chapter prompt contains chapter two text: %s", firstPrompt)
+	}
+
+	secondPrompt := fake.requests[1].Messages[1].Content
+	if !strings.Contains(secondPrompt, "Chapter ID: ch-0002") || !strings.Contains(secondPrompt, chapterTwoText) {
+		t.Fatalf("second chapter prompt missing chapter two content: %s", secondPrompt)
+	}
+	if strings.Contains(secondPrompt, chapterOneText) {
+		t.Fatalf("second chapter prompt contains chapter one text: %s", secondPrompt)
+	}
+}
+
+func TestCompileSummariesSplitsOversizedChapterIntoWindows(t *testing.T) {
+	firstWindowText := "OVERSIZED_WINDOW_ONE The archive shelves hum with names and dust."
+	secondWindowText := "OVERSIZED_WINDOW_TWO The locked gate answers with a silver echo."
+	p, st := buildTestProjectWithChapters(t, []compileTestChapter{
+		{title: "A Large Chapter", paragraphs: []string{firstWindowText, secondWindowText}},
+	})
+	p.Config.Compile.TargetContextTokens = 2
+	p.Config.Compile.WindowOverlapParagraphs = 0
+
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	fake := &fakeProvider{responses: []string{
+		`{"summary":"First window summary.","evidence":["` + paragraphs[0].ID + `"]}`,
+		`{"summary":"Second window summary.","evidence":["` + paragraphs[1].ID + `"]}`,
+		`{"summary":"Chapter synthesis.","evidence":["` + paragraphs[0].ID + `","` + paragraphs[1].ID + `"]}`,
+		`{"summary":"Book synthesis.","evidence":["` + paragraphs[0].ID + `"]}`,
+	}}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSummaries,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile summaries: %v", err)
+	}
+	if result.SummariesBuilt != 2 {
+		t.Fatalf("SummariesBuilt = %d, want 2 (chapter + book)", result.SummariesBuilt)
+	}
+	if len(fake.requests) != 4 {
+		t.Fatalf("Generate calls = %d, want 4", len(fake.requests))
+	}
+
+	firstPrompt := fake.requests[0].Messages[1].Content
+	if !strings.Contains(firstPrompt, "Window: 1 of 2") || !strings.Contains(firstPrompt, firstWindowText) {
+		t.Fatalf("first window prompt missing first window content: %s", firstPrompt)
+	}
+	if strings.Contains(firstPrompt, secondWindowText) {
+		t.Fatalf("first window prompt contains second window text: %s", firstPrompt)
+	}
+
+	secondPrompt := fake.requests[1].Messages[1].Content
+	if !strings.Contains(secondPrompt, "Window: 2 of 2") || !strings.Contains(secondPrompt, secondWindowText) {
+		t.Fatalf("second window prompt missing second window content: %s", secondPrompt)
+	}
+	if strings.Contains(secondPrompt, firstWindowText) {
+		t.Fatalf("second window prompt contains first window text: %s", secondPrompt)
+	}
+
+	synthesisPrompt := fake.requests[2].Messages[1].Content
+	if !strings.Contains(synthesisPrompt, "Window summaries:") || !strings.Contains(synthesisPrompt, "First window summary.") || !strings.Contains(synthesisPrompt, "Second window summary.") {
+		t.Fatalf("synthesis prompt missing window summaries: %s", synthesisPrompt)
+	}
+}
+func TestCompileSummariesWithFakeProvider(t *testing.T) {
+	p, st := buildTestProject(t)
+
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	if len(paragraphs) == 0 {
+		t.Fatal("expected test chapter paragraphs")
+	}
+
+	response := `{"summary":"Mara walks and dawn follows.","themes":["journey"],"unresolved":[],"evidence":["` + paragraphs[0].ID + `"]}`
+	fake := &fakeProvider{response: response}
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSummaries,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile summaries: %v", err)
+	}
+	if result.SummariesBuilt != 2 {
+		t.Errorf("SummariesBuilt = %d, want 2 (chapter + book)", result.SummariesBuilt)
+	}
+
+	path := p.Path(filepath.Join(project.ModelDir, "summaries.jsonl"))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read summaries.jsonl: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, `"record_type":"chapter_summary"`) {
+		t.Fatalf("summaries.jsonl missing chapter_summary record: %s", content)
+	}
+	if !strings.Contains(content, `"record_type":"book_summary"`) {
+		t.Fatalf("summaries.jsonl missing book_summary record: %s", content)
+	}
+}
+
+func TestCompileSummariesSkipsExisting(t *testing.T) {
+	p, st := buildTestProject(t)
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	response := `{"summary":"Mara walks and dawn follows.","evidence":["` + paragraphs[0].ID + `"]}`
+	fake := &fakeProvider{response: response}
+
+	first, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSummaries,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("first summaries compile: %v", err)
+	}
+	if first.SummariesBuilt != 2 {
+		t.Fatalf("first SummariesBuilt = %d, want 2", first.SummariesBuilt)
+	}
+
+	second, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSummaries,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("second summaries compile: %v", err)
+	}
+	if second.SummariesBuilt != 0 {
+		t.Errorf("second summaries compile should skip existing records, got %d", second.SummariesBuilt)
+	}
+}
+
+func TestCompileSummariesRequiresProvider(t *testing.T) {
+	p, st := buildTestProject(t)
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer: compiler.LayerSummaries,
+	})
+	if err == nil {
+		t.Fatal("expected error when no provider configured for summaries")
 	}
 }

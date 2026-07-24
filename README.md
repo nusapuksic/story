@@ -81,6 +81,7 @@ story --project ./my-novel index rebuild
 story --project ./my-novel compile
 story --project ./my-novel compile --layer scenes
 story --project ./my-novel compile --layer scene-cards
+story --project ./my-novel compile --layer summaries
 story --project ./my-novel search "farmhouse fire"
 story --project ./my-novel search "Mara" --chapter ch-0004 --limit 10
 story --project ./my-novel ask "What does Mara know when she enters the farmhouse?"
@@ -92,7 +93,7 @@ Markdown import accepts either a folder of chapter files or one continuous `.md`
 
 The SQLite index at `.story/index.sqlite` is a rebuildable projection of the canonical project files; deleting it never loses data (`story index rebuild` reconstructs it).
 
-`story compile` builds the story model from the canonical manuscript in layers (`scenes`, `scene-cards`). It requires a configured LLM provider (see `docs/cli-spec.md`).
+`story compile` builds the story model from the canonical manuscript in layers (`scenes`, `scene-cards`, `summaries`). It requires a configured LLM provider (see `docs/cli-spec.md`).
 
 `story search` runs full-text search over indexed paragraphs and scene cards. The FTS index is populated during indexing; run `story index rebuild` to refresh it.
 

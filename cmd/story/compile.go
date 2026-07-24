@@ -24,6 +24,7 @@ func newCompileCmd() *cobra.Command {
 Supported layers:
   scenes       Detect scene boundaries (explicit + optional LLM proposals)
   scene-cards  Extract structured scene cards using the configured LLM
+  summaries    Generate chapter and book summaries using the configured LLM
 
 Without --layer, all implemented layers are run in order.`,
 		Args: cobra.NoArgs,
@@ -31,7 +32,7 @@ Without --layer, all implemented layers are run in order.`,
 			return runCompile(layer, chapterID, force)
 		},
 	}
-	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes or scene-cards")
+	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes, scene-cards, or summaries")
 	cmd.Flags().StringVar(&chapterID, "chapter", "", "restrict to one chapter (e.g. ch-0001)")
 	cmd.Flags().BoolVar(&force, "force", false, "recompute already-generated records")
 	cmd.AddCommand(newCompileStatusCmd())
@@ -64,7 +65,7 @@ func runCompile(layer, chapterID string, force bool) error {
 	// Build extraction provider from config, if configured.
 	var extractProv provider.Provider
 	var extractModel string
-	if layer == "" || layer == compiler.LayerSceneCards {
+	if layer == "" || layer == compiler.LayerSceneCards || layer == compiler.LayerSummaries {
 		prov, model, provErr := provider.ForRole(p.Config.LLM, "extraction")
 		if provErr == nil {
 			extractProv = prov
@@ -72,7 +73,7 @@ func runCompile(layer, chapterID string, force bool) error {
 		} else if !errors.Is(provErr, provider.ErrNoProvider) {
 			return fmt.Errorf("load extraction provider: %w", provErr)
 		}
-		// ErrNoProvider is fine for scene-cards-only layer (will fail gracefully
+		// ErrNoProvider is fine for LLM-backed layers (will fail gracefully
 		// inside the compiler with a clear message).
 	}
 
@@ -94,14 +95,16 @@ func runCompile(layer, chapterID string, force bool) error {
 
 	if flags.jsonOut {
 		return printJSON(map[string]any{
-			"run_id":       result.RunID,
-			"scenes_built": result.ScenesBuilt,
-			"cards_built":  result.CardsBuilt,
+			"run_id":          result.RunID,
+			"scenes_built":    result.ScenesBuilt,
+			"cards_built":     result.CardsBuilt,
+			"summaries_built": result.SummariesBuilt,
 		})
 	}
 	info("Run: %s", result.RunID)
 	info("Scenes built:     %d", result.ScenesBuilt)
 	info("Scene cards built: %d", result.CardsBuilt)
+	info("Summaries built:   %d", result.SummariesBuilt)
 	return nil
 }
 

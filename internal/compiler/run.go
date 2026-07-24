@@ -4,6 +4,7 @@
 //
 //	Layer 2: Scenes  (deterministic + optional LLM boundary proposals)
 //	Layer 3: Scene cards  (LLM extraction with paragraph-ID validation)
+//	Layer 6: Summaries  (chapter and book synthesis with paragraph-ID validation)
 //
 // Each compilation creates a run record under .story/runs/<run-id>/ that can
 // be used for resumability and provenance.
@@ -158,13 +159,14 @@ func (r *Run) save() error {
 }
 
 // SaveSummary writes a summary.json to the run directory.
-func (r *Run) saveSummary(scenes, cards int) error {
+func (r *Run) saveSummary(scenes, cards, summaries int) error {
 	data, err := json.MarshalIndent(map[string]any{
-		"run_id":       r.Record.RunID,
-		"scenes_built": scenes,
-		"cards_built":  cards,
-		"finished_at":  r.Record.FinishedAt,
-		"status":       r.Record.Status,
+		"run_id":          r.Record.RunID,
+		"scenes_built":    scenes,
+		"cards_built":     cards,
+		"summaries_built": summaries,
+		"finished_at":     r.Record.FinishedAt,
+		"status":          r.Record.Status,
 	}, "", "  ")
 	if err != nil {
 		return err
