@@ -33,7 +33,8 @@ type ManuscriptConfig struct {
 
 // CompileConfig controls compilation pipeline behaviour.
 type CompileConfig struct {
-	TargetContextTokens     int     `toml:"target_context_tokens"`
+	TargetContextTokens int `toml:"target_context_tokens"`
+	// MaximumOutputTokens caps generated output tokens; zero leaves the provider default unchanged.
 	MaximumOutputTokens     int     `toml:"maximum_output_tokens"`
 	WindowOverlapParagraphs int     `toml:"window_overlap_paragraphs"`
 	SceneDetection          string  `toml:"scene_detection"`
@@ -85,7 +86,7 @@ func Default(projectID, title, language string) Config {
 		},
 		Compile: CompileConfig{
 			TargetContextTokens:     12000,
-			MaximumOutputTokens:     3000,
+			MaximumOutputTokens:     0,
 			WindowOverlapParagraphs: 3,
 			SceneDetection:          "hybrid",
 			Verification:            true,

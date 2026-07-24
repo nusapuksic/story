@@ -66,9 +66,6 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 	if cfg.TargetContextTokens <= 0 {
 		cfg.TargetContextTokens = 12000
 	}
-	if cfg.MaxOutputTokens <= 0 {
-		cfg.MaxOutputTokens = 3000
-	}
 
 	run, err := newRun(p, "compile", opts.Layer, opts.ChapterID)
 	if err != nil {

@@ -88,6 +88,38 @@ func TestOpenAIGenerate(t *testing.T) {
 	}
 }
 
+func TestOpenAIGenerateOmitsMaxTokensWhenZero(t *testing.T) {
+	var requestBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]string{"content": `{"ok":true}`},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	p := provider.NewOpenAI(srv.URL, "", 10)
+	_, err := p.Generate(context.Background(), provider.GenerationRequest{
+		Model:    "test-model",
+		Messages: []provider.Message{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if _, ok := requestBody["max_tokens"]; ok {
+		t.Fatalf("request body includes max_tokens when MaxTokens is zero: %v", requestBody)
+	}
+}
 func TestOpenAIHealthUnreachable(t *testing.T) {
 	p := provider.NewOpenAI("http://127.0.0.1:19999", "", 1)
 	if err := p.Health(context.Background()); err == nil {

@@ -39,10 +39,10 @@ type SummaryGeneration struct {
 }
 
 type rawSummary struct {
-	Summary    flexibleString     `json:"summary"`
-	Themes     flexibleStringList `json:"themes"`
-	Unresolved flexibleStringList `json:"unresolved"`
-	Evidence   []string           `json:"evidence"`
+	Summary    flexibleString       `json:"summary"`
+	Themes     flexibleStringList   `json:"themes"`
+	Unresolved flexibleStringList   `json:"unresolved"`
+	Evidence   flexibleEvidenceList `json:"evidence"`
 }
 
 type summaryIndex struct {
@@ -375,6 +375,17 @@ func parseSummaryResponse(
 	content = stripJSONFences(content)
 	var raw rawSummary
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+		if isTruncatedJSONError(err) {
+			fallbackSummary = strings.TrimSpace(fallbackSummary)
+			if fallbackSummary == "" {
+				return nil, fmt.Errorf("%s response missing summary", recordType)
+			}
+			return fallbackSummaryRecord(
+				recordType, chapterID, chapterTitle, sourceRecords,
+				fallbackSummary, fallbackEvidenceForSet(fallbackEvidence, validPIDs),
+				runID, model, promptVersion,
+			), nil
+		}
 		return nil, fmt.Errorf("parse %s response: %w", recordType, err)
 	}
 	if strings.TrimSpace(string(raw.Summary)) == "" {
@@ -384,7 +395,7 @@ func parseSummaryResponse(
 	}
 
 	summary := strings.TrimSpace(string(raw.Summary))
-	evidence, err := validateSummaryEvidence(raw.Evidence, validPIDs, recordType)
+	evidence, err := validateSummaryEvidence([]string(raw.Evidence), validPIDs, recordType)
 	if err != nil {
 		return nil, err
 	}
@@ -415,6 +426,30 @@ func parseSummaryResponse(
 		},
 		Status: "generated",
 	}, nil
+}
+
+func fallbackSummaryRecord(
+	recordType, chapterID, chapterTitle string,
+	sourceRecords []string,
+	summary string,
+	evidence []string,
+	runID, model, promptVersion string,
+) *SummaryRecord {
+	return &SummaryRecord{
+		RecordType:    recordType,
+		ChapterID:     chapterID,
+		ChapterTitle:  chapterTitle,
+		Summary:       summary,
+		Evidence:      evidence,
+		SourceRecords: sourceRecords,
+		Generation: SummaryGeneration{
+			RunID:         runID,
+			Model:         model,
+			PromptVersion: promptVersion,
+			GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		},
+		Status: "generated",
+	}
 }
 
 func readSummaryIndex(path string) (summaryIndex, error) {

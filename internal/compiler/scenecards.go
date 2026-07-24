@@ -36,13 +36,13 @@ type SceneCardGeneration struct {
 
 // rawSceneCard is the LLM-returned JSON before validation.
 type rawSceneCard struct {
-	Title        flexibleString     `json:"title"`
-	Summary      flexibleString     `json:"summary"`
-	POV          flexibleStringList `json:"pov"`
-	Participants flexibleStringList `json:"participants"`
-	Locations    flexibleStringList `json:"locations"`
-	Unresolved   flexibleStringList `json:"unresolved"`
-	Evidence     []string           `json:"evidence"`
+	Title        flexibleString       `json:"title"`
+	Summary      flexibleString       `json:"summary"`
+	POV          flexibleStringList   `json:"pov"`
+	Participants flexibleStringList   `json:"participants"`
+	Locations    flexibleStringList   `json:"locations"`
+	Unresolved   flexibleStringList   `json:"unresolved"`
+	Evidence     flexibleEvidenceList `json:"evidence"`
 }
 
 type flexibleString string
@@ -93,6 +93,95 @@ func (s *flexibleStringList) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type flexibleEvidenceList []string
+
+func (s *flexibleEvidenceList) UnmarshalJSON(data []byte) error {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*s = dedupeStrings(extractEvidenceIDs(value))
+	return nil
+}
+
+func extractEvidenceIDs(value any) []string {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case string:
+		if text := strings.TrimSpace(v); text != "" {
+			return []string{text}
+		}
+	case []any:
+		var out []string
+		for _, item := range v {
+			out = append(out, extractEvidenceIDs(item)...)
+		}
+		return out
+	case map[string]any:
+		return extractEvidenceIDsFromObject(v)
+	}
+	return nil
+}
+
+func extractEvidenceIDsFromObject(value map[string]any) []string {
+	var out []string
+	for _, key := range []string{
+		"paragraph_id",
+		"paragraphId",
+		"paragraphID",
+		"paragraph_ids",
+		"paragraphIds",
+		"paragraphIDs",
+		"paragraph",
+		"paragraphs",
+		"id",
+		"ids",
+		"source",
+		"sources",
+		"source_paragraph",
+		"sourceParagraph",
+		"source_paragraphs",
+		"sourceParagraphs",
+		"citation",
+		"citations",
+		"evidence",
+	} {
+		if nested, ok := value[key]; ok {
+			out = append(out, extractEvidenceIDs(nested)...)
+		}
+	}
+
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if looksLikeParagraphID(key) {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func looksLikeParagraphID(value string) bool {
+	return strings.HasPrefix(strings.TrimSpace(value), "p-")
+}
+
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
 func jsonText(value any) string {
 	switch v := value.(type) {
 	case nil:
@@ -262,7 +351,8 @@ func parseSceneCardResponse(
 		title = deriveSceneCardTitle(summary, sceneID)
 	}
 	// Validate evidence paragraph IDs.
-	for _, pid := range raw.Evidence {
+	evidence := []string(raw.Evidence)
+	for _, pid := range evidence {
 		if !pidSet[pid] {
 			return nil, fmt.Errorf("scene card for %s: evidence cites unknown paragraph ID %q", sceneID, pid)
 		}
@@ -277,7 +367,7 @@ func parseSceneCardResponse(
 		Participants: []string(raw.Participants),
 		Locations:    []string(raw.Locations),
 		Unresolved:   []string(raw.Unresolved),
-		Evidence:     raw.Evidence,
+		Evidence:     evidence,
 		Generation: SceneCardGeneration{
 			RunID:         runID,
 			Model:         model,

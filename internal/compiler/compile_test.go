@@ -485,7 +485,7 @@ func TestCompileSummariesWithFakeProvider(t *testing.T) {
 		t.Fatal("expected test chapter paragraphs")
 	}
 
-	response := `{"summary":"Mara walks and dawn follows.","themes":["journey"],"unresolved":[],"evidence":["` + paragraphs[0].ID + `"]}`
+	response := `{"summary":"Mara walks and dawn follows.","themes":["journey"],"unresolved":[],"evidence":[{"paragraph_id":"` + paragraphs[0].ID + `"}]}`
 	fake := &fakeProvider{response: response}
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
 		Layer:              compiler.LayerSummaries,
@@ -513,6 +513,65 @@ func TestCompileSummariesWithFakeProvider(t *testing.T) {
 	}
 }
 
+func TestCompileSummariesFallsBackOnTruncatedChapterResponse(t *testing.T) {
+	p, st := buildTestProject(t)
+	fake := &fakeProvider{response: `{"summary":"Mara walks`}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSummaries,
+		ChapterID:          "ch-0001",
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile summaries: %v", err)
+	}
+	if result.SummariesBuilt != 1 {
+		t.Fatalf("SummariesBuilt = %d, want 1", result.SummariesBuilt)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("Generate calls = %d, want 1", len(fake.requests))
+	}
+
+	path := p.Path(filepath.Join(project.ModelDir, "summaries.jsonl"))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read summaries.jsonl: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, `"record_type":"chapter_summary"`) {
+		t.Fatalf("summaries.jsonl missing chapter_summary record: %s", content)
+	}
+	if !strings.Contains(content, "Mara walked the road.") {
+		t.Fatalf("fallback summary did not use chapter text: %s", content)
+	}
+}
+func TestCompileSummariesAllowsUncappedOutputTokens(t *testing.T) {
+	p, st := buildTestProject(t)
+	p.Config.Compile.MaximumOutputTokens = 0
+
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	fake := &fakeProvider{response: `{"summary":"Mara walks and dawn follows.","evidence":["` + paragraphs[0].ID + `"]}`}
+
+	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSummaries,
+		ChapterID:          "ch-0001",
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile summaries: %v", err)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("Generate calls = %d, want 1", len(fake.requests))
+	}
+	if fake.requests[0].MaxTokens != 0 {
+		t.Fatalf("MaxTokens = %d, want 0 for uncapped output", fake.requests[0].MaxTokens)
+	}
+}
 func TestCompileSummariesSkipsExisting(t *testing.T) {
 	p, st := buildTestProject(t)
 	paragraphs, err := st.ParagraphsByChapter("ch-0001")

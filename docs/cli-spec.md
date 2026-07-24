@@ -199,12 +199,14 @@ chapter_boundary = "hard"
 scene_break_markers = ["***", "* * *", "---", "§"]
 [compile]
 target_context_tokens = 12000
-maximum_output_tokens = 3000
+maximum_output_tokens = 0
 window_overlap_paragraphs = 3
 scene_detection = "hybrid"
 verification = true
 auto_accept_verified = false
 temperature = 0.1
+
+# Set maximum_output_tokens to 0 to omit max_tokens and use the provider default.
 [llm]
 default_provider = "local"
 [llm.providers.local]

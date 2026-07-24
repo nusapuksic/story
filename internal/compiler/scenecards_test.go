@@ -39,6 +39,61 @@ func TestParseSceneCardResponseValid(t *testing.T) {
 	}
 }
 
+func TestParseSceneCardResponseObjectEvidenceItems(t *testing.T) {
+	raw := `{
+		"title": "Mara hides the letter",
+		"summary": "Mara receives a letter and hides it.",
+		"evidence": [
+			{"paragraph_id": "p-001", "quote": "Mara receives a letter."},
+			{"id": "p-002", "reason": "She hides it."}
+		]
+	}`
+	pidSet := map[string]bool{"p-001": true, "p-002": true}
+
+	card, err := compiler.ParseSceneCardResponseForTest(raw, "sc-001", pidSet, "run-001", "test-model")
+	if err != nil {
+		t.Fatalf("ParseSceneCardResponseForTest error = %v", err)
+	}
+	if got := card.Evidence; len(got) != 2 || got[0] != "p-001" || got[1] != "p-002" {
+		t.Errorf("Evidence = %v, want [p-001 p-002]", got)
+	}
+}
+
+func TestParseSceneCardResponseEvidenceObjectsWithIDs(t *testing.T) {
+	raw := `{
+		"title": "The Attic Discovery",
+		"summary": "Mara finds a chest in the attic.",
+		"evidence": [
+			{"summary": "Mara returns to the lake.", "ids": ["p-001", "p-002"]},
+			{"summary": "Mara finds a chest.", "ids": ["p-003"]}
+		]
+	}`
+	pidSet := map[string]bool{"p-001": true, "p-002": true, "p-003": true}
+
+	card, err := compiler.ParseSceneCardResponseForTest(raw, "sc-001", pidSet, "run-001", "test-model")
+	if err != nil {
+		t.Fatalf("ParseSceneCardResponseForTest error = %v", err)
+	}
+	if got := card.Evidence; len(got) != 3 || got[0] != "p-001" || got[1] != "p-002" || got[2] != "p-003" {
+		t.Errorf("Evidence = %v, want [p-001 p-002 p-003]", got)
+	}
+}
+func TestParseSceneCardResponseObjectEvidenceField(t *testing.T) {
+	raw := `{
+		"title": "Mara hides the letter",
+		"summary": "Mara receives a letter and hides it.",
+		"evidence": {"paragraphs": ["p-001", {"paragraph_id": "p-002"}]}
+	}`
+	pidSet := map[string]bool{"p-001": true, "p-002": true}
+
+	card, err := compiler.ParseSceneCardResponseForTest(raw, "sc-001", pidSet, "run-001", "test-model")
+	if err != nil {
+		t.Fatalf("ParseSceneCardResponseForTest error = %v", err)
+	}
+	if got := card.Evidence; len(got) != 2 || got[0] != "p-001" || got[1] != "p-002" {
+		t.Errorf("Evidence = %v, want [p-001 p-002]", got)
+	}
+}
 func TestParseSceneCardResponseUnknownParagraphID(t *testing.T) {
 	raw := `{
 		"title": "Test",
