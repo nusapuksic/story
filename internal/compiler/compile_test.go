@@ -2,6 +2,7 @@ package compiler_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -383,7 +384,7 @@ func TestCompileSummariesSendsChaptersOneAtATime(t *testing.T) {
 	fake := &fakeProvider{responses: []string{
 		`{"summary":"Chapter one summary.","evidence":["` + ch1Paragraphs[0].ID + `"]}`,
 		`{"summary":"Chapter two summary.","evidence":["` + ch2Paragraphs[0].ID + `"]}`,
-		`{"summary":"Book summary.","evidence":["` + ch1Paragraphs[0].ID + `"]}`,
+		`{"summary":"Book summary.","evidence":["ch-0001"]}`,
 	}}
 
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -418,7 +419,7 @@ func TestCompileSummariesSendsChaptersOneAtATime(t *testing.T) {
 	}
 }
 
-func TestCompileBookSummaryUsesInlineEvidenceFromExistingChapterSummaries(t *testing.T) {
+func TestCompileBookSummaryUsesChapterSummariesOnly(t *testing.T) {
 	chapterOneText := "Chapter one opens the shore."
 	chapterTwoOpening := "Chapter two begins before sunrise."
 	chapterTwoEvidence := "The drowned village was not destroyed, merely covered."
@@ -443,7 +444,7 @@ func TestCompileBookSummaryUsesInlineEvidenceFromExistingChapterSummaries(t *tes
 		t.Fatalf("write existing summaries: %v", err)
 	}
 
-	fake := &fakeProvider{response: `{"summary":"Book summary cites chapter two.","evidence":["` + ch2Paragraphs[1].ID + `"]}`}
+	fake := &fakeProvider{response: `{"summary":"Book summary cites chapter two.","evidence":["ch-0002"]}`}
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
 		Layer:              compiler.LayerSummaries,
 		ExtractionProvider: fake,
@@ -459,11 +460,21 @@ func TestCompileBookSummaryUsesInlineEvidenceFromExistingChapterSummaries(t *tes
 		t.Fatalf("Generate calls = %d, want 1", len(fake.requests))
 	}
 	bookPrompt := fake.requests[0].Messages[1].Content
-	if !strings.Contains(bookPrompt, chapterTwoEvidence) {
-		t.Fatalf("book prompt missing inline-cited support paragraph: %s", bookPrompt)
+	if strings.Contains(bookPrompt, "Supporting paragraphs:") {
+		t.Fatalf("book prompt should not include supporting paragraph excerpts: %s", bookPrompt)
+	}
+	if strings.Contains(bookPrompt, chapterTwoEvidence) {
+		t.Fatalf("book prompt includes source paragraph text instead of only chapter summaries: %s", bookPrompt)
+	}
+	if strings.Contains(bookPrompt, ch2Paragraphs[1].ID) {
+		t.Fatalf("book prompt should strip paragraph citations from chapter summaries: %s", bookPrompt)
+	}
+	if !strings.Contains(bookPrompt, "The drowned village was merely covered.") {
+		t.Fatalf("book prompt missing sanitized chapter summary: %s", bookPrompt)
 	}
 }
-func TestCompileBookSummaryIgnoresNonParagraphInlinePhrases(t *testing.T) {
+
+func TestCompileChapterSummaryIgnoresNonParagraphInlinePhrases(t *testing.T) {
 	chapterText := "The archive note includes a statistical p-value but no extra citation."
 	p, st := buildTestProjectWithChapters(t, []compileTestChapter{
 		{title: "The Archive", paragraphs: []string{chapterText}},
@@ -473,20 +484,29 @@ func TestCompileBookSummaryIgnoresNonParagraphInlinePhrases(t *testing.T) {
 		t.Fatalf("ParagraphsByChapter: %v", err)
 	}
 
-	summaries := `{"record_type":"chapter_summary","chapter_id":"ch-0001","summary":"The archive note mentions a p-value but cites [` + paragraphs[0].ID + `].","evidence":[],"generation":{},"status":"generated"}` + "\n"
-	path := p.Path(filepath.Join(project.ModelDir, "summaries.jsonl"))
-	if err := os.WriteFile(path, []byte(summaries), 0o644); err != nil {
-		t.Fatalf("write existing summaries: %v", err)
-	}
-
-	fake := &fakeProvider{response: `{"summary":"Book summary cites the archive.","evidence":["` + paragraphs[0].ID + `"]}`}
+	fake := &fakeProvider{response: `{"summary":"The archive note mentions a p-value but cites [` + paragraphs[0].ID + `].","evidence":[]}`}
 	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
 		Layer:              compiler.LayerSummaries,
+		ChapterID:          "ch-0001",
 		ExtractionProvider: fake,
 		ExtractionModel:    "fake-model",
 	})
 	if err != nil {
 		t.Fatalf("compile summaries: %v", err)
+	}
+
+	data, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, "summaries.jsonl")))
+	if err != nil {
+		t.Fatalf("read summaries.jsonl: %v", err)
+	}
+	var rec struct {
+		Evidence []string `json:"evidence"`
+	}
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse summary record: %v", err)
+	}
+	if len(rec.Evidence) != 1 || rec.Evidence[0] != paragraphs[0].ID {
+		t.Fatalf("Evidence = %v, want [%s]", rec.Evidence, paragraphs[0].ID)
 	}
 }
 func TestCompileSummariesSplitsOversizedChapterIntoWindows(t *testing.T) {
@@ -506,7 +526,7 @@ func TestCompileSummariesSplitsOversizedChapterIntoWindows(t *testing.T) {
 		`{"summary":"First window summary.","evidence":["` + paragraphs[0].ID + `"]}`,
 		`{"summary":"Second window summary.","evidence":["` + paragraphs[1].ID + `"]}`,
 		`{"summary":"Chapter synthesis.","evidence":["` + paragraphs[0].ID + `","` + paragraphs[1].ID + `"]}`,
-		`{"summary":"Book synthesis.","evidence":["` + paragraphs[0].ID + `"]}`,
+		`{"summary":"Book synthesis.","evidence":["ch-0001"]}`,
 	}}
 
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -556,8 +576,11 @@ func TestCompileSummariesWithFakeProvider(t *testing.T) {
 		t.Fatal("expected test chapter paragraphs")
 	}
 
-	response := `{"summary":"Mara walks and dawn follows.","themes":["journey"],"unresolved":[],"evidence":[{"paragraph_id":"` + paragraphs[0].ID + `"}]}`
-	fake := &fakeProvider{response: response}
+	chapterResponse := `{"summary":"Mara walks and dawn follows.","themes":["journey"],"unresolved":[],"evidence":[{"paragraph_id":"` + paragraphs[0].ID + `"}]}`
+	fake := &fakeProvider{responses: []string{
+		chapterResponse,
+		`{"summary":"Book summary.","evidence":["ch-0001"]}`,
+	}}
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
 		Layer:              compiler.LayerSummaries,
 		ExtractionProvider: fake,
@@ -649,8 +672,11 @@ func TestCompileSummariesSkipsExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParagraphsByChapter: %v", err)
 	}
-	response := `{"summary":"Mara walks and dawn follows.","evidence":["` + paragraphs[0].ID + `"]}`
-	fake := &fakeProvider{response: response}
+	chapterResponse := `{"summary":"Mara walks and dawn follows.","evidence":["` + paragraphs[0].ID + `"]}`
+	fake := &fakeProvider{responses: []string{
+		chapterResponse,
+		`{"summary":"Book summary.","evidence":["ch-0001"]}`,
+	}}
 
 	first, err := compiler.Compile(context.Background(), p, st, compiler.Options{
 		Layer:              compiler.LayerSummaries,

@@ -14,7 +14,7 @@ var defaultPrompts = map[string]string{
 	"entity-resolution.md":   promptHeader("entity-resolution-v1", "Extract candidate entities and mentions as JSON. Preserve ambiguity: do not merge aliases unless the text is explicit. Cite paragraph IDs for every mention."),
 	"record-verification.md": promptHeader("record-verification-v1", "Verify whether the cited paragraphs support the proposed record. Distinguish explicit fact from inference and narrator fact from character belief. Return schema-valid JSON only."),
 	"chapter-summary.md":     promptHeader("chapter-summary-v1", "Summarize the chapter, citing paragraph IDs for every concrete claim. Preserve uncertainty and avoid resolving intentionally unresolved questions."),
-	"book-summary.md":        promptHeader("book-summary-v1", "Produce a whole-book orientation summary citing lower-level records and source paragraphs. Do not cite only another summary."),
+	"book-summary.md":        promptHeader("book-summary-v1", "Produce a whole-book orientation summary from chapter summary records. Cite chapter IDs only; unresolved details will be expanded in a later pass."),
 	"answer-question.md":     promptHeader("answer-question-v1", "Answer the question strictly from the provided evidence packet. Cite paragraph IDs. State plainly when the text does not establish something."),
 }
 

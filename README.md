@@ -76,6 +76,8 @@ story --project ./my-novel import md ./manuscript.md
 story --project ./my-novel status
 story --project ./my-novel inspect chapter ch-0001
 story --project ./my-novel inspect paragraph p-<ULID>
+story --project ./my-novel inspect summary book
+story --project ./my-novel inspect summary ch-0001
 story --project ./my-novel import report
 story --project ./my-novel index rebuild
 story --project ./my-novel compile

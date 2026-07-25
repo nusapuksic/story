@@ -51,7 +51,12 @@ type summaryIndex struct {
 	Book     *SummaryRecord
 }
 
-var paragraphIDPattern = regexp.MustCompile(`\bp-[0-9A-HJKMNP-TV-Z]{26}\b`)
+const paragraphIDPatternSource = `p-[0-9A-HJKMNP-TV-Z]{26}`
+
+var (
+	paragraphIDPattern          = regexp.MustCompile(`\b` + paragraphIDPatternSource + `\b`)
+	paragraphCitationBlockRegex = regexp.MustCompile(`\s*\[(?:\s*` + paragraphIDPatternSource + `\s*,?)+\s*\]`)
+)
 
 // compileSummaries writes chapter summaries and, for whole-project runs, a
 // book summary to model/summaries.jsonl.
@@ -118,7 +123,7 @@ func compileSummaries(
 		return total, nil
 	}
 
-	book, err := extractBookSummary(ctx, p, st, chapters, chapterSummaries,
+	book, err := extractBookSummary(ctx, p, chapterSummaries,
 		opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 	if err != nil {
 		return total, fmt.Errorf("extract book summary: %w", err)
@@ -311,8 +316,6 @@ func supportParagraphsForWindowSummaries(windows []Window, summaries []SummaryRe
 func extractBookSummary(
 	ctx context.Context,
 	p *project.Project,
-	st *store.Store,
-	chapters []store.ChapterRow,
 	chapterSummaries []SummaryRecord,
 	prov provider.Provider,
 	model string,
@@ -321,25 +324,22 @@ func extractBookSummary(
 ) (*SummaryRecord, error) {
 	systemPrompt, promptVersion := loadSummaryPrompt(p, "book-summary.md",
 		"book-summary-v1", defaultBookSummarySystemPrompt)
-	support, err := bookEvidenceParagraphs(st, chapters, chapterSummaries)
-	if err != nil {
-		return nil, err
-	}
-	pidSet := paragraphIDSet(support)
 	sourceRecords := make([]string, 0, len(chapterSummaries))
+	validEvidenceIDs := make(map[string]bool, len(chapterSummaries))
 	for _, rec := range chapterSummaries {
 		if rec.ChapterID != "" {
 			sourceRecords = append(sourceRecords, rec.ChapterID)
+			validEvidenceIDs[rec.ChapterID] = true
 		}
 	}
-	fallbackSummary, fallbackEvidence := deriveBookFallbackSummary(chapterSummaries, support)
+	fallbackSummary, fallbackEvidence := deriveBookFallbackFromChapterSummaries(chapterSummaries)
 
 	taskID := ids.NewTaskID()
 	req := provider.GenerationRequest{
 		Model: model,
 		Messages: []provider.Message{
 			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: buildBookSummaryPrompt(p.Config.Title, chapterSummaries, support)},
+			{Role: "user", Content: buildBookSummaryPrompt(p.Config.Title, chapterSummaries)},
 		},
 		Temperature: cfg.Temperature,
 		MaxTokens:   cfg.MaxOutputTokens,
@@ -356,7 +356,7 @@ func extractBookSummary(
 	}
 
 	rec, parseErr := parseSummaryResponse(resp.Content, "book_summary", "", "", sourceRecords,
-		pidSet, fallbackSummary, fallbackEvidence, runID(run), model, promptVersion)
+		validEvidenceIDs, fallbackSummary, fallbackEvidence, runID(run), model, promptVersion)
 	status := TaskStatusCompleted
 	errMsg := ""
 	if parseErr != nil {
@@ -366,7 +366,6 @@ func extractBookSummary(
 	recordSummaryTask(run, taskID, "book-summary", "", status, errMsg)
 	return rec, parseErr
 }
-
 func parseSummaryResponse(
 	content, recordType, chapterID, chapterTitle string,
 	sourceRecords []string,
@@ -398,7 +397,11 @@ func parseSummaryResponse(
 	}
 
 	summary := strings.TrimSpace(string(raw.Summary))
-	evidence, err := validateSummaryEvidence(summaryEvidenceCandidates([]string(raw.Evidence), summary), validPIDs, recordType)
+	evidenceCandidates := []string(raw.Evidence)
+	if recordType == "chapter_summary" {
+		evidenceCandidates = summaryEvidenceCandidates(evidenceCandidates, summary)
+	}
+	evidence, err := validateSummaryEvidence(evidenceCandidates, validPIDs, recordType)
 	if err != nil {
 		return nil, err
 	}
@@ -500,46 +503,6 @@ func orderedChapterSummaries(chapters []store.ChapterRow, byID map[string]Summar
 	return out
 }
 
-func bookEvidenceParagraphs(
-	st *store.Store,
-	chapters []store.ChapterRow,
-	summaries []SummaryRecord,
-) ([]store.ParagraphRow, error) {
-	summaryByChapter := make(map[string]SummaryRecord, len(summaries))
-	wanted := make(map[string]bool)
-	for _, rec := range summaries {
-		if rec.ChapterID != "" {
-			summaryByChapter[rec.ChapterID] = rec
-		}
-		for _, pid := range summaryEvidenceCandidates(rec.Evidence, rec.Summary) {
-			wanted[pid] = true
-		}
-	}
-
-	var out []store.ParagraphRow
-	for _, ch := range chapters {
-		paragraphs, err := st.ParagraphsByChapter(ch.ID)
-		if err != nil {
-			return nil, err
-		}
-		if len(paragraphs) == 0 {
-			continue
-		}
-		rec := summaryByChapter[ch.ID]
-		recEvidence := summaryEvidenceCandidates(rec.Evidence, rec.Summary)
-		if len(recEvidence) == 0 {
-			out = append(out, paragraphs[0])
-			continue
-		}
-		for _, pp := range paragraphs {
-			if wanted[pp.ID] {
-				out = append(out, pp)
-			}
-		}
-	}
-	return out, nil
-}
-
 func paragraphIDSet(paragraphs []store.ParagraphRow) map[string]bool {
 	out := make(map[string]bool, len(paragraphs))
 	for _, pp := range paragraphs {
@@ -554,6 +517,12 @@ func summaryEvidenceCandidates(evidence []string, summary string) []string {
 	return dedupeStrings(candidates)
 }
 
+func chapterSummaryTextForBookPrompt(summary string) string {
+	summary = paragraphCitationBlockRegex.ReplaceAllString(summary, "")
+	summary = paragraphIDPattern.ReplaceAllString(summary, "")
+	return strings.Join(strings.Fields(summary), " ")
+}
+
 func validateSummaryEvidence(evidence []string, validPIDs map[string]bool, recordType string) ([]string, error) {
 	seen := make(map[string]bool, len(evidence))
 	out := make([]string, 0, len(evidence))
@@ -563,7 +532,7 @@ func validateSummaryEvidence(evidence []string, validPIDs map[string]bool, recor
 			continue
 		}
 		if !validPIDs[pid] {
-			return nil, fmt.Errorf("%s cites unknown paragraph ID %q", recordType, pid)
+			return nil, fmt.Errorf("%s cites unknown evidence ID %q", recordType, pid)
 		}
 		if !seen[pid] {
 			seen[pid] = true
@@ -726,18 +695,19 @@ func writeParagraphExcerpts(sb *strings.Builder, paragraphs []store.ParagraphRow
 		sb.WriteString("\n\n")
 	}
 }
-func buildBookSummaryPrompt(title string, summaries []SummaryRecord, support []store.ParagraphRow) string {
+func buildBookSummaryPrompt(title string, summaries []SummaryRecord) string {
 	var sb strings.Builder
-	sb.WriteString("Produce a whole-book orientation summary as evidence-backed JSON.\n")
+	sb.WriteString("Produce a whole-book orientation summary from chapter summary records as evidence-backed JSON.\n")
 	if title != "" {
 		sb.WriteString("Book title: ")
 		sb.WriteString(title)
 		sb.WriteString("\n")
 	}
 	sb.WriteString("Return JSON matching the schema:\n")
-	sb.WriteString(`{"summary":"...","themes":[],"unresolved":[],"evidence":["p-..."]}`)
-	sb.WriteString("\nDo not cite only another summary; cite supporting paragraph IDs from the excerpts.\n\n")
-	sb.WriteString("Chapter summaries:\n")
+	sb.WriteString(`{"summary":"...","themes":[],"unresolved":[],"evidence":["ch-..."]}`)
+	sb.WriteString("\nCite only chapter IDs from the records below. Do not cite paragraph IDs.\n")
+	sb.WriteString("Use unresolved only for questions or tensions that remain open at book-summary level.\n\n")
+	sb.WriteString("Chapter summary records:\n")
 	for _, rec := range summaries {
 		sb.WriteString("- ")
 		sb.WriteString(rec.ChapterID)
@@ -746,25 +716,20 @@ func buildBookSummaryPrompt(title string, summaries []SummaryRecord, support []s
 			sb.WriteString(rec.ChapterTitle)
 			sb.WriteString(")")
 		}
-		sb.WriteString(": ")
-		sb.WriteString(rec.Summary)
-		if len(rec.Evidence) > 0 {
-			sb.WriteString(" Evidence: ")
-			sb.WriteString(strings.Join(rec.Evidence, ", "))
+		sb.WriteString("\n  Summary: ")
+		sb.WriteString(chapterSummaryTextForBookPrompt(rec.Summary))
+		if len(rec.Themes) > 0 {
+			sb.WriteString("\n  Themes: ")
+			sb.WriteString(strings.Join(rec.Themes, ", "))
+		}
+		if len(rec.Unresolved) > 0 {
+			sb.WriteString("\n  Unresolved: ")
+			sb.WriteString(strings.Join(rec.Unresolved, ", "))
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString("\nSupporting paragraphs:\n")
-	for _, pp := range support {
-		sb.WriteString("--- ")
-		sb.WriteString(pp.ID)
-		sb.WriteString(" ---\n")
-		sb.WriteString(pp.Text)
-		sb.WriteString("\n\n")
-	}
 	return sb.String()
 }
-
 func deriveChapterFallbackSummary(paragraphs []store.ParagraphRow) (string, []string) {
 	parts := make([]string, 0, 2)
 	evidence := make([]string, 0, 2)
@@ -776,6 +741,24 @@ func deriveChapterFallbackSummary(paragraphs []store.ParagraphRow) (string, []st
 		parts = append(parts, text)
 		evidence = append(evidence, pp.ID)
 		if len(parts) == 2 {
+			break
+		}
+	}
+	return strings.Join(parts, " "), evidence
+}
+
+func deriveBookFallbackFromChapterSummaries(summaries []SummaryRecord) (string, []string) {
+	parts := make([]string, 0, 3)
+	evidence := make([]string, 0, 3)
+	for _, rec := range summaries {
+		text := firstSentence(rec.Summary, 260)
+		if text != "" && len(parts) < 3 {
+			parts = append(parts, text)
+		}
+		if rec.ChapterID != "" && len(evidence) < 3 {
+			evidence = append(evidence, rec.ChapterID)
+		}
+		if len(parts) == 3 && len(evidence) == 3 {
 			break
 		}
 	}
@@ -846,5 +829,5 @@ Preserve uncertainty and do not resolve intentionally unresolved questions.`
 
 const defaultBookSummarySystemPrompt = `You are a literary analyst producing a whole-book orientation summary.
 Return only valid JSON matching the requested schema. Do not add commentary outside the JSON object.
-Do not cite only chapter summaries; cite supporting paragraph IDs from the provided excerpts.
-Preserve uncertainty and avoid unsupported conclusions.`
+Use only the provided chapter summary records as source material. Cite chapter IDs only; do not cite paragraph IDs.
+Preserve uncertainty and flag unresolved details briefly for later expansion.`

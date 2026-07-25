@@ -740,9 +740,7 @@ Contains:
 * whole-book orientation summary;
 * tentative motifs and themes.
 
-Synthesis records cite lower-level records and source paragraphs.
-
-They must not cite only another summary.
+Chapter summaries cite source paragraphs. Whole-book orientation summaries cite chapter summary records only; narrower expansion passes may bring in scene cards or source paragraphs for specific unresolved details.
 
 ⸻
 
@@ -1037,6 +1035,8 @@ synthesis
 
 story inspect chapter <id>
 story inspect paragraph <id>
+story inspect summary book
+story inspect summary <chapter-id>
 story inspect scene <id>
 story inspect entity <id>
 story inspect claim <id>
