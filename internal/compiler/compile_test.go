@@ -418,6 +418,77 @@ func TestCompileSummariesSendsChaptersOneAtATime(t *testing.T) {
 	}
 }
 
+func TestCompileBookSummaryUsesInlineEvidenceFromExistingChapterSummaries(t *testing.T) {
+	chapterOneText := "Chapter one opens the shore."
+	chapterTwoOpening := "Chapter two begins before sunrise."
+	chapterTwoEvidence := "The drowned village was not destroyed, merely covered."
+	p, st := buildTestProjectWithChapters(t, []compileTestChapter{
+		{title: "The Shore", paragraphs: []string{chapterOneText}},
+		{title: "The Drowned Street", paragraphs: []string{chapterTwoOpening, chapterTwoEvidence}},
+	})
+
+	ch1Paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter ch-0001: %v", err)
+	}
+	ch2Paragraphs, err := st.ParagraphsByChapter("ch-0002")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter ch-0002: %v", err)
+	}
+
+	summaries := `{"record_type":"chapter_summary","chapter_id":"ch-0001","summary":"Chapter one opens the shore.","evidence":["` + ch1Paragraphs[0].ID + `"],"generation":{},"status":"generated"}` + "\n" +
+		`{"record_type":"chapter_summary","chapter_id":"ch-0002","summary":"The drowned village was merely covered [` + ch2Paragraphs[1].ID + `].","evidence":[],"generation":{},"status":"generated"}` + "\n"
+	path := p.Path(filepath.Join(project.ModelDir, "summaries.jsonl"))
+	if err := os.WriteFile(path, []byte(summaries), 0o644); err != nil {
+		t.Fatalf("write existing summaries: %v", err)
+	}
+
+	fake := &fakeProvider{response: `{"summary":"Book summary cites chapter two.","evidence":["` + ch2Paragraphs[1].ID + `"]}`}
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSummaries,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile summaries: %v", err)
+	}
+	if result.SummariesBuilt != 1 {
+		t.Fatalf("SummariesBuilt = %d, want 1 book summary", result.SummariesBuilt)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("Generate calls = %d, want 1", len(fake.requests))
+	}
+	bookPrompt := fake.requests[0].Messages[1].Content
+	if !strings.Contains(bookPrompt, chapterTwoEvidence) {
+		t.Fatalf("book prompt missing inline-cited support paragraph: %s", bookPrompt)
+	}
+}
+func TestCompileBookSummaryIgnoresNonParagraphInlinePhrases(t *testing.T) {
+	chapterText := "The archive note includes a statistical p-value but no extra citation."
+	p, st := buildTestProjectWithChapters(t, []compileTestChapter{
+		{title: "The Archive", paragraphs: []string{chapterText}},
+	})
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+
+	summaries := `{"record_type":"chapter_summary","chapter_id":"ch-0001","summary":"The archive note mentions a p-value but cites [` + paragraphs[0].ID + `].","evidence":[],"generation":{},"status":"generated"}` + "\n"
+	path := p.Path(filepath.Join(project.ModelDir, "summaries.jsonl"))
+	if err := os.WriteFile(path, []byte(summaries), 0o644); err != nil {
+		t.Fatalf("write existing summaries: %v", err)
+	}
+
+	fake := &fakeProvider{response: `{"summary":"Book summary cites the archive.","evidence":["` + paragraphs[0].ID + `"]}`}
+	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSummaries,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile summaries: %v", err)
+	}
+}
 func TestCompileSummariesSplitsOversizedChapterIntoWindows(t *testing.T) {
 	firstWindowText := "OVERSIZED_WINDOW_ONE The archive shelves hum with names and dust."
 	secondWindowText := "OVERSIZED_WINDOW_TWO The locked gate answers with a silver echo."

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -49,6 +50,8 @@ type summaryIndex struct {
 	Chapters map[string]SummaryRecord
 	Book     *SummaryRecord
 }
+
+var paragraphIDPattern = regexp.MustCompile(`\bp-[0-9A-HJKMNP-TV-Z]{26}\b`)
 
 // compileSummaries writes chapter summaries and, for whole-project runs, a
 // book summary to model/summaries.jsonl.
@@ -395,7 +398,7 @@ func parseSummaryResponse(
 	}
 
 	summary := strings.TrimSpace(string(raw.Summary))
-	evidence, err := validateSummaryEvidence([]string(raw.Evidence), validPIDs, recordType)
+	evidence, err := validateSummaryEvidence(summaryEvidenceCandidates([]string(raw.Evidence), summary), validPIDs, recordType)
 	if err != nil {
 		return nil, err
 	}
@@ -508,7 +511,7 @@ func bookEvidenceParagraphs(
 		if rec.ChapterID != "" {
 			summaryByChapter[rec.ChapterID] = rec
 		}
-		for _, pid := range rec.Evidence {
+		for _, pid := range summaryEvidenceCandidates(rec.Evidence, rec.Summary) {
 			wanted[pid] = true
 		}
 	}
@@ -523,7 +526,8 @@ func bookEvidenceParagraphs(
 			continue
 		}
 		rec := summaryByChapter[ch.ID]
-		if len(rec.Evidence) == 0 {
+		recEvidence := summaryEvidenceCandidates(rec.Evidence, rec.Summary)
+		if len(recEvidence) == 0 {
 			out = append(out, paragraphs[0])
 			continue
 		}
@@ -542,6 +546,12 @@ func paragraphIDSet(paragraphs []store.ParagraphRow) map[string]bool {
 		out[pp.ID] = true
 	}
 	return out
+}
+
+func summaryEvidenceCandidates(evidence []string, summary string) []string {
+	candidates := append([]string{}, evidence...)
+	candidates = append(candidates, paragraphIDPattern.FindAllString(summary, -1)...)
+	return dedupeStrings(candidates)
 }
 
 func validateSummaryEvidence(evidence []string, validPIDs map[string]bool, recordType string) ([]string, error) {
