@@ -74,11 +74,17 @@ func runAsk(ctx context.Context, question, mode, chapterID string, maxEvidence i
 		return fmt.Errorf("load discussion provider: %w", provErr)
 	}
 
+	summaries, err := summaryContextForAsk(p, st, chapterID)
+	if err != nil {
+		return err
+	}
+
 	opts := query.Options{
 		Mode:             mode,
 		ChapterID:        chapterID,
 		MaxEvidence:      maxEvidence,
 		IncludeGenerated: includeGenerated,
+		Summaries:        summaries,
 	}
 
 	ans, err := query.Ask(ctx, st, prov, model, question, opts)

@@ -2,6 +2,7 @@ package query_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/nusapuksic/story/internal/provider"
@@ -14,6 +15,7 @@ type fakeProvider struct {
 	response      string
 	err           error
 	gotNilContext bool
+	requests      []provider.GenerationRequest
 }
 
 func (f *fakeProvider) Health(_ context.Context) error { return f.err }
@@ -23,8 +25,9 @@ func (f *fakeProvider) Models(_ context.Context) ([]provider.ModelInfo, error) {
 func (f *fakeProvider) Capabilities(_ context.Context, _ string) (provider.Capabilities, error) {
 	return provider.Capabilities{Chat: true, JSONMode: true}, f.err
 }
-func (f *fakeProvider) Generate(ctx context.Context, _ provider.GenerationRequest) (provider.GenerationResponse, error) {
+func (f *fakeProvider) Generate(ctx context.Context, req provider.GenerationRequest) (provider.GenerationResponse, error) {
 	f.gotNilContext = ctx == nil
+	f.requests = append(f.requests, req)
 	return provider.GenerationResponse{Content: f.response}, f.err
 }
 func (f *fakeProvider) Embed(_ context.Context, _ provider.EmbeddingRequest) (provider.EmbeddingResponse, error) {
@@ -121,6 +124,79 @@ func TestAskInsufficientEvidence(t *testing.T) {
 	}
 	if !isInsufficientEvidence(err) {
 		t.Errorf("expected ErrInsufficientEvidence, got: %v", err)
+	}
+}
+
+func TestAskAllowsSummaryOnlyContext(t *testing.T) {
+	st := openTestStore(t)
+	fake := &fakeProvider{response: `{"answer":"The story is about memory and place.","evidence":[],"uncertainties":[]}`}
+
+	ans, err := query.Ask(context.Background(), st, fake, "fake-model",
+		"What is the theme of the story?", query.Options{
+			Summaries: []query.SummaryContext{
+				{
+					RecordType: "book_summary",
+					Summary:    "The book keeps returning to what places remember.",
+					Themes:     []string{"The relationship between memory and physical environment"},
+					Evidence:   []string{"ch-0001"},
+				},
+			},
+		})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if ans.Answer == "" {
+		t.Fatal("expected answer from summary context")
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("expected one model request, got %d", len(fake.requests))
+	}
+	prompt := fake.requests[0].Messages[1].Content
+	if !strings.Contains(prompt, "## Summary context") {
+		t.Fatalf("prompt missing summary context: %s", prompt)
+	}
+	if !strings.Contains(prompt, "The relationship between memory and physical environment") {
+		t.Fatalf("prompt missing summary themes: %s", prompt)
+	}
+}
+
+func TestAskPrioritizesSummaryEvidenceParagraphs(t *testing.T) {
+	st := openTestStore(t)
+	if err := st.InsertChapterForTest("ch-0001", 1, "The Road"); err != nil {
+		t.Fatalf("insert chapter: %v", err)
+	}
+	const letterPID = "p-TESTID0001"
+	if err := st.InsertParagraphWithTextForTest(letterPID, "ch-0001", 1,
+		"Mara placed the unopened letter beneath the stove."); err != nil {
+		t.Fatalf("insert letter paragraph: %v", err)
+	}
+	const themePID = "p-TESTID0002"
+	if err := st.InsertParagraphWithTextForTest(themePID, "ch-0001", 2,
+		"The exposed lakebed forces Mara to confront what the village tried to forget."); err != nil {
+		t.Fatalf("insert theme paragraph: %v", err)
+	}
+
+	fake := &fakeProvider{response: `{"answer":"The theme is memory embedded in place.","evidence":["` + themePID + `"],"uncertainties":[]}`}
+	ans, err := query.Ask(context.Background(), st, fake, "fake-model",
+		"Where does Mara put the letter?", query.Options{
+			MaxEvidence: 1,
+			Summaries: []query.SummaryContext{
+				{RecordType: "book_summary", Summary: "The story centers memory and place.", Themes: []string{"Memory embedded in place"}, Evidence: []string{"ch-0001"}},
+				{RecordType: "chapter_summary", ChapterID: "ch-0001", Evidence: []string{themePID}},
+			},
+		})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(ans.Evidence) != 1 || ans.Evidence[0].ParagraphID != themePID {
+		t.Fatalf("expected summary evidence %s to validate, got %#v", themePID, ans.Evidence)
+	}
+	prompt := fake.requests[0].Messages[1].Content
+	if !strings.Contains(prompt, "Memory embedded in place") || !strings.Contains(prompt, themePID) {
+		t.Fatalf("prompt missing prioritized summary context/evidence: %s", prompt)
+	}
+	if strings.Contains(prompt, letterPID) {
+		t.Fatalf("prompt included lower-priority FTS paragraph despite MaxEvidence=1: %s", prompt)
 	}
 }
 

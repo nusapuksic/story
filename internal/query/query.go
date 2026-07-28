@@ -2,11 +2,12 @@
 //
 // The pipeline:
 //  1. Retrieve relevant scene cards and paragraphs (FTS search).
-//  2. Collect the paragraph text for matched scenes.
-//  3. Construct a bounded evidence packet.
-//  4. Call the discussion model.
-//  5. Validate all evidence identifiers returned by the model.
-//  6. Return the answer with provenance.
+//  2. Add generated summary context and supporting paragraph evidence.
+//  3. Collect the paragraph text for matched scenes.
+//  4. Construct a bounded evidence packet.
+//  5. Call the discussion model.
+//  6. Validate all evidence identifiers returned by the model.
+//  7. Return the answer with provenance.
 package query
 
 import (
@@ -30,6 +31,18 @@ var ErrInsufficientEvidence = errors.New("insufficient evidence to answer the qu
 type EvidenceItem struct {
 	ParagraphID string `json:"paragraph_id"`
 	ChapterID   string `json:"chapter_id"`
+}
+
+// SummaryContext is a generated chapter or book summary made available to ask.
+type SummaryContext struct {
+	RecordType    string
+	ChapterID     string
+	ChapterTitle  string
+	Summary       string
+	Themes        []string
+	Unresolved    []string
+	Evidence      []string
+	SourceRecords []string
 }
 
 // Answer is the result of an Ask call.
@@ -61,6 +74,9 @@ type Options struct {
 	// MaxEvidence is the maximum number of paragraphs to include in the
 	// evidence packet (default 20).
 	MaxEvidence int
+	// Summaries are generated book/chapter summaries to include as high-level
+	// context, especially for interpretive questions.
+	Summaries []SummaryContext
 }
 
 // rawAnswer is the LLM response structure before validation.
@@ -110,30 +126,47 @@ func Ask(
 		ret.SceneCards = cards
 	}
 
-	// Step 2: For each matched scene card, also pull in any paragraphs from
-	// the scene that are not already in the retrieved set.
-	paraBylID := make(map[string]store.ParagraphRow, len(ret.Paragraphs))
-	for _, p := range ret.Paragraphs {
-		paraBylID[p.ID] = p
+	paragraphs := make([]store.ParagraphRow, 0, len(ret.Paragraphs))
+	paraByID := make(map[string]store.ParagraphRow, len(ret.Paragraphs))
+	addParagraph := func(p store.ParagraphRow) {
+		if strings.TrimSpace(p.ID) == "" {
+			return
+		}
+		if _, ok := paraByID[p.ID]; ok {
+			return
+		}
+		paraByID[p.ID] = p
+		paragraphs = append(paragraphs, p)
 	}
+
+	// Step 2: Summary evidence is ranked first so high-level theme/context
+	// answers do not lose their support when the evidence packet is capped.
+	for _, p := range summaryEvidenceParagraphs(st, opts.Summaries, opts.ChapterID) {
+		addParagraph(p)
+	}
+	for _, p := range ret.Paragraphs {
+		addParagraph(p)
+	}
+
+	// Step 3: For each matched scene card, also pull in any paragraphs from
+	// the scene that are not already in the retrieved set.
 	for _, card := range ret.SceneCards {
 		for _, pid := range card.Evidence {
-			if _, ok := paraBylID[pid]; ok {
+			if _, ok := paraByID[pid]; ok {
 				continue
 			}
 			p, err := st.InspectParagraph(pid)
 			if err != nil {
 				continue
 			}
-			paraBylID[pid] = p
-			ret.Paragraphs = append(ret.Paragraphs, p)
+			addParagraph(p)
 		}
 	}
 
-	// Step 2b: If still no paragraphs (e.g. no scene cards compiled yet),
+	// Step 3b: If still no paragraphs (e.g. no scene cards compiled yet),
 	// gather all indexed paragraphs from all chapters as a broad fallback.
 	// This ensures the question can still be answered from source text alone.
-	if len(ret.Paragraphs) == 0 {
+	if len(paragraphs) == 0 {
 		chapters, chErr := st.AllChapters()
 		if chErr == nil {
 			for _, ch := range chapters {
@@ -145,22 +178,17 @@ func Ask(
 					continue
 				}
 				for _, p := range paras {
-					if _, ok := paraBylID[p.ID]; !ok {
-						paraBylID[p.ID] = p
-						ret.Paragraphs = append(ret.Paragraphs, p)
-					}
+					addParagraph(p)
 				}
 			}
 		}
 	}
-
-	// Step 3: Check whether we have enough evidence.
-	if len(ret.Paragraphs) == 0 && len(ret.SceneCards) == 0 {
+	// Step 4: Check whether we have enough context.
+	if len(paragraphs) == 0 && len(ret.SceneCards) == 0 && len(opts.Summaries) == 0 {
 		return nil, ErrInsufficientEvidence
 	}
 
 	// Cap paragraphs at MaxEvidence.
-	paragraphs := ret.Paragraphs
 	if len(paragraphs) > opts.MaxEvidence {
 		paragraphs = paragraphs[:opts.MaxEvidence]
 	}
@@ -171,9 +199,9 @@ func Ask(
 		validIDs[p.ID] = p.ChapterID
 	}
 
-	// Step 4: Build the evidence packet and call the discussion model.
+	// Step 5: Build the evidence packet and call the discussion model.
 	systemPrompt := buildSystemPrompt(opts.Mode)
-	userPrompt := buildUserPrompt(question, opts.Mode, ret.SceneCards, paragraphs)
+	userPrompt := buildUserPrompt(question, opts.Mode, opts.Summaries, ret.SceneCards, paragraphs)
 
 	queryRunID := ids.NewQueryRunID()
 	req := provider.GenerationRequest{
@@ -192,13 +220,13 @@ func Ask(
 		return nil, fmt.Errorf("discussion model call: %w", err)
 	}
 
-	// Step 5: Parse and validate the model response.
+	// Step 6: Parse and validate the model response.
 	raw, err := parseAnswerResponse(resp.Content)
 	if err != nil {
 		return nil, fmt.Errorf("parse model response: %w", err)
 	}
 
-	// Step 6: Validate evidence citations – remove any IDs not in the packet.
+	// Step 7: Validate evidence citations – remove any IDs not in the packet.
 	var validatedEvidence []EvidenceItem
 	for _, pid := range raw.Evidence {
 		chapterID, ok := validIDs[pid]
@@ -218,6 +246,73 @@ func Ask(
 		Uncertainties: raw.Uncertainties,
 		QueryRunID:    queryRunID,
 	}, nil
+}
+
+func summaryEvidenceParagraphs(st *store.Store, summaries []SummaryContext, chapterID string) []store.ParagraphRow {
+	if len(summaries) == 0 {
+		return nil
+	}
+
+	chapterEvidence := make(map[string][]string)
+	for _, summary := range summaries {
+		if summary.RecordType != "chapter_summary" || summary.ChapterID == "" {
+			continue
+		}
+		for _, evidenceID := range summary.Evidence {
+			if isParagraphReference(evidenceID) {
+				chapterEvidence[summary.ChapterID] = append(chapterEvidence[summary.ChapterID], strings.TrimSpace(evidenceID))
+			}
+		}
+	}
+
+	var ids []string
+	seen := make(map[string]bool)
+	addID := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+
+	for _, summary := range summaries {
+		if chapterID != "" && summary.RecordType == "chapter_summary" && summary.ChapterID != chapterID {
+			continue
+		}
+		for _, evidenceID := range summary.Evidence {
+			switch {
+			case isParagraphReference(evidenceID):
+				addID(evidenceID)
+			case isChapterReference(evidenceID):
+				chapterRef := strings.TrimSpace(evidenceID)
+				if chapterID != "" && chapterRef != chapterID {
+					continue
+				}
+				for _, paragraphID := range chapterEvidence[chapterRef] {
+					addID(paragraphID)
+				}
+			}
+		}
+	}
+
+	paragraphs := make([]store.ParagraphRow, 0, len(ids))
+	for _, id := range ids {
+		p, err := st.InspectParagraph(id)
+		if err != nil {
+			continue
+		}
+		paragraphs = append(paragraphs, p)
+	}
+	return paragraphs
+}
+
+func isParagraphReference(id string) bool {
+	return strings.HasPrefix(strings.TrimSpace(id), "p-")
+}
+
+func isChapterReference(id string) bool {
+	return strings.HasPrefix(strings.TrimSpace(id), "ch-")
 }
 
 // parseAnswerResponse parses the LLM response JSON.  It tolerates markdown

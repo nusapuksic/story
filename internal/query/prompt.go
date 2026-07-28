@@ -9,16 +9,17 @@ import (
 // buildSystemPrompt returns the system prompt for the discussion model.
 func buildSystemPrompt(mode string) string {
 	base := `You are a literary analyst answering questions about a fiction manuscript.
-Answer strictly from the evidence provided. Do not use general narrative expectations.
+Answer strictly from the provided context. Do not use general narrative expectations.
 Return ONLY a JSON object with this exact schema:
 {"answer":"...","evidence":["p-...","p-..."],"uncertainties":["..."]}
 
 Rules:
-- "answer": your prose answer grounded in the evidence.
+- "answer": your prose answer grounded in the provided context.
+- Use summary context when provided for high-level themes, motifs, arcs, or whole-book orientation.
 - "evidence": list only paragraph IDs from the provided evidence that directly support your answer. Omit IDs that do not support the answer.
 - "uncertainties": list genuine gaps or unresolved questions from the manuscript. Omit if none.
 - Cite no paragraph IDs that were not provided to you.
-- If the evidence is insufficient, say so in "answer" and leave "evidence" empty.`
+- If the provided context is insufficient, say so in "answer" and leave "evidence" empty.`
 
 	switch mode {
 	case "continuity":
@@ -38,10 +39,22 @@ Rules:
 // context, evidence paragraphs, and the question.
 func buildUserPrompt(
 	question, mode string,
+	summaries []SummaryContext,
 	cards []store.SceneCardRow,
 	paragraphs []store.ParagraphRow,
 ) string {
 	var sb strings.Builder
+
+	if hasVisibleSummaryContext(summaries) {
+		sb.WriteString("## Summary context\n\n")
+		sb.WriteString("Use this generated context for high-level interpretation. It is not a citation source; cite only paragraph IDs from the evidence paragraphs below.\n\n")
+		for _, s := range summaries {
+			if !isVisibleSummaryContext(s) {
+				continue
+			}
+			writeSummaryContext(&sb, s)
+		}
+	}
 
 	if len(cards) > 0 {
 		sb.WriteString("## Scene context\n\n")
@@ -73,4 +86,79 @@ func buildUserPrompt(
 	sb.WriteString("Answer in JSON as specified. Cite only paragraph IDs listed above.")
 
 	return sb.String()
+}
+
+func hasVisibleSummaryContext(summaries []SummaryContext) bool {
+	for _, s := range summaries {
+		if isVisibleSummaryContext(s) {
+			return true
+		}
+	}
+	return false
+}
+
+func isVisibleSummaryContext(s SummaryContext) bool {
+	return strings.TrimSpace(s.Summary) != "" || hasListValue(s.Themes) || hasListValue(s.Unresolved)
+}
+
+func hasListValue(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func writeSummaryContext(sb *strings.Builder, s SummaryContext) {
+	switch s.RecordType {
+	case "book_summary":
+		sb.WriteString("Book summary\n")
+	case "chapter_summary":
+		sb.WriteString("Chapter summary")
+		if s.ChapterID != "" {
+			sb.WriteString(" [")
+			sb.WriteString(s.ChapterID)
+			sb.WriteString("]")
+		}
+		if s.ChapterTitle != "" {
+			sb.WriteString(" ")
+			sb.WriteString(s.ChapterTitle)
+		}
+		sb.WriteString("\n")
+	default:
+		sb.WriteString("Summary")
+		if s.RecordType != "" {
+			sb.WriteString(" [")
+			sb.WriteString(s.RecordType)
+			sb.WriteString("]")
+		}
+		sb.WriteString("\n")
+	}
+
+	if text := strings.TrimSpace(s.Summary); text != "" {
+		sb.WriteString(text)
+		sb.WriteString("\n")
+	}
+	writePromptList(sb, "Themes", s.Themes)
+	writePromptList(sb, "Unresolved", s.Unresolved)
+	writePromptList(sb, "Supporting references", s.Evidence)
+	sb.WriteString("\n")
+}
+
+func writePromptList(sb *strings.Builder, label string, values []string) {
+	if !hasListValue(values) {
+		return
+	}
+	sb.WriteString(label)
+	sb.WriteString(":\n")
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		sb.WriteString("- ")
+		sb.WriteString(value)
+		sb.WriteString("\n")
+	}
 }
