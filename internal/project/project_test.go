@@ -41,6 +41,45 @@ func TestInitCreatesLayout(t *testing.T) {
 	}
 }
 
+func TestInitDefaultModelPopulatesLLMRoles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "novel")
+	p, err := Init(dir, InitOptions{Title: "My Novel", DefaultModel: "llama3.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"extraction", "verification", "discussion"} {
+		role, ok := p.Config.LLM.Roles[name]
+		if !ok {
+			t.Fatalf("missing role %q", name)
+		}
+		if role.Model != "llama3.1" {
+			t.Errorf("role %s model = %q, want llama3.1", name, role.Model)
+		}
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Config.LLM.Roles["discussion"].Model != "llama3.1" {
+		t.Errorf("reopened discussion model = %q, want llama3.1", reopened.Config.LLM.Roles["discussion"].Model)
+	}
+}
+
+func TestOpenOrInitInitializesWithDefaultModel(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "generated")
+	p, initialized, err := OpenOrInit(dir, InitOptions{DefaultModel: "mistral"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !initialized {
+		t.Fatal("initialized = false, want true")
+	}
+	if p.Config.LLM.Roles["extraction"].Model != "mistral" {
+		t.Errorf("extraction model = %q, want mistral", p.Config.LLM.Roles["extraction"].Model)
+	}
+}
+
 func TestInitFailsOnNonemptyWithoutForce(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "existing.txt"), []byte("x"), 0o644); err != nil {

@@ -41,6 +41,7 @@ func newInitCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.Title, "title", "", "project title")
 	cmd.Flags().StringVar(&opts.Language, "language", "en", "project language code")
+	cmd.Flags().StringVar(&opts.DefaultModel, "model", "", "model ID to use for all LLM roles")
 	cmd.Flags().BoolVar(&opts.Force, "force", false, "initialize even when the destination is nonempty")
 	return cmd
 }

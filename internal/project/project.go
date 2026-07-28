@@ -75,9 +75,10 @@ var reviewFiles = []string{
 
 // InitOptions control project initialization.
 type InitOptions struct {
-	Title    string
-	Language string
-	Force    bool
+	Title        string
+	Language     string
+	DefaultModel string
+	Force        bool
 }
 
 // Init creates a new project in dir. It fails with ErrNotEmpty when the
@@ -120,6 +121,12 @@ func Init(dir string, opts InitOptions) (*Project, error) {
 	}
 
 	cfg := config.Default(ids.NewProjectID(), opts.Title, opts.Language)
+	if opts.DefaultModel != "" {
+		for name, role := range cfg.LLM.Roles {
+			role.Model = opts.DefaultModel
+			cfg.LLM.Roles[name] = role
+		}
+	}
 	if err := config.Save(dir, cfg); err != nil {
 		return nil, fmt.Errorf("init %s: %w", dir, err)
 	}
@@ -149,9 +156,10 @@ func OpenOrInit(dir string, opts InitOptions) (*Project, bool, error) {
 	}
 
 	p, err := Init(dir, InitOptions{
-		Title:    opts.Title,
-		Language: opts.Language,
-		Force:    true,
+		Title:        opts.Title,
+		Language:     opts.Language,
+		DefaultModel: opts.DefaultModel,
+		Force:        true,
 	})
 	if err != nil {
 		return nil, false, err

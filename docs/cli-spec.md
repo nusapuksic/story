@@ -325,13 +325,14 @@ Options:
 
 --title <title>
 --language <code>
+--model <model-id>    Use one model for all generated LLM roles.
 --force
 
 Behavior:
 
 1. create the project directory;
 2. generate project_id;
-3. write default configuration;
+3. write default configuration, populating all LLM role models from --model when provided;
 4. create canonical directories;
 5. initialize SQLite;
 6. copy default prompts.
@@ -352,6 +353,7 @@ The path may point to either:
 Common options:
 
 --title <title>
+--model <model-id>    Used only when import initializes a missing project.
 --replace
 --dry-run
 

@@ -25,12 +25,16 @@ func newImportCmd() *cobra.Command {
 
 func newImportMDCmd() *cobra.Command {
 	var opts importmd.Options
+	var defaultModel string
 	cmd := &cobra.Command{
 		Use:   "md <path>",
 		Short: "Import Markdown from a chapter folder or continuous file",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, initialized, err := project.OpenOrInit(flags.projectDir, project.InitOptions{Title: opts.Title})
+			p, initialized, err := project.OpenOrInit(flags.projectDir, project.InitOptions{
+				Title:        opts.Title,
+				DefaultModel: defaultModel,
+			})
 			if err != nil {
 				return err
 			}
@@ -64,6 +68,7 @@ func newImportMDCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.TOC, "toc", "", "explicit source manifest path")
 	cmd.Flags().StringVar(&opts.Pattern, "pattern", "*.md", "source file glob")
 	cmd.Flags().StringVar(&opts.Title, "title", "", "project title override")
+	cmd.Flags().StringVar(&defaultModel, "model", "", "model ID to use for all LLM roles when initializing a project")
 	cmd.Flags().BoolVar(&opts.Replace, "replace", false, "replace an existing canonical manuscript")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "detect and report without modifying the manuscript")
 	cmd.Flags().IntVar(&opts.ChapterHeadingLevel, "chapter-heading-level", 1, "heading level for splitting a continuous Markdown file")
