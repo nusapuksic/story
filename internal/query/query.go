@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/nusapuksic/story/internal/ids"
+	storyprompts "github.com/nusapuksic/story/internal/prompts"
 	"github.com/nusapuksic/story/internal/provider"
 	"github.com/nusapuksic/story/internal/retrieval"
 	"github.com/nusapuksic/story/internal/store"
@@ -57,7 +58,8 @@ type Answer struct {
 	// Uncertainties are hedges or open questions noted by the model.
 	Uncertainties []string `json:"uncertainties,omitempty"`
 	// QueryRunID is the identifier for this query run.
-	QueryRunID string `json:"model_run"`
+	QueryRunID    string `json:"model_run"`
+	PromptVersion string `json:"prompt_version,omitempty"`
 }
 
 // Options controls a query.
@@ -74,6 +76,8 @@ type Options struct {
 	// MaxEvidence is the maximum number of paragraphs to include in the
 	// evidence packet (default 20).
 	MaxEvidence int
+	// PromptsDir is the project prompts directory. Empty uses embedded defaults.
+	PromptsDir string
 	// Summaries are generated book/chapter summaries to include as high-level
 	// context, especially for interpretive questions.
 	Summaries []SummaryContext
@@ -200,7 +204,12 @@ func Ask(
 	}
 
 	// Step 5: Build the evidence packet and call the discussion model.
-	systemPrompt := buildSystemPrompt(opts.Mode)
+	loadedPrompt, err := storyprompts.Load(opts.PromptsDir, storyprompts.AnswerQuestion)
+	if err != nil {
+		fallback, _ := storyprompts.Default(storyprompts.AnswerQuestion)
+		loadedPrompt = fallback
+	}
+	systemPrompt := buildSystemPrompt(loadedPrompt.Content, opts.Mode)
 	userPrompt := buildUserPrompt(question, opts.Mode, opts.Summaries, ret.SceneCards, paragraphs)
 
 	queryRunID := ids.NewQueryRunID()
@@ -245,6 +254,7 @@ func Ask(
 		Evidence:      validatedEvidence,
 		Uncertainties: raw.Uncertainties,
 		QueryRunID:    queryRunID,
+		PromptVersion: loadedPrompt.Version,
 	}, nil
 }
 

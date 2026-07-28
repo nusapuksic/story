@@ -53,13 +53,15 @@ type RunRecord struct {
 
 // TaskRecord is one entry appended to .story/runs/<run-id>/tasks.jsonl.
 type TaskRecord struct {
-	TaskID    string `json:"task_id"`
-	RunID     string `json:"run_id"`
-	TaskType  string `json:"task_type"`
-	ChapterID string `json:"chapter_id,omitempty"`
-	SceneID   string `json:"scene_id,omitempty"`
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
+	TaskID        string `json:"task_id"`
+	RunID         string `json:"run_id"`
+	TaskType      string `json:"task_type"`
+	ChapterID     string `json:"chapter_id,omitempty"`
+	SceneID       string `json:"scene_id,omitempty"`
+	RecordID      string `json:"record_id,omitempty"`
+	PromptVersion string `json:"prompt_version,omitempty"`
+	Status        string `json:"status"`
+	Error         string `json:"error,omitempty"`
 }
 
 // Run manages the lifecycle of one compilation run.
@@ -159,14 +161,16 @@ func (r *Run) save() error {
 }
 
 // SaveSummary writes a summary.json to the run directory.
-func (r *Run) saveSummary(scenes, cards, summaries int) error {
+func (r *Run) saveSummary(scenes, cards, entities, verifications, summaries int) error {
 	data, err := json.MarshalIndent(map[string]any{
-		"run_id":          r.Record.RunID,
-		"scenes_built":    scenes,
-		"cards_built":     cards,
-		"summaries_built": summaries,
-		"finished_at":     r.Record.FinishedAt,
-		"status":          r.Record.Status,
+		"run_id":              r.Record.RunID,
+		"scenes_built":        scenes,
+		"cards_built":         cards,
+		"entities_built":      entities,
+		"verifications_built": verifications,
+		"summaries_built":     summaries,
+		"finished_at":         r.Record.FinishedAt,
+		"status":              r.Record.Status,
 	}, "", "  ")
 	if err != nil {
 		return err

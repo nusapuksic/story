@@ -23,6 +23,12 @@ Each release also includes `SHA256SUMS.txt` for verifying downloaded assets:
 sha256sum -c SHA256SUMS.txt
 ```
 
+On Windows PowerShell, use `Get-FileHash` and compare the output with the matching line in `SHA256SUMS.txt`:
+
+```powershell
+Get-FileHash .\story-v<version>-windows-amd64.zip -Algorithm SHA256
+```
+
 ## Build
 
 ```
@@ -31,9 +37,8 @@ go build ./cmd/story
 
 ## Demo Flow
 
-Start with a manuscript in a Markdown file saved somewhere on your machine. 
-The manuscript will not be uploaded anywhere, the import will only create its own copy,
-then locally deconstruct it into chapters, paragraphs and scenes. Those are then used to manage the context for the LLM.
+Start with a manuscript in a Markdown file saved somewhere on your machine.
+Import itself does not upload your manuscript. It creates a local project copy and normalizes it into chapters and paragraphs. `story compile` then builds scenes, scene cards, entities, verification records, and summaries that manage context for the LLM. With the default local setup, `compile` and `ask` talk to a model server on your machine; if you configure a remote provider, excerpted evidence is sent to that endpoint.
 
 A typical Windows PowerShell first run looks like this:
 
@@ -136,13 +141,13 @@ The import preserves your original files under `source/original/`, normalizes th
 
    If your endpoint requires an API key, store the environment variable name in `api_key_env`; do not put the key itself in `story.toml`.
 
-4. Verify the connection from the project directory:
+4. Verify the connection for the project:
 
    ```
    story --project ./my-novel llm doctor
    ```
 
-   Once this passes, `story compile`, `story compile --layer scene-cards`, and `story ask` can call the configured local model. `story compile --layer scenes` can still build deterministic scene boundaries without an LLM.
+   Once this passes, `story compile`, `story compile --layer scene-cards`, `story compile --layer entities`, `story compile --layer verification`, `story compile --layer summaries`, and `story ask` can call the configured local model. Full `story compile` uses the verification role when `[compile].verification = true`. `story compile --layer scenes` can still build deterministic scene boundaries without an LLM.
 
 ## Usage
 
@@ -151,6 +156,7 @@ story init ./my-novel --title "My Novel" --model <your-local-model-id>
 story --project ./my-novel import md ./chapters
 story --project ./my-novel import md ./manuscript.md
 story --project ./my-novel status
+story --project ./my-novel doctor
 story --project ./my-novel inspect chapter ch-0001
 story --project ./my-novel inspect paragraph p-<ULID>
 story --project ./my-novel inspect summary book
@@ -158,8 +164,11 @@ story --project ./my-novel inspect summary ch-0001
 story --project ./my-novel import report
 story --project ./my-novel index rebuild
 story --project ./my-novel compile
+story --project ./my-novel compile status
 story --project ./my-novel compile --layer scenes
 story --project ./my-novel compile --layer scene-cards
+story --project ./my-novel compile --layer entities
+story --project ./my-novel compile --layer verification
 story --project ./my-novel compile --layer summaries
 story --project ./my-novel search "farmhouse fire"
 story --project ./my-novel search "Mara" --chapter ch-0004 --limit 10
@@ -172,9 +181,34 @@ Markdown import accepts either a folder of chapter files or one continuous `.md`
 
 The SQLite index at `.story/index.sqlite` is a rebuildable projection of the canonical project files; deleting it never loses data (`story index rebuild` reconstructs it).
 
-`story compile` builds the story model from the canonical manuscript in layers (`scenes`, `scene-cards`, `summaries`). It requires a configured LLM provider (see `docs/cli-spec.md`).
+`story compile` builds the story model from the canonical manuscript in layers: `scenes`, `scene-cards`, `entities`, `verification`, and `summaries`. `scenes` can run from explicit manuscript scene breaks without an LLM; model-assisted scene detection and the other compile layers require configured LLM roles (see `docs/cli-spec.md`).
 
 `story search` runs full-text search over indexed paragraphs and scene cards. The FTS index is populated during indexing; run `story index rebuild` to refresh it.
+
+## Prompts
+
+Every project has editable prompt templates under `prompts/`:
+
+* `scene-boundaries.md`
+* `scene-extraction.md`
+* `entity-resolution.md`
+* `record-verification.md`
+* `chapter-summary.md`
+* `book-summary.md`
+* `answer-question.md`
+
+Compiler tasks and `story ask` load these project prompts at runtime. If a prompt file is missing or blank, `story` falls back to its embedded default. When customizing a prompt, keep the `<!-- prompt_version: ... -->` marker so generated records and run tasks keep useful provenance.
+
+## Generated Artifacts
+
+Canonical generated records live in `model/` as JSONL files:
+
+* `scenes.jsonl` stores scene boundaries and scene cards, including verification updates.
+* `entities.jsonl` stores extracted candidate entities.
+* `mentions.jsonl` stores paragraph-level entity mentions.
+* `summaries.jsonl` stores chapter and book summaries.
+
+Each compile run also writes `.story/runs/<run-id>/` with `run.json`, `summary.json`, task records, errors when present, and raw model responses. These run files are provenance and debugging artifacts; the rebuildable SQLite index is still derived from the canonical project files.
 
 `story ask` retrieves relevant evidence from the index, sends it to the configured discussion model, validates cited paragraph identifiers, and returns an answer with provenance. Available modes: `recall` (default), `continuity`, `interpretation`, `style`, `development`. When the index does not contain enough evidence to answer, the command exits with code 40.
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/nusapuksic/story/internal/project"
 	"github.com/nusapuksic/story/internal/provider"
 	"github.com/nusapuksic/story/internal/query"
 )
@@ -84,6 +85,7 @@ func runAsk(ctx context.Context, question, mode, chapterID string, maxEvidence i
 		ChapterID:        chapterID,
 		MaxEvidence:      maxEvidence,
 		IncludeGenerated: includeGenerated,
+		PromptsDir:       p.Path(project.PromptsDir),
 		Summaries:        summaries,
 	}
 

@@ -712,3 +712,95 @@ func TestCompileSummariesRequiresProvider(t *testing.T) {
 		t.Fatal("expected error when no provider configured for summaries")
 	}
 }
+
+func TestCompileEntitiesWithFakeProvider(t *testing.T) {
+	p, st := buildTestProject(t)
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	if len(paragraphs) == 0 {
+		t.Fatal("expected chapter paragraphs")
+	}
+
+	fake := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","aliases":["she"],"mentions":[{"paragraph_id":"` + paragraphs[0].ID + `","surface_text":"Mara","confidence":0.95}]}]}`}
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities: %v", err)
+	}
+	if result.EntitiesBuilt != 1 {
+		t.Fatalf("EntitiesBuilt = %d, want 1", result.EntitiesBuilt)
+	}
+	entities, mentions, err := st.EntityCounts()
+	if err != nil {
+		t.Fatalf("EntityCounts: %v", err)
+	}
+	if entities != 1 || mentions != 1 {
+		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, mentions)
+	}
+
+	data, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, "mentions.jsonl")))
+	if err != nil {
+		t.Fatalf("read mentions.jsonl: %v", err)
+	}
+	if !strings.Contains(string(data), `"record_type":"mention"`) {
+		t.Fatalf("mentions.jsonl missing mention record: %s", data)
+	}
+}
+
+func TestCompileVerificationWithFakeProvider(t *testing.T) {
+	p, st := buildTestProject(t)
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerScenes})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	fakeCards := &fakeProvider{responses: []string{
+		`{"title":"Mara walks","summary":"Mara walks the road.","evidence":["` + paragraphs[0].ID + `"]}`,
+		`{"title":"Sunrise","summary":"The sun rises over the hills.","evidence":["` + paragraphs[1].ID + `"]}`,
+	}}
+	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSceneCards,
+		ExtractionProvider: fakeCards,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile scene-cards: %v", err)
+	}
+
+	fakeVerify := &fakeProvider{response: `{"supported":true,"support_level":"explicit","epistemic_type":"scene_card","overstatement":null,"missing_counterevidence":false}`}
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:                compiler.LayerVerification,
+		VerificationProvider: fakeVerify,
+		VerificationModel:    "verify-model",
+	})
+	if err != nil {
+		t.Fatalf("compile verification: %v", err)
+	}
+	if result.VerificationsBuilt != 2 {
+		t.Fatalf("VerificationsBuilt = %d, want 2", result.VerificationsBuilt)
+	}
+
+	cards, err := st.AllSceneCards()
+	if err != nil {
+		t.Fatalf("AllSceneCards: %v", err)
+	}
+	if len(cards) != 2 {
+		t.Fatalf("cards = %d, want 2", len(cards))
+	}
+	for _, card := range cards {
+		if card.Status != "verified" {
+			t.Fatalf("card %s status = %q, want verified", card.SceneID, card.Status)
+		}
+		if !strings.Contains(card.RawJSON, `"verification"`) {
+			t.Fatalf("card %s raw json missing verification: %s", card.SceneID, card.RawJSON)
+		}
+	}
+}

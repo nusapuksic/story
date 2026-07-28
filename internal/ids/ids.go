@@ -46,6 +46,11 @@ func NewTaskID() string {
 	return "task-" + NewULID()
 }
 
+// NewEntityID returns a new entity identifier of the form entity-<ULID>.
+func NewEntityID() string {
+	return "entity-" + NewULID()
+}
+
 // NewQueryRunID returns a new query run identifier of the form query-<ULID>.
 func NewQueryRunID() string {
 	return "query-" + NewULID()

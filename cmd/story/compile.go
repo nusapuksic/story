@@ -22,9 +22,11 @@ func newCompileCmd() *cobra.Command {
 		Long: `Compile constructs the story model from the canonical manuscript.
 
 Supported layers:
-  scenes       Detect scene boundaries (explicit + optional LLM proposals)
-  scene-cards  Extract structured scene cards using the configured LLM
-  summaries    Generate chapter and book summaries using the configured LLM
+  scenes        Detect scene boundaries (explicit + optional LLM proposals)
+  scene-cards   Extract structured scene cards using the configured LLM
+  entities      Extract candidate entities and paragraph-level mentions
+  verification  Verify generated scene cards against cited manuscript evidence
+  summaries     Generate chapter and book summaries using the configured LLM
 
 Without --layer, all implemented layers are run in order.`,
 		Args: cobra.NoArgs,
@@ -32,7 +34,7 @@ Without --layer, all implemented layers are run in order.`,
 			return runCompile(layer, chapterID, force)
 		},
 	}
-	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes, scene-cards, or summaries")
+	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes, scene-cards, entities, verification, or summaries")
 	cmd.Flags().StringVar(&chapterID, "chapter", "", "restrict to one chapter (e.g. ch-0001)")
 	cmd.Flags().BoolVar(&force, "force", false, "recompute already-generated records")
 	cmd.AddCommand(newCompileStatusCmd())
@@ -62,10 +64,9 @@ func runCompile(layer, chapterID string, force bool) error {
 		return errors.New("no chapters found: run 'story import md' before compiling")
 	}
 
-	// Build extraction provider from config, if configured.
 	var extractProv provider.Provider
 	var extractModel string
-	if layer == "" || layer == compiler.LayerSceneCards || layer == compiler.LayerSummaries {
+	if compileNeedsExtractionProvider(layer) {
 		prov, model, provErr := provider.ForRole(p.Config.LLM, "extraction")
 		if provErr == nil {
 			extractProv = prov
@@ -73,19 +74,33 @@ func runCompile(layer, chapterID string, force bool) error {
 		} else if !errors.Is(provErr, provider.ErrNoProvider) {
 			return fmt.Errorf("load extraction provider: %w", provErr)
 		}
-		// ErrNoProvider is fine for LLM-backed layers (will fail gracefully
-		// inside the compiler with a clear message).
+		// ErrNoProvider is fine for optional scene proposals and will become a
+		// clear compiler error for mandatory LLM-backed layers.
+	}
+
+	var verifyProv provider.Provider
+	var verifyModel string
+	if compileNeedsVerificationProvider(layer, p.Config.Compile.Verification) {
+		prov, model, provErr := provider.ForRole(p.Config.LLM, "verification")
+		if provErr == nil {
+			verifyProv = prov
+			verifyModel = model
+		} else if !errors.Is(provErr, provider.ErrNoProvider) {
+			return fmt.Errorf("load verification provider: %w", provErr)
+		}
 	}
 
 	opts := compiler.Options{
-		Layer:              layer,
-		ChapterID:          chapterID,
-		Force:              force,
-		ExtractionProvider: extractProv,
-		ExtractionModel:    extractModel,
+		Layer:                layer,
+		ChapterID:            chapterID,
+		Force:                force,
+		ExtractionProvider:   extractProv,
+		ExtractionModel:      extractModel,
+		VerificationProvider: verifyProv,
+		VerificationModel:    verifyModel,
 	}
 
-	info("Compiling manuscript (layer=%q, chapter=%q, force=%v)…",
+	info("Compiling manuscript (layer=%q, chapter=%q, force=%v)...",
 		layer, chapterID, force)
 
 	result, err := compiler.Compile(nil, p, st, opts)
@@ -95,17 +110,34 @@ func runCompile(layer, chapterID string, force bool) error {
 
 	if flags.jsonOut {
 		return printJSON(map[string]any{
-			"run_id":          result.RunID,
-			"scenes_built":    result.ScenesBuilt,
-			"cards_built":     result.CardsBuilt,
-			"summaries_built": result.SummariesBuilt,
+			"run_id":              result.RunID,
+			"scenes_built":        result.ScenesBuilt,
+			"cards_built":         result.CardsBuilt,
+			"entities_built":      result.EntitiesBuilt,
+			"verifications_built": result.VerificationsBuilt,
+			"summaries_built":     result.SummariesBuilt,
 		})
 	}
 	info("Run: %s", result.RunID)
-	info("Scenes built:     %d", result.ScenesBuilt)
-	info("Scene cards built: %d", result.CardsBuilt)
-	info("Summaries built:   %d", result.SummariesBuilt)
+	info("Scenes built:        %d", result.ScenesBuilt)
+	info("Scene cards built:   %d", result.CardsBuilt)
+	info("Entities built:      %d", result.EntitiesBuilt)
+	info("Verifications built: %d", result.VerificationsBuilt)
+	info("Summaries built:     %d", result.SummariesBuilt)
 	return nil
+}
+
+func compileNeedsExtractionProvider(layer string) bool {
+	switch layer {
+	case "", compiler.LayerScenes, compiler.LayerSceneCards, compiler.LayerEntities, compiler.LayerSummaries:
+		return true
+	default:
+		return false
+	}
+}
+
+func compileNeedsVerificationProvider(layer string, verificationEnabled bool) bool {
+	return layer == compiler.LayerVerification || (layer == "" && verificationEnabled)
 }
 
 // newCompileStatusCmd shows the current compilation status.
@@ -132,18 +164,26 @@ func newCompileStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			entities, mentions, err := st.EntityCounts()
+			if err != nil {
+				return err
+			}
 			if flags.jsonOut {
 				return printJSON(map[string]any{
 					"chapters":    chapters,
 					"paragraphs":  paragraphs,
 					"scenes":      scenes,
 					"scene_cards": cards,
+					"entities":    entities,
+					"mentions":    mentions,
 				})
 			}
 			info("Chapters:    %d", chapters)
 			info("Paragraphs:  %d", paragraphs)
 			info("Scenes:      %d", scenes)
 			info("Scene cards: %d", cards)
+			info("Entities:    %d", entities)
+			info("Mentions:    %d", mentions)
 			return nil
 		},
 	}

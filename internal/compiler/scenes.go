@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/nusapuksic/story/internal/ids"
+	"github.com/nusapuksic/story/internal/project"
+	storyprompts "github.com/nusapuksic/story/internal/prompts"
 	"github.com/nusapuksic/story/internal/provider"
 	"github.com/nusapuksic/story/internal/store"
 )
@@ -56,6 +58,7 @@ type boundaryResponse struct {
 // If prov is nil the function falls back to explicit-only detection.
 func detectScenes(
 	ctx context.Context,
+	p *project.Project,
 	ch store.ChapterRow,
 	paragraphs []store.ParagraphRow,
 	blocks []store.ChapterRow, // unused – kept for future multi-source
@@ -75,7 +78,7 @@ func detectScenes(
 
 	// Merge with LLM proposals if a provider is configured and mode requires it.
 	if prov != nil && cfg.Mode != "explicit" {
-		proposed, err := proposeSceneBoundaries(ctx, ch, paragraphs, prov, model, cfg, run)
+		proposed, err := proposeSceneBoundaries(ctx, p, ch, paragraphs, prov, model, cfg, run)
 		if err != nil {
 			// Non-fatal: fall back to explicit-only with a warning.
 			_ = err // errors are recorded in the run already
@@ -166,6 +169,7 @@ func isExplicitBreak(_ string, _ map[string]bool) bool {
 // and returns the merged set of proposed break-after paragraph IDs.
 func proposeSceneBoundaries(
 	ctx context.Context,
+	p *project.Project,
 	ch store.ChapterRow,
 	paragraphs []store.ParagraphRow,
 	prov provider.Provider,
@@ -173,6 +177,7 @@ func proposeSceneBoundaries(
 	cfg sceneDetectConfig,
 	run *Run,
 ) (map[string]bool, error) {
+	loadedPrompt := loadCompilerPrompt(p, storyprompts.SceneBoundaries)
 	pidSet := make(map[string]bool, len(paragraphs))
 	for _, p := range paragraphs {
 		pidSet[p.ID] = true
@@ -187,7 +192,7 @@ func proposeSceneBoundaries(
 		req := provider.GenerationRequest{
 			Model: model,
 			Messages: []provider.Message{
-				{Role: "system", Content: sceneBoundariesSystemPrompt},
+				{Role: "system", Content: loadedPrompt.Content},
 				{Role: "user", Content: prompt},
 			},
 			Temperature: cfg.Temperature,
@@ -200,12 +205,13 @@ func proposeSceneBoundaries(
 		}
 		if err != nil {
 			t := TaskRecord{
-				TaskID:    taskID,
-				RunID:     runID(run),
-				TaskType:  "scene-boundaries",
-				ChapterID: ch.ID,
-				Status:    TaskStatusFailed,
-				Error:     err.Error(),
+				TaskID:        taskID,
+				RunID:         runID(run),
+				TaskType:      "scene-boundaries",
+				ChapterID:     ch.ID,
+				Status:        TaskStatusFailed,
+				Error:         err.Error(),
+				PromptVersion: loadedPrompt.Version,
 			}
 			if run != nil {
 				_ = run.recordTask(t)
@@ -223,12 +229,13 @@ func proposeSceneBoundaries(
 		}
 		if run != nil {
 			_ = run.recordTask(TaskRecord{
-				TaskID:    taskID,
-				RunID:     runID(run),
-				TaskType:  "scene-boundaries",
-				ChapterID: ch.ID,
-				Status:    status,
-				Error:     errMsg,
+				TaskID:        taskID,
+				RunID:         runID(run),
+				TaskType:      "scene-boundaries",
+				ChapterID:     ch.ID,
+				Status:        status,
+				PromptVersion: loadedPrompt.Version,
+				Error:         errMsg,
 			})
 		}
 		if parseErr != nil {
@@ -293,11 +300,6 @@ func buildBoundaryPrompt(paragraphs []store.ParagraphRow) string {
 	return sb.String()
 }
 
-const sceneBoundariesSystemPrompt = `You are a literary analyst. Identify where scene boundaries occur in manuscript excerpts.
-A scene boundary occurs when there is a meaningful shift in time, location, point of view, or narrative focus.
-Return only valid JSON. Do not add commentary outside the JSON object.
-Use only paragraph IDs that appear in the provided input.`
-
 // sceneDetectConfig carries compile configuration relevant to scene detection.
 type sceneDetectConfig struct {
 	Mode                string
@@ -318,7 +320,7 @@ func runID(r *Run) string {
 // DetectScenesNoLLM is an exported wrapper around detectScenes for tests.
 // It uses explicit-only boundary detection (no LLM).
 func DetectScenesNoLLM(ch store.ChapterRow, paragraphs []store.ParagraphRow, explicitBreakOrdinals []int) ([]SceneRecord, error) {
-	return detectScenes(context.Background(), ch, paragraphs, nil, explicitBreakOrdinals, nil, "", sceneDetectConfig{Mode: "explicit"}, nil)
+	return detectScenes(context.Background(), nil, ch, paragraphs, nil, explicitBreakOrdinals, nil, "", sceneDetectConfig{Mode: "explicit"}, nil)
 }
 
 // ValidateScenePartition verifies that scenes form a complete, non-overlapping

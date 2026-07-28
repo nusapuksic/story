@@ -101,6 +101,12 @@ func Rebuild(p *project.Project) (retErr error) {
 		if err := s.IndexScenesJSONL(p.Path(filepath.Join(project.ModelDir, "scenes.jsonl"))); err != nil {
 			return err
 		}
+		if err := s.IndexEntitiesJSONL(
+			p.Path(filepath.Join(project.ModelDir, "entities.jsonl")),
+			p.Path(filepath.Join(project.ModelDir, "mentions.jsonl")),
+		); err != nil {
+			return err
+		}
 	}
 
 	if err := s.Close(); err != nil {

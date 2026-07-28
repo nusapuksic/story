@@ -83,6 +83,32 @@ CREATE TABLE IF NOT EXISTS scene_cards (
 	status           TEXT NOT NULL,
 	raw_json         TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS entities (
+	id               TEXT PRIMARY KEY,
+	type             TEXT NOT NULL,
+	canonical_name   TEXT NOT NULL,
+	aliases_json     TEXT NOT NULL,
+	evidence_json    TEXT NOT NULL,
+	generation_run   TEXT NOT NULL,
+	generation_model TEXT NOT NULL,
+	prompt_version   TEXT NOT NULL,
+	status           TEXT NOT NULL,
+	raw_json         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mentions (
+	entity_id        TEXT NOT NULL REFERENCES entities(id),
+	chapter_id       TEXT NOT NULL REFERENCES chapters(id),
+	paragraph_id     TEXT NOT NULL REFERENCES paragraphs(id),
+	surface_text     TEXT NOT NULL,
+	confidence       REAL NOT NULL,
+	generation_run   TEXT NOT NULL,
+	generation_model TEXT NOT NULL,
+	prompt_version   TEXT NOT NULL,
+	status           TEXT NOT NULL,
+	raw_json         TEXT NOT NULL,
+	PRIMARY KEY (entity_id, paragraph_id, surface_text)
+);
+CREATE INDEX IF NOT EXISTS mentions_chapter ON mentions(chapter_id);
 CREATE TABLE IF NOT EXISTS model_runs (
 	run_id      TEXT PRIMARY KEY,
 	run_type    TEXT NOT NULL,

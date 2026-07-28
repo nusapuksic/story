@@ -8,23 +8,26 @@ import (
 	"strings"
 
 	"github.com/nusapuksic/story/internal/ids"
+	"github.com/nusapuksic/story/internal/project"
+	storyprompts "github.com/nusapuksic/story/internal/prompts"
 	"github.com/nusapuksic/story/internal/provider"
 	"github.com/nusapuksic/story/internal/store"
 )
 
 // SceneCardRecord represents one scene card in model/scenes.jsonl.
 type SceneCardRecord struct {
-	RecordType   string              `json:"record_type"` // "scene_card"
-	SceneID      string              `json:"scene_id"`
-	Title        string              `json:"title"`
-	Summary      string              `json:"summary"`
-	POV          []string            `json:"pov,omitempty"`
-	Participants []string            `json:"participants,omitempty"`
-	Locations    []string            `json:"locations,omitempty"`
-	Unresolved   []string            `json:"unresolved,omitempty"`
-	Evidence     []string            `json:"evidence"`
-	Generation   SceneCardGeneration `json:"generation"`
-	Status       string              `json:"status"` // "generated"
+	RecordType   string                 `json:"record_type"` // "scene_card"
+	SceneID      string                 `json:"scene_id"`
+	Title        string                 `json:"title"`
+	Summary      string                 `json:"summary"`
+	POV          []string               `json:"pov,omitempty"`
+	Participants []string               `json:"participants,omitempty"`
+	Locations    []string               `json:"locations,omitempty"`
+	Unresolved   []string               `json:"unresolved,omitempty"`
+	Evidence     []string               `json:"evidence"`
+	Generation   SceneCardGeneration    `json:"generation"`
+	Verification *SceneCardVerification `json:"verification,omitempty"`
+	Status       string                 `json:"status"` // "generated"
 }
 
 // SceneCardGeneration is the provenance section of a scene card.
@@ -246,6 +249,7 @@ func objectText(value map[string]any) string {
 // data the function returns an error and a nil record.
 func extractSceneCard(
 	ctx context.Context,
+	p *project.Project,
 	scene store.SceneRow,
 	paragraphs []store.ParagraphRow,
 	prov provider.Provider,
@@ -263,12 +267,13 @@ func extractSceneCard(
 		pidSet[p.ID] = true
 	}
 
+	loadedPrompt := loadCompilerPrompt(p, storyprompts.SceneExtraction)
 	prompt := buildSceneCardPrompt(scene, paragraphs)
 	taskID := ids.NewTaskID()
 	req := provider.GenerationRequest{
 		Model: model,
 		Messages: []provider.Message{
-			{Role: "system", Content: sceneExtractionSystemPrompt},
+			{Role: "system", Content: loadedPrompt.Content},
 			{Role: "user", Content: prompt},
 		},
 		Temperature: cfg.Temperature,
@@ -282,12 +287,13 @@ func extractSceneCard(
 	}
 	if err != nil {
 		t := TaskRecord{
-			TaskID:   taskID,
-			RunID:    runID(run),
-			TaskType: "scene-extraction",
-			SceneID:  scene.ID,
-			Status:   TaskStatusFailed,
-			Error:    err.Error(),
+			TaskID:        taskID,
+			RunID:         runID(run),
+			TaskType:      "scene-extraction",
+			SceneID:       scene.ID,
+			Status:        TaskStatusFailed,
+			Error:         err.Error(),
+			PromptVersion: loadedPrompt.Version,
 		}
 		if run != nil {
 			_ = run.recordTask(t)
@@ -295,7 +301,7 @@ func extractSceneCard(
 		return nil, fmt.Errorf("scene card LLM call for scene %s: %w", scene.ID, err)
 	}
 
-	card, parseErr := parseSceneCardResponse(resp.Content, scene.ID, pidSet, paragraphs, runID(run), model)
+	card, parseErr := parseSceneCardResponse(resp.Content, scene.ID, pidSet, paragraphs, runID(run), model, loadedPrompt.Version)
 	status := TaskStatusCompleted
 	errMsg := ""
 	if parseErr != nil {
@@ -304,12 +310,13 @@ func extractSceneCard(
 	}
 	if run != nil {
 		_ = run.recordTask(TaskRecord{
-			TaskID:   taskID,
-			RunID:    runID(run),
-			TaskType: "scene-extraction",
-			SceneID:  scene.ID,
-			Status:   status,
-			Error:    errMsg,
+			TaskID:        taskID,
+			RunID:         runID(run),
+			TaskType:      "scene-extraction",
+			SceneID:       scene.ID,
+			Status:        status,
+			PromptVersion: loadedPrompt.Version,
+			Error:         errMsg,
 		})
 	}
 	return card, parseErr
@@ -321,7 +328,7 @@ func parseSceneCardResponse(
 	content, sceneID string,
 	pidSet map[string]bool,
 	paragraphs []store.ParagraphRow,
-	runID, model string,
+	runID, model, promptVersion string,
 ) (*SceneCardRecord, error) {
 	content = strings.TrimSpace(content)
 	// Strip markdown code fences if present.
@@ -338,7 +345,7 @@ func parseSceneCardResponse(
 	var raw rawSceneCard
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
 		if isTruncatedJSONError(err) {
-			return fallbackSceneCardFromSceneText(sceneID, paragraphs, runID, model), nil
+			return fallbackSceneCardFromSceneText(sceneID, paragraphs, runID, model, promptVersion), nil
 		}
 		return nil, fmt.Errorf("parse scene card response for %s: %w", sceneID, err)
 	}
@@ -371,7 +378,7 @@ func parseSceneCardResponse(
 		Generation: SceneCardGeneration{
 			RunID:         runID,
 			Model:         model,
-			PromptVersion: "scene-extraction-v1",
+			PromptVersion: promptVersion,
 		},
 		Status: "generated",
 	}, nil
@@ -382,7 +389,7 @@ func isTruncatedJSONError(err error) bool {
 	return strings.Contains(msg, "unexpected end of JSON input") || strings.Contains(msg, "unexpected EOF")
 }
 
-func fallbackSceneCardFromSceneText(sceneID string, paragraphs []store.ParagraphRow, runID, model string) *SceneCardRecord {
+func fallbackSceneCardFromSceneText(sceneID string, paragraphs []store.ParagraphRow, runID, model, promptVersion string) *SceneCardRecord {
 	summary, evidence := deriveSceneTextSummaryEvidence(paragraphs)
 	if summary == "" {
 		summary = fallbackSceneCardTitle(sceneID) + "."
@@ -396,7 +403,7 @@ func fallbackSceneCardFromSceneText(sceneID string, paragraphs []store.Paragraph
 		Generation: SceneCardGeneration{
 			RunID:         runID,
 			Model:         model,
-			PromptVersion: "scene-extraction-v1",
+			PromptVersion: promptVersion,
 		},
 		Status: "generated",
 	}
@@ -504,8 +511,3 @@ func buildSceneCardPrompt(scene store.SceneRow, paragraphs []store.ParagraphRow)
 	}
 	return sb.String()
 }
-
-const sceneExtractionSystemPrompt = `You are a literary analyst extracting structured scene cards from manuscript excerpts.
-Return only valid JSON matching the requested schema. Do not add commentary outside the JSON object.
-Cite only paragraph IDs that appear in the provided input.
-Omit unsupported fields rather than guessing.`

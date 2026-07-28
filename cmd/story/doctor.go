@@ -12,6 +12,7 @@ import (
 
 	"github.com/nusapuksic/story/internal/config"
 	"github.com/nusapuksic/story/internal/project"
+	storyprompts "github.com/nusapuksic/story/internal/prompts"
 	"github.com/nusapuksic/story/internal/provider"
 )
 
@@ -75,7 +76,7 @@ func runDoctor() error {
 	}
 
 	// Check prompts.
-	for _, name := range []string{"scene-boundaries.md", "scene-extraction.md"} {
+	for _, name := range storyprompts.Names() {
 		_, statErr := os.Stat(p.Path(project.PromptsDir + "/" + name))
 		check("prompt "+name, statErr == nil, "missing; re-run 'story init' or copy from defaults")
 	}

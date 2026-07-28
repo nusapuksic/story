@@ -13,6 +13,7 @@ import (
 
 	"github.com/nusapuksic/story/internal/ids"
 	"github.com/nusapuksic/story/internal/project"
+	storyprompts "github.com/nusapuksic/story/internal/prompts"
 	"github.com/nusapuksic/story/internal/provider"
 	"github.com/nusapuksic/story/internal/store"
 )
@@ -177,8 +178,8 @@ func extractChapterSummaryWindow(
 	windowOrdinal int,
 	windowCount int,
 ) (*SummaryRecord, error) {
-	systemPrompt, promptVersion := loadSummaryPrompt(p, "chapter-summary.md",
-		"chapter-summary-v1", defaultChapterSummarySystemPrompt)
+	loadedPrompt := loadCompilerPrompt(p, storyprompts.ChapterSummary)
+	systemPrompt, promptVersion := loadedPrompt.Content, loadedPrompt.Version
 	pidSet := paragraphIDSet(paragraphs)
 	fallbackSummary, fallbackEvidence := deriveChapterFallbackSummary(paragraphs)
 
@@ -235,8 +236,8 @@ func synthesizeChapterSummary(
 	cfg sceneDetectConfig,
 	run *Run,
 ) (*SummaryRecord, error) {
-	systemPrompt, promptVersion := loadSummaryPrompt(p, "chapter-summary.md",
-		"chapter-summary-v1", defaultChapterSummarySystemPrompt)
+	loadedPrompt := loadCompilerPrompt(p, storyprompts.ChapterSummary)
+	systemPrompt, promptVersion := loadedPrompt.Content, loadedPrompt.Version
 	pidSet := paragraphIDSet(support)
 	fallbackSummary, fallbackEvidence := deriveBookFallbackSummary(windowSummaries, support)
 
@@ -322,8 +323,8 @@ func extractBookSummary(
 	cfg sceneDetectConfig,
 	run *Run,
 ) (*SummaryRecord, error) {
-	systemPrompt, promptVersion := loadSummaryPrompt(p, "book-summary.md",
-		"book-summary-v1", defaultBookSummarySystemPrompt)
+	loadedPrompt := loadCompilerPrompt(p, storyprompts.BookSummary)
+	systemPrompt, promptVersion := loadedPrompt.Content, loadedPrompt.Version
 	sourceRecords := make([]string, 0, len(chapterSummaries))
 	validEvidenceIDs := make(map[string]bool, len(chapterSummaries))
 	for _, rec := range chapterSummaries {
@@ -587,35 +588,6 @@ func stripJSONFences(content string) string {
 	return content
 }
 
-func loadSummaryPrompt(p *project.Project, filename, fallbackVersion, fallbackPrompt string) (string, string) {
-	path := p.Path(filepath.Join(project.PromptsDir, filename))
-	data, err := os.ReadFile(path)
-	if err != nil || strings.TrimSpace(string(data)) == "" {
-		return fallbackPrompt, fallbackVersion
-	}
-	prompt := string(data)
-	version := promptVersionFromText(prompt)
-	if version == "" {
-		version = fallbackVersion
-	}
-	return prompt, version
-}
-
-func promptVersionFromText(text string) string {
-	const marker = "prompt_version:"
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		idx := strings.Index(line, marker)
-		if idx < 0 {
-			continue
-		}
-		version := strings.TrimSpace(line[idx+len(marker):])
-		version = strings.TrimSuffix(version, "-->")
-		return strings.TrimSpace(version)
-	}
-	return ""
-}
-
 func buildChapterSummaryPrompt(ch store.ChapterRow, paragraphs []store.ParagraphRow) string {
 	var sb strings.Builder
 	sb.WriteString("Summarize this chapter as evidence-backed JSON.\n")
@@ -821,13 +793,3 @@ func recordSummaryTask(run *Run, taskID, taskType, chapterID, status, errMsg str
 		Error:     errMsg,
 	})
 }
-
-const defaultChapterSummarySystemPrompt = `You are a literary analyst summarizing a manuscript chapter.
-Return only valid JSON matching the requested schema. Do not add commentary outside the JSON object.
-Cite only paragraph IDs that appear in the provided input.
-Preserve uncertainty and do not resolve intentionally unresolved questions.`
-
-const defaultBookSummarySystemPrompt = `You are a literary analyst producing a whole-book orientation summary.
-Return only valid JSON matching the requested schema. Do not add commentary outside the JSON object.
-Use only the provided chapter summary records as source material. Cite chapter IDs only; do not cite paragraph IDs.
-Preserve uncertainty and flag unresolved details briefly for later expansion.`

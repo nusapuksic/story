@@ -9,6 +9,7 @@ import (
 
 	"github.com/nusapuksic/story/internal/config"
 	"github.com/nusapuksic/story/internal/ids"
+	"github.com/nusapuksic/story/internal/prompts"
 )
 
 // Sentinel errors mapped to CLI exit codes by the command layer.
@@ -116,7 +117,7 @@ func Init(dir string, opts InitOptions) (*Project, error) {
 			return nil, fmt.Errorf("init %s: %w", dir, err)
 		}
 	}
-	if err := writeDefaultPrompts(filepath.Join(dir, PromptsDir)); err != nil {
+	if err := prompts.WriteDefaults(filepath.Join(dir, PromptsDir)); err != nil {
 		return nil, fmt.Errorf("init %s: %w", dir, err)
 	}
 

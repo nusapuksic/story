@@ -7,20 +7,8 @@ import (
 )
 
 // buildSystemPrompt returns the system prompt for the discussion model.
-func buildSystemPrompt(mode string) string {
-	base := `You are a literary analyst answering questions about a fiction manuscript.
-Answer strictly from the provided context. Do not use general narrative expectations.
-Return ONLY a JSON object with this exact schema:
-{"answer":"...","evidence":["p-...","p-..."],"uncertainties":["..."]}
-
-Rules:
-- "answer": your prose answer grounded in the provided context.
-- Use summary context when provided for high-level themes, motifs, arcs, or whole-book orientation.
-- "evidence": list only paragraph IDs from the provided evidence that directly support your answer. Omit IDs that do not support the answer.
-- "uncertainties": list genuine gaps or unresolved questions from the manuscript. Omit if none.
-- Cite no paragraph IDs that were not provided to you.
-- If the provided context is insufficient, say so in "answer" and leave "evidence" empty.`
-
+func buildSystemPrompt(base, mode string) string {
+	base = strings.TrimSpace(base)
 	switch mode {
 	case "continuity":
 		return base + "\nFocus on continuity: what characters know, believe, and have experienced at specific story moments."
