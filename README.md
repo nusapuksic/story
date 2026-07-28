@@ -3,6 +3,26 @@ A local-first Go CLI that compiles a fiction manuscript into a layered, source-a
 
 The authoritative specification is [docs/cli-spec.md](docs/cli-spec.md).
 
+## Releases
+
+Prebuilt release archives are published on the [GitHub Releases](https://github.com/nusapuksic/story/releases) page.
+
+Download the archive for your platform and architecture:
+
+* `story-v<version>-windows-amd64.zip`
+* `story-v<version>-linux-amd64.zip`
+* `story-v<version>-linux-arm64.zip`
+* `story-v<version>-darwin-amd64.zip`
+* `story-v<version>-darwin-arm64.zip`
+
+Each archive includes the `story` binary, `README.md`, and `LICENSE`. After unzipping, move the binary somewhere on your `PATH` or run it directly from the extracted folder.
+
+Each release also includes `SHA256SUMS.txt` for verifying downloaded assets:
+
+```
+sha256sum -c SHA256SUMS.txt
+```
+
 ## Build
 
 ```
@@ -11,7 +31,7 @@ go build ./cmd/story
 
 ## Connect a Local LLM
 
-`story compile` and `story ask` use the LLM settings in the project `story.toml`. New projects are initialized with a local OpenAI-compatible provider, but the model names are intentionally blank until you choose the model running on your machine.
+`story compile` and `story ask` use the LLM settings in the project `story.toml`. New projects are initialized with a local OpenAI-compatible provider. By default, model names are blank until you choose the model running on your machine, but `story init --model <model-id>` pre-fills the same model for every LLM role.
 
 1. Start a local model server that exposes an OpenAI-compatible API.
 
@@ -29,7 +49,7 @@ go build ./cmd/story
    curl http://127.0.0.1:11434/v1/models
    ```
 
-3. Edit the project's `story.toml` and set each role to a model ID returned by the server. A minimal one-model local setup can use the same model for all roles:
+3. If you did not pass `--model` during project setup, edit the project's `story.toml` and set each role to a model ID returned by the server. A minimal one-model local setup can use the same model for all roles:
 
    ```toml
    [llm]
@@ -70,7 +90,7 @@ go build ./cmd/story
 ## Usage
 
 ```
-story init ./my-novel --title "My Novel"
+story init ./my-novel --title "My Novel" --model <your-local-model-id>
 story --project ./my-novel import md ./chapters
 story --project ./my-novel import md ./manuscript.md
 story --project ./my-novel status
