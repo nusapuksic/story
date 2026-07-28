@@ -16,7 +16,7 @@ import (
 	"github.com/nusapuksic/story/internal/store"
 )
 
-var version = "0.1.0-dev"
+var version = "0.1.0"
 
 // Stable exit codes (docs/cli-spec.md §15).
 const (
