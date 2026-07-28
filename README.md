@@ -29,6 +29,38 @@ sha256sum -c SHA256SUMS.txt
 go build ./cmd/story
 ```
 
+## Demo Flow
+
+Start with a manuscript in a Markdown file saved somewhere on your machine. 
+The manuscript will not be uploaded anywhere, the import will only create its own copy,
+then locally deconstruct it into chapters, paragraphs and scenes. Those are then used to manage the context for the LLM.
+
+A typical Windows PowerShell first run looks like this:
+
+```powershell
+story init "C:\Users\YourName\story-projects\my-novel" --title "My Novel" --model <your-local-model-id>
+story --project "C:\Users\YourName\story-projects\my-novel" import md "C:\Users\YourName\Documents\my-novel\draft.md"
+story --project "C:\Users\YourName\story-projects\my-novel" status
+story --project "C:\Users\YourName\story-projects\my-novel" inspect chapter ch-0001
+story --project "C:\Users\YourName\story-projects\my-novel" llm doctor
+story --project "C:\Users\YourName\story-projects\my-novel" compile
+story --project "C:\Users\YourName\story-projects\my-novel" ask "What does the protagonist want in the opening chapters?"
+```
+
+On Linux, the same flow looks like this:
+
+```bash
+story init ~/story-projects/my-novel --title "My Novel" --model <your-local-model-id>
+story --project ~/story-projects/my-novel import md ~/Documents/my-novel/draft.md
+story --project ~/story-projects/my-novel status
+story --project ~/story-projects/my-novel inspect chapter ch-0001
+story --project ~/story-projects/my-novel llm doctor
+story --project ~/story-projects/my-novel compile
+story --project ~/story-projects/my-novel ask "What does the protagonist want in the opening chapters?"
+```
+
+The import preserves your original files under `source/original/`, normalizes the working manuscript into the project folder, and builds a rebuildable local index for `status`, `inspect`, `search`, `compile`, and `ask`.
+
 ## Connect a Local LLM
 
 `story compile` and `story ask` use the LLM settings in the project `story.toml`. New projects are initialized with a local OpenAI-compatible provider. By default, model names are blank until you choose the model running on your machine, but `story init --model <model-id>` pre-fills the same model for every LLM role.
@@ -47,6 +79,31 @@ go build ./cmd/story
 
    ```
    curl http://127.0.0.1:11434/v1/models
+   ```
+
+   Use the exact value from each model object's `id` field. That is the name `story` expects in `--model` and in `story.toml`.
+
+   Example response:
+
+   ```json
+   {
+     "data": [
+       { "id": "llama3.1:8b" },
+       { "id": "mistral-small3.1:24b" }
+     ]
+   }
+   ```
+
+   In that case, valid choices would be `llama3.1:8b` or `mistral-small3.1:24b`.
+
+   For example:
+
+   ```powershell
+   story init "C:\Users\YourName\story-projects\my-novel" --title "My Novel" --model llama3.1:8b
+   ```
+
+   ```bash
+   story init ~/story-projects/my-novel --title "My Novel" --model llama3.1:8b
    ```
 
 3. If you did not pass `--model` during project setup, edit the project's `story.toml` and set each role to a model ID returned by the server. A minimal one-model local setup can use the same model for all roles:
