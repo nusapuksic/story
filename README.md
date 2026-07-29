@@ -15,7 +15,12 @@ Download the archive for your platform and architecture:
 * `story-v<version>-darwin-amd64.zip`
 * `story-v<version>-darwin-arm64.zip`
 
-Each archive includes the `story` binary, `README.md`, and `LICENSE`. After unzipping, move the binary somewhere on your `PATH` or run it directly from the extracted folder.
+Each archive includes the `story` binary, `README.md`, and `LICENSE`. For beta testing, the simplest path is to unzip the archive, open a terminal in the extracted folder, and run the executable from there:
+
+* Windows PowerShell: `.\story.exe`
+* macOS/Linux: `./story`
+
+Installing the binary on your `PATH` is optional. If you do install it, you can drop the local prefix and type `story` from any folder.
 
 Each release also includes `SHA256SUMS.txt` for verifying downloaded assets:
 
@@ -38,30 +43,32 @@ go build ./cmd/story
 ## Demo Flow
 
 Start with a manuscript in a Markdown file saved somewhere on your machine.
-Import itself does not upload your manuscript. It creates a local project copy and normalizes it into chapters and paragraphs. `story compile` then builds scenes, scene cards, entities, verification records, and summaries that manage context for the LLM. With the default local setup, `compile` and `ask` talk to a model server on your machine; if you configure a remote provider, excerpted evidence is sent to that endpoint.
+Import itself does not upload your manuscript. It creates a local project copy and normalizes it into chapters and paragraphs. The `compile` command then builds scenes, scene cards, entities, verification records, and summaries that manage context for the LLM. With the default local setup, `compile` and `ask` talk to a model server on your machine; if you configure a remote provider, excerpted evidence is sent to that endpoint.
+
+The commands below assume you are running the binary from the folder you extracted or built it into, without installing it on your `PATH`.
 
 A typical Windows PowerShell first run looks like this:
 
 ```powershell
-story init "C:\Users\YourName\story-projects\my-novel" --title "My Novel" --model <your-local-model-id>
-story --project "C:\Users\YourName\story-projects\my-novel" import md "C:\Users\YourName\Documents\my-novel\draft.md"
-story --project "C:\Users\YourName\story-projects\my-novel" status
-story --project "C:\Users\YourName\story-projects\my-novel" inspect chapter ch-0001
-story --project "C:\Users\YourName\story-projects\my-novel" llm doctor
-story --project "C:\Users\YourName\story-projects\my-novel" compile
-story --project "C:\Users\YourName\story-projects\my-novel" ask "What does the protagonist want in the opening chapters?"
+.\story.exe init "C:\Users\YourName\story-projects\my-novel" --title "My Novel" --model <your-local-model-id>
+.\story.exe --project "C:\Users\YourName\story-projects\my-novel" import md "C:\Users\YourName\Documents\my-novel\draft.md"
+.\story.exe --project "C:\Users\YourName\story-projects\my-novel" status
+.\story.exe --project "C:\Users\YourName\story-projects\my-novel" inspect chapter ch-0001
+.\story.exe --project "C:\Users\YourName\story-projects\my-novel" llm doctor
+.\story.exe --project "C:\Users\YourName\story-projects\my-novel" compile
+.\story.exe --project "C:\Users\YourName\story-projects\my-novel" ask "What does the protagonist want in the opening chapters?"
 ```
 
-On Linux, the same flow looks like this:
+On macOS/Linux, the same flow looks like this:
 
 ```bash
-story init ~/story-projects/my-novel --title "My Novel" --model <your-local-model-id>
-story --project ~/story-projects/my-novel import md ~/Documents/my-novel/draft.md
-story --project ~/story-projects/my-novel status
-story --project ~/story-projects/my-novel inspect chapter ch-0001
-story --project ~/story-projects/my-novel llm doctor
-story --project ~/story-projects/my-novel compile
-story --project ~/story-projects/my-novel ask "What does the protagonist want in the opening chapters?"
+./story init ~/story-projects/my-novel --title "My Novel" --model <your-local-model-id>
+./story --project ~/story-projects/my-novel import md ~/Documents/my-novel/draft.md
+./story --project ~/story-projects/my-novel status
+./story --project ~/story-projects/my-novel inspect chapter ch-0001
+./story --project ~/story-projects/my-novel llm doctor
+./story --project ~/story-projects/my-novel compile
+./story --project ~/story-projects/my-novel ask "What does the protagonist want in the opening chapters?"
 ```
 
 The import preserves your original files under `source/original/`, normalizes the working manuscript into the project folder, and builds a rebuildable local index for `status`, `inspect`, `search`, `compile`, and `ask`.
@@ -107,11 +114,11 @@ The import preserves your original files under `source/original/`, normalizes th
    For example:
 
    ```powershell
-   story init "C:\Users\YourName\story-projects\my-novel" --title "My Novel" --model llama3.1:8b
+   .\story.exe init "C:\Users\YourName\story-projects\my-novel" --title "My Novel" --model llama3.1:8b
    ```
 
    ```bash
-   story init ~/story-projects/my-novel --title "My Novel" --model llama3.1:8b
+   ./story init ~/story-projects/my-novel --title "My Novel" --model llama3.1:8b
    ```
 
 3. If you did not pass `--model` during project setup, edit the project's `story.toml` and set each role to a model ID returned by the server. A minimal one-model local setup can use the same model for all roles:
@@ -146,38 +153,48 @@ The import preserves your original files under `source/original/`, normalizes th
 
 4. Verify the connection for the project:
 
+   Windows PowerShell:
+
+   ```powershell
+   .\story.exe --project .\my-novel llm doctor
    ```
-   story --project ./my-novel llm doctor
+
+   macOS/Linux:
+
+   ```
+   ./story --project ./my-novel llm doctor
    ```
 
    Once this passes, `story compile`, `story compile --layer scene-cards`, `story compile --layer entities`, `story compile --layer verification`, `story compile --layer summaries`, and `story ask` can call the configured model. Full `story compile` uses the verification role when `[compile].verification = true`. `story compile --layer scenes` can still build deterministic scene boundaries without an LLM.
 
 ## Usage
 
+These examples use `./story` for a binary in the current folder. In Windows PowerShell, use `.\story.exe` instead. If you installed the binary on your `PATH`, use `story`.
+
 ```
-story init ./my-novel --title "My Novel" --model <your-local-model-id>
-story --project ./my-novel import md ./chapters
-story --project ./my-novel import md ./manuscript.md
-story --project ./my-novel status
-story --project ./my-novel doctor
-story --project ./my-novel inspect chapter ch-0001
-story --project ./my-novel inspect paragraph p-<ULID>
-story --project ./my-novel inspect summary book
-story --project ./my-novel inspect summary ch-0001
-story --project ./my-novel import report
-story --project ./my-novel index rebuild
-story --project ./my-novel compile
-story --project ./my-novel compile status
-story --project ./my-novel compile --layer scenes
-story --project ./my-novel compile --layer scene-cards
-story --project ./my-novel compile --layer entities
-story --project ./my-novel compile --layer verification
-story --project ./my-novel compile --layer summaries
-story --project ./my-novel search "farmhouse fire"
-story --project ./my-novel search "Mara" --chapter ch-0004 --limit 10
-story --project ./my-novel ask "What does Mara know when she enters the farmhouse?"
-story --project ./my-novel ask --mode continuity "What has the detective already discovered?"
-story --project ./my-novel ask --mode style "How is the fog used as a motif?"
+./story init ./my-novel --title "My Novel" --model <your-local-model-id>
+./story --project ./my-novel import md ./chapters
+./story --project ./my-novel import md ./manuscript.md
+./story --project ./my-novel status
+./story --project ./my-novel doctor
+./story --project ./my-novel inspect chapter ch-0001
+./story --project ./my-novel inspect paragraph p-<ULID>
+./story --project ./my-novel inspect summary book
+./story --project ./my-novel inspect summary ch-0001
+./story --project ./my-novel import report
+./story --project ./my-novel index rebuild
+./story --project ./my-novel compile
+./story --project ./my-novel compile status
+./story --project ./my-novel compile --layer scenes
+./story --project ./my-novel compile --layer scene-cards
+./story --project ./my-novel compile --layer entities
+./story --project ./my-novel compile --layer verification
+./story --project ./my-novel compile --layer summaries
+./story --project ./my-novel search "farmhouse fire"
+./story --project ./my-novel search "Mara" --chapter ch-0004 --limit 10
+./story --project ./my-novel ask "What does Mara know when she enters the farmhouse?"
+./story --project ./my-novel ask --mode continuity "What has the detective already discovered?"
+./story --project ./my-novel ask --mode style "How is the fog used as a motif?"
 ```
 
 Markdown import accepts either a folder of chapter files or one continuous `.md` manuscript. If `--project` points at a directory without `story.toml`, `story import md` initializes the default project layout and generated config before importing. Folder import is deterministic: it uses an explicit `toc.toml`/`book.toml` manifest when present (or `--toc <path>`), and otherwise requires unique numeric filename prefixes (`01-road.md`, `2-house.md`). Continuous-file import splits on deterministic chapter headings, or imports the whole file as one chapter with `--single-chapter`. When ordering or chapter boundaries are ambiguous, the import fails without touching the canonical manuscript and writes an actionable report under `source/import-records/<run-id>/` for review.
