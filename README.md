@@ -42,34 +42,138 @@ go build ./cmd/story
 
 ## Demo Flow
 
-Start with a manuscript in a Markdown file saved somewhere on your machine.
-Import itself does not upload your manuscript. It creates a local project copy and normalizes it into chapters and paragraphs. The `compile` command then builds scenes, scene cards, entities, verification records, and summaries that manage context for the LLM. With the default local setup, `compile` and `ask` talk to a model server on your machine; if you configure a remote provider, excerpted evidence is sent to that endpoint.
+This flow assumes you just downloaded a release zip and have not installed `story` on your `PATH`.
 
-The commands below assume you are running the binary from the folder you extracted or built it into, without installing it on your `PATH`. They also assume you have edited the root `env.toml` described below, or that you will pass `--model` and `--llm-base-url` to `init` for this project.
+1. Unzip the archive and open a terminal in the extracted folder.
 
-A typical Windows PowerShell first run looks like this:
+   The extracted folder contains the executable, `env.toml`, `README.md`, and `LICENSE`. Run the executable from that folder:
 
-```powershell
-.\story.exe init "C:\Users\YourName\story-projects\my-novel" --title "My Novel"
-.\story.exe --project "C:\Users\YourName\story-projects\my-novel" import md "C:\Users\YourName\Documents\my-novel\draft.md"
-.\story.exe --project "C:\Users\YourName\story-projects\my-novel" status
-.\story.exe --project "C:\Users\YourName\story-projects\my-novel" inspect chapter ch-0001
-.\story.exe --project "C:\Users\YourName\story-projects\my-novel" llm doctor
-.\story.exe --project "C:\Users\YourName\story-projects\my-novel" compile
-.\story.exe --project "C:\Users\YourName\story-projects\my-novel" ask "What does the protagonist want in the opening chapters?"
-```
+   * Windows PowerShell: `.\story.exe`
+   * macOS/Linux: `./story`
 
-On macOS/Linux, the same flow looks like this:
+2. Start or choose an OpenAI-compatible model server.
 
-```bash
-./story init ~/story-projects/my-novel --title "My Novel"
-./story --project ~/story-projects/my-novel import md ~/Documents/my-novel/draft.md
-./story --project ~/story-projects/my-novel status
-./story --project ~/story-projects/my-novel inspect chapter ch-0001
-./story --project ~/story-projects/my-novel llm doctor
-./story --project ~/story-projects/my-novel compile
-./story --project ~/story-projects/my-novel ask "What does the protagonist want in the opening chapters?"
-```
+   Ollama's default local endpoint works with the included fallback config:
+
+   ```
+   ollama serve
+   ```
+
+   LM Studio or another compatible server can also work; use its `/v1` base URL, for example `http://127.0.0.1:1234/v1`. If the server runs on another machine, use that machine's private LAN URL, for example `http://192.168.1.50:11434/v1`.
+
+3. Find the exact model ID exposed by that server.
+
+   ```
+   curl http://127.0.0.1:11434/v1/models
+   ```
+
+   Use the value from a model object's `id` field, such as `llama3.1:8b`.
+
+4. Edit `env.toml` in the extracted folder before you create a project.
+
+   ```toml
+   [llm]
+   default_model = "llama3.1:8b"
+   base_url = "http://127.0.0.1:11434/v1"
+   api_key_env = ""
+   request_timeout_seconds = 300
+   ```
+
+   `default_model` should match the exact model ID from the previous step. If your server is not on the same machine, update `base_url`. If your endpoint requires an API key, put the environment variable name in `api_key_env`; do not put the key itself in this file.
+
+   `env.toml` is copied into the new project's `story.toml` during `init`. Edit it before creating the project; changing it later only affects future projects unless you also edit that project's `story.toml`.
+
+5. Keep your manuscript path handy.
+
+   Use one Markdown file or a folder of chapter Markdown files. The examples below use `C:\Users\YourName\Documents\my-novel\draft.md` and `~/Documents/my-novel/draft.md`; replace that path with your own manuscript.
+
+After `env.toml` is configured, create a project and import the manuscript. Import itself does not upload your manuscript. It creates a local project copy and normalizes it into chapters and paragraphs. The `compile` command then builds scenes, scene cards, entities, verification records, and summaries that manage context for the LLM. With the default local setup, `compile` and `ask` talk to a model server on your machine; if you configure a remote provider, excerpted evidence is sent to that endpoint.
+
+Each command below is shown for Windows PowerShell first, then macOS/Linux.
+
+6. Initialize a Story project.
+
+   Creates the project folder and writes its initial `story.toml`, using the LLM defaults from `env.toml`. Args/options: the first path is the new project folder; `--title` is the book title to store in project metadata.
+
+   ```powershell
+   .\story.exe init "C:\Users\YourName\story-projects\my-novel" --title "My Novel"
+   ```
+
+   ```bash
+   ./story init ~/story-projects/my-novel --title "My Novel"
+   ```
+
+7. Import your manuscript.
+
+   Copies the Markdown source into the project and splits it into chapters and paragraphs. Args/options: `--project` is the project folder from step 6; the final path is your manuscript `.md` file or chapter folder.
+
+   ```powershell
+   .\story.exe --project "C:\Users\YourName\story-projects\my-novel" import md "C:\Users\YourName\Documents\my-novel\draft.md"
+   ```
+
+   ```bash
+   ./story --project ~/story-projects/my-novel import md ~/Documents/my-novel/draft.md
+   ```
+
+8. Check project status.
+
+   Shows whether the manuscript is imported and whether the local index is ready. Args/options: `--project` is the same project folder you initialized.
+
+   ```powershell
+   .\story.exe --project "C:\Users\YourName\story-projects\my-novel" status
+   ```
+
+   ```bash
+   ./story --project ~/story-projects/my-novel status
+   ```
+
+9. Inspect the first imported chapter.
+
+   Prints chapter details so you can confirm the import split the manuscript correctly. Args/options: `ch-0001` is a chapter ID from the imported project; use a different chapter ID if `status` or import output shows one.
+
+   ```powershell
+   .\story.exe --project "C:\Users\YourName\story-projects\my-novel" inspect chapter ch-0001
+   ```
+
+   ```bash
+   ./story --project ~/story-projects/my-novel inspect chapter ch-0001
+   ```
+
+10. Check the LLM connection.
+
+   Contacts the configured model server and verifies that the project can see the configured model. Args/options: `--project` points at the project folder; LLM settings come from that project's `story.toml`.
+
+   ```powershell
+   .\story.exe --project "C:\Users\YourName\story-projects\my-novel" llm doctor
+   ```
+
+   ```bash
+   ./story --project ~/story-projects/my-novel llm doctor
+   ```
+
+11. Compile the story model.
+
+   Builds scenes, scene cards, entities, verification records, and summaries from the imported manuscript. Args/options: `--project` points at the project folder; LLM-backed layers expect `llm doctor` to pass first.
+
+   ```powershell
+   .\story.exe --project "C:\Users\YourName\story-projects\my-novel" compile
+   ```
+
+   ```bash
+   ./story --project ~/story-projects/my-novel compile
+   ```
+
+12. Ask a question about the story.
+
+   Retrieves evidence from the local index, sends the question to the configured discussion model, and validates cited paragraph IDs in the answer. Args/options: `--project` points at the project folder; the quoted text is your question.
+
+   ```powershell
+   .\story.exe --project "C:\Users\YourName\story-projects\my-novel" ask "What does the protagonist want in the opening chapters?"
+   ```
+
+   ```bash
+   ./story --project ~/story-projects/my-novel ask "What does the protagonist want in the opening chapters?"
+   ```
 
 The import preserves your original files under `source/original/`, normalizes the working manuscript into the project folder, and builds a rebuildable local index for `status`, `inspect`, `search`, `compile`, and `ask`.
 
