@@ -233,25 +233,32 @@ model = ""
 
 API keys must not be stored directly in story.toml. Remote credentials are referenced through environment variables or operating-system credential storage.
 
-5.1 User environment configuration
+5.1 Environment configuration
 
-An optional user-level environment config seeds new project configuration before story.toml is written. The default path is the operating-system user config directory plus story/env.toml:
+An optional environment config seeds new project configuration before story.toml is written. The default file name is env.toml. Release archives and source checkouts include this editable template at the root.
 
-Windows: %AppData%\story\env.toml
-macOS: ~/Library/Application Support/story/env.toml
-Linux: $XDG_CONFIG_HOME/story/env.toml, or ~/.config/story/env.toml when XDG_CONFIG_HOME is unset
+Config lookup order:
 
-The STORY_ENV_CONFIG environment variable may point to a different file.
+1. STORY_ENV_CONFIG, when set to the full path of a TOML file
+2. env.toml in the current working directory
+3. env.toml beside the story executable
 
-Example:
+Missing environment config files are ignored and built-in fallbacks are used.
+
+Template:
+
+# story environment config
+#
+# This file seeds new project story.toml files. Edit default_model to match
+# the exact model id returned by your OpenAI-compatible server's /v1/models.
 
 [llm]
 default_model = "llama3.1:8b"
-base_url = "http://192.168.1.50:11434/v1"
+base_url = "http://127.0.0.1:11434/v1"
 api_key_env = ""
 request_timeout_seconds = 300
 
-story init and story import md copy default_model into all generated LLM roles and copy base_url, api_key_env, and request_timeout_seconds into the generated default provider. Explicit command options take precedence over the user environment config. Missing environment config files are ignored.
+story init and story import md copy default_model into all generated LLM roles and copy base_url, api_key_env, and request_timeout_seconds into the generated default provider. Explicit command options take precedence over the environment config. Missing environment config files are ignored.
 
 ⸻
 
@@ -353,7 +360,7 @@ Behavior:
 
 1. create the project directory;
 2. generate project_id;
-3. write default configuration, populating LLM role models and provider base URL from the user environment config and then explicit options when provided;
+3. write default configuration, populating LLM role models and provider base URL from the environment config and then explicit options when provided;
 4. create canonical directories;
 5. initialize SQLite;
 6. copy default prompts.
@@ -1357,7 +1364,7 @@ motives, relationships, chronology, or world facts.
 
 18. Security and privacy
 
-The built-in fallback provider URL may be a loopback address, but project initialization must allow the user environment config or explicit command options to set the model server location. User-configured provider URLs may point at private local-network IPs,
+The built-in fallback provider URL may be a loopback address, but project initialization must allow the environment config or explicit command options to set the model server location. User-configured provider URLs may point at private local-network IPs,
 including RFC1918 addresses, link-local addresses, IPv6 unique-local addresses,
 and shared/VPN address space such as 100.64.0.0/10.
 

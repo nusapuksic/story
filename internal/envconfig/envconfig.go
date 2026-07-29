@@ -1,4 +1,4 @@
-// Package envconfig reads user-level defaults that seed new story projects.
+// Package envconfig reads environment defaults that seed new story projects.
 package envconfig
 
 import (
@@ -12,15 +12,13 @@ import (
 
 const (
 	// OverrideEnv names an optional environment variable containing the exact
-	// path to the user environment config file.
+	// path to the environment config file.
 	OverrideEnv = "STORY_ENV_CONFIG"
-	// AppDir is the application directory under the OS user config directory.
-	AppDir = "story"
-	// FileName is the user environment config filename.
+	// FileName is the environment config filename.
 	FileName = "env.toml"
 )
 
-// Config holds user-level defaults copied into newly initialized projects.
+// Config holds environment defaults copied into newly initialized projects.
 type Config struct {
 	LLM LLMConfig `toml:"llm"`
 }
@@ -33,19 +31,32 @@ type LLMConfig struct {
 	RequestTimeoutSeconds int    `toml:"request_timeout_seconds"`
 }
 
-// DefaultPath returns the config file path. STORY_ENV_CONFIG, when set, wins.
+// DefaultPath returns the config file path. STORY_ENV_CONFIG wins. Otherwise,
+// story first uses env.toml in the current directory, then env.toml beside the
+// executable, and finally reports the current-directory path even when missing.
 func DefaultPath() (string, error) {
 	if path := strings.TrimSpace(os.Getenv(OverrideEnv)); path != "" {
 		return path, nil
 	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("locate user config directory: %w", err)
+	if cwd, err := os.Getwd(); err == nil {
+		path := filepath.Join(cwd, FileName)
+		if fileExists(path) {
+			return path, nil
+		}
 	}
-	return filepath.Join(dir, AppDir, FileName), nil
+	if exe, err := os.Executable(); err == nil {
+		path := filepath.Join(filepath.Dir(exe), FileName)
+		if fileExists(path) {
+			return path, nil
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return filepath.Join(cwd, FileName), nil
+	}
+	return FileName, nil
 }
 
-// Load reads the user environment config. Missing files are not an error.
+// Load reads the environment config. Missing files are not an error.
 func Load() (Config, bool, string, error) {
 	path, err := DefaultPath()
 	if err != nil {
@@ -60,6 +71,11 @@ func Load() (Config, bool, string, error) {
 	}
 	cfg.normalize()
 	return cfg, true, path, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func (cfg *Config) normalize() {

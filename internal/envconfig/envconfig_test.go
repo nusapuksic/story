@@ -62,3 +62,38 @@ request_timeout_seconds = 120
 		t.Fatalf("timeout = %d", cfg.LLM.RequestTimeoutSeconds)
 	}
 }
+
+func TestLoadReadsEnvTOMLFromWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, FileName)
+	data := []byte("[llm]\ndefault_model = \"root-model\"\nbase_url = \"http://10.0.0.5:11434/v1\"\n")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(OverrideEnv, "")
+
+	cfg, found, gotPath, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("found = false, want true")
+	}
+	if gotPath != path {
+		t.Fatalf("path = %q, want %q", gotPath, path)
+	}
+	if cfg.LLM.DefaultModel != "root-model" {
+		t.Fatalf("default model = %q", cfg.LLM.DefaultModel)
+	}
+	if cfg.LLM.BaseURL != "http://10.0.0.5:11434/v1" {
+		t.Fatalf("base url = %q", cfg.LLM.BaseURL)
+	}
+}

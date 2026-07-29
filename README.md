@@ -15,7 +15,7 @@ Download the archive for your platform and architecture:
 * `story-v<version>-darwin-amd64.zip`
 * `story-v<version>-darwin-arm64.zip`
 
-Each archive includes the `story` binary, `README.md`, and `LICENSE`. For beta testing, the simplest path is to unzip the archive, open a terminal in the extracted folder, and run the executable from there:
+Each archive includes the `story` binary, `env.toml`, `README.md`, and `LICENSE`. For beta testing, the simplest path is to unzip the archive, open a terminal in the extracted folder, edit `env.toml`, and run the executable from there:
 
 * Windows PowerShell: `.\story.exe`
 * macOS/Linux: `./story`
@@ -45,7 +45,7 @@ go build ./cmd/story
 Start with a manuscript in a Markdown file saved somewhere on your machine.
 Import itself does not upload your manuscript. It creates a local project copy and normalizes it into chapters and paragraphs. The `compile` command then builds scenes, scene cards, entities, verification records, and summaries that manage context for the LLM. With the default local setup, `compile` and `ask` talk to a model server on your machine; if you configure a remote provider, excerpted evidence is sent to that endpoint.
 
-The commands below assume you are running the binary from the folder you extracted or built it into, without installing it on your `PATH`. They also assume you have created the LLM environment config described below, or that you will pass `--model` and `--llm-base-url` to `init` for this project.
+The commands below assume you are running the binary from the folder you extracted or built it into, without installing it on your `PATH`. They also assume you have edited the root `env.toml` described below, or that you will pass `--model` and `--llm-base-url` to `init` for this project.
 
 A typical Windows PowerShell first run looks like this:
 
@@ -75,15 +75,15 @@ The import preserves your original files under `source/original/`, normalizes th
 
 ## Connect a Local or LAN LLM
 
-`story compile` and `story ask` use the LLM settings in each project's `story.toml`. New projects are initialized with a local OpenAI-compatible provider, and `story init` copies defaults from an optional user environment config before writing `story.toml`. Put your model ID and server location there once, then every new project starts with the same LLM setup.
+`story compile` and `story ask` use the LLM settings in each project's `story.toml`. New projects are initialized with a local OpenAI-compatible provider, and `story init` copies defaults from an optional environment config before writing `story.toml`. Put your model ID and server location there once, then every new project starts with the same LLM setup.
 
-The default user environment config path is:
+The release archive and source checkout include an editable `env.toml` template at the root. `story` reads the config in this order:
 
-* Windows: `%AppData%\story\env.toml`
-* macOS: `~/Library/Application Support/story/env.toml`
-* Linux: `$XDG_CONFIG_HOME/story/env.toml`, or `~/.config/story/env.toml` when `XDG_CONFIG_HOME` is unset
+* `STORY_ENV_CONFIG`, when set to the full path of a TOML file
+* `env.toml` in the current working directory
+* `env.toml` beside the `story` executable
 
-Set `STORY_ENV_CONFIG` to the full path of another file when you want to keep it somewhere else.
+Missing environment config files are ignored and the built-in fallback uses `http://127.0.0.1:11434/v1`.
 
 1. Start a model server that exposes an OpenAI-compatible API.
 
@@ -119,14 +119,21 @@ Set `STORY_ENV_CONFIG` to the full path of another file when you want to keep it
 
    In that case, valid choices would be `llama3.1:8b` or `mistral-small3.1:24b`.
 
-3. Create the user environment config once:
+3. Edit the root `env.toml` template once:
+
+   The file ships with the archive/source checkout and looks like this:
 
    ```toml
+   # story environment config
+   #
+   # This file seeds new project story.toml files. Edit default_model to match
+   # the exact model id returned by your OpenAI-compatible server's /v1/models.
+
    [llm]
    default_model = "llama3.1:8b"
    base_url = "http://127.0.0.1:11434/v1"
-   # api_key_env = "STORY_LLM_API_KEY"
-   # request_timeout_seconds = 300
+   api_key_env = ""
+   request_timeout_seconds = 300
    ```
 
    Use your LAN server URL for `base_url` when the model server is not on the same machine. New `story init` and `story import md` initializations copy these values into the generated project `story.toml`, setting the same model for extraction, verification, and discussion.
