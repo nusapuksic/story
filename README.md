@@ -66,19 +66,21 @@ story --project ~/story-projects/my-novel ask "What does the protagonist want in
 
 The import preserves your original files under `source/original/`, normalizes the working manuscript into the project folder, and builds a rebuildable local index for `status`, `inspect`, `search`, `compile`, and `ask`.
 
-## Connect a Local LLM
+## Connect a Local or LAN LLM
 
-`story compile` and `story ask` use the LLM settings in the project `story.toml`. New projects are initialized with a local OpenAI-compatible provider. By default, model names are blank until you choose the model running on your machine, but `story init --model <model-id>` pre-fills the same model for every LLM role.
+`story compile` and `story ask` use the LLM settings in the project `story.toml`. New projects are initialized with a local OpenAI-compatible provider. By default, model names are blank until you choose the model running on your machine or on a machine reachable on your local network, but `story init --model <model-id>` pre-fills the same model for every LLM role.
 
-1. Start a local model server that exposes an OpenAI-compatible API.
+1. Start a model server that exposes an OpenAI-compatible API.
 
-   Ollama's default local endpoint matches the generated config:
+   Ollama's default loopback endpoint matches the generated config:
 
    ```
    ollama serve
    ```
 
-   LM Studio or another OpenAI-compatible server can also work; use its local `/v1` base URL, for example `http://127.0.0.1:1234/v1`.
+   LM Studio or another OpenAI-compatible server can also work; use its `/v1` base URL, for example `http://127.0.0.1:1234/v1`.
+
+   If the server runs on another machine, configure it to listen on your LAN and use that machine's private IP in `story.toml`, for example `http://192.168.1.50:11434/v1`. Make sure the server firewall allows the connection only from machines you trust.
 
 2. List the model IDs exposed by that server.
 
@@ -86,6 +88,7 @@ The import preserves your original files under `source/original/`, normalizes th
    curl http://127.0.0.1:11434/v1/models
    ```
 
+   For a LAN server, replace `127.0.0.1` with the server's private IP.
    Use the exact value from each model object's `id` field. That is the name `story` expects in `--model` and in `story.toml`.
 
    Example response:
@@ -119,7 +122,7 @@ The import preserves your original files under `source/original/`, normalizes th
 
      [llm.providers.local]
        type = "openai-compatible"
-       base_url = "http://127.0.0.1:11434/v1"
+       base_url = "http://127.0.0.1:11434/v1" # or a private LAN IP such as http://192.168.1.50:11434/v1
        api_key_env = ""
        request_timeout_seconds = 300
 
@@ -147,7 +150,7 @@ The import preserves your original files under `source/original/`, normalizes th
    story --project ./my-novel llm doctor
    ```
 
-   Once this passes, `story compile`, `story compile --layer scene-cards`, `story compile --layer entities`, `story compile --layer verification`, `story compile --layer summaries`, and `story ask` can call the configured local model. Full `story compile` uses the verification role when `[compile].verification = true`. `story compile --layer scenes` can still build deterministic scene boundaries without an LLM.
+   Once this passes, `story compile`, `story compile --layer scene-cards`, `story compile --layer entities`, `story compile --layer verification`, `story compile --layer summaries`, and `story ask` can call the configured model. Full `story compile` uses the verification role when `[compile].verification = true`. `story compile --layer scenes` can still build deterministic scene boundaries without an LLM.
 
 ## Usage
 

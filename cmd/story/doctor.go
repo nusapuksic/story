@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -151,14 +153,8 @@ func runLLMDoctor() error {
 		if !flags.quiet {
 			fmt.Printf("\nProvider: %s (%s %s)\n", name, pc.Type, pc.BaseURL)
 		}
-		isLocal := strings.HasPrefix(pc.BaseURL, "http://127.") ||
-			strings.HasPrefix(pc.BaseURL, "http://localhost") ||
-			strings.HasPrefix(pc.BaseURL, "http://[::1]")
-		remoteMsg := "remote endpoint"
-		if pc.APIKeyEnv != "" {
-			remoteMsg += " (ensure the API key environment variable is set)"
-		}
-		check("endpoint type", isLocal, remoteMsg)
+		scope, detail := classifyEndpointScope(pc.BaseURL)
+		check(fmt.Sprintf("endpoint scope (%s)", scope), scope != endpointScopeRemote && scope != endpointScopeInvalid, detail)
 
 		prov := provider.NewOpenAI(pc.BaseURL, pc.APIKeyEnv, pc.RequestTimeoutSeconds)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -203,6 +199,48 @@ func runLLMDoctor() error {
 		fmt.Println("All LLM checks passed.")
 	}
 	return nil
+}
+
+type endpointScope string
+
+const (
+	endpointScopeInvalid      endpointScope = "invalid"
+	endpointScopeLoopback     endpointScope = "loopback"
+	endpointScopeLocalNetwork endpointScope = "local network"
+	endpointScopeRemote       endpointScope = "remote"
+)
+
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+
+func classifyEndpointScope(baseURL string) (endpointScope, string) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return endpointScopeInvalid, fmt.Sprintf("invalid base_url: %v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return endpointScopeInvalid, "base_url must use http or https"
+	}
+	host := u.Hostname()
+	if host == "" {
+		return endpointScopeInvalid, "base_url must include a host"
+	}
+	if strings.EqualFold(host, "localhost") {
+		return endpointScopeLoopback, ""
+	}
+
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return endpointScopeRemote, "remote hostname; use a loopback or local-network IP unless you intend to send manuscript excerpts off-device"
+	}
+	addr = addr.Unmap()
+	switch {
+	case addr.IsLoopback():
+		return endpointScopeLoopback, ""
+	case addr.IsPrivate(), addr.IsLinkLocalUnicast(), sharedAddressSpace.Contains(addr):
+		return endpointScopeLocalNetwork, ""
+	default:
+		return endpointScopeRemote, "remote endpoint; use a loopback or local-network IP unless you intend to send manuscript excerpts off-device"
+	}
 }
 
 // formatErr formats an error for display, or returns empty string when nil.

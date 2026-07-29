@@ -88,7 +88,7 @@ Every model-generated record retains:
 
 2.6 Local operation is the default
 
-The application must work with a model server running on localhost.
+The application must work with a model server running on localhost or a private local-network address.
 
 Remote model providers may be supported, but must be explicitly configured.
 
@@ -963,7 +963,7 @@ Checks:
 * structured-output capability;
 * embedding availability when enabled;
 * context configuration;
-* localhost versus remote endpoint.
+* localhost/local-network versus remote endpoint.
 
 11.2 Model roles
 
@@ -1340,6 +1340,10 @@ Default provider URLs must be loopback addresses:
 127.0.0.1
 localhost
 ::1
+
+User-configured provider URLs may point at private local-network IPs,
+including RFC1918 addresses, link-local addresses, IPv6 unique-local addresses,
+and shared/VPN address space such as 100.64.0.0/10.
 
 When a configured endpoint is remote, the CLI displays a warning unless:
 
