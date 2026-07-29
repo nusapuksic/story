@@ -725,7 +725,7 @@ Mention record:
   "confidence": 0.91
 }
 
-Entity resolution must preserve ambiguity. Two possible aliases are not merged solely because the model considers the merge plausible.
+Entity resolution must preserve ambiguity. Two possible aliases are not merged solely because the model considers the merge plausible. Existing summaries and scene cards may be supplied as orientation for likely names, aliases, and scene roles, but entity mentions still cite manuscript paragraph excerpts only.
 
 Layer 5: Narrative records
 
@@ -801,15 +801,17 @@ construct scenes
     ↓
 extract scene cards
     ↓
+verify evidence when enabled
+    ↓
+construct chapter synthesis
+    ↓
+construct whole-book orientation summary
+    ↓
 extract entities and mentions
     ↓
 resolve aliases conservatively
     ↓
 extract narrative records
-    ↓
-verify evidence
-    ↓
-construct chapter synthesis
     ↓
 construct whole-book indexes
 

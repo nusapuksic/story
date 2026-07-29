@@ -3,6 +3,7 @@ package compiler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -86,6 +87,11 @@ func compileEntities(
 	}
 	defer mentionsFile.Close()
 
+	summaryContext, err := readSummaryIndex(p.Path(filepath.Join(project.ModelDir, "summaries.jsonl")))
+	if err != nil {
+		return 0, fmt.Errorf("read summaries for entity context: %w", err)
+	}
+
 	total := 0
 	for _, ch := range chapters {
 		if opts.Force {
@@ -110,7 +116,12 @@ func compileEntities(
 			continue
 		}
 
-		entities, mentions, err := extractEntitiesForChapter(ctx, p, ch, paragraphs,
+		promptContext, err := entityExtractionContextForChapter(st, ch, summaryContext)
+		if err != nil {
+			return total, err
+		}
+
+		entities, mentions, err := extractEntitiesForChapter(ctx, p, ch, paragraphs, promptContext,
 			opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 		if err != nil {
 			return total, err
@@ -168,6 +179,7 @@ func extractEntitiesForChapter(
 	p *project.Project,
 	ch store.ChapterRow,
 	paragraphs []store.ParagraphRow,
+	promptContext entityExtractionContext,
 	prov provider.Provider,
 	model string,
 	cfg sceneDetectConfig,
@@ -177,7 +189,7 @@ func extractEntitiesForChapter(
 		return nil, nil, fmt.Errorf("no LLM provider: cannot extract entities for %s", ch.ID)
 	}
 	loadedPrompt := loadCompilerPrompt(p, storyprompts.EntityResolution)
-	prompt := buildEntityPrompt(ch, paragraphs)
+	prompt := buildEntityPrompt(ch, paragraphs, promptContext)
 	taskID := ids.NewTaskID()
 	req := provider.GenerationRequest{
 		Model: model,
@@ -209,7 +221,129 @@ func extractEntitiesForChapter(
 	return entities, mentions, parseErr
 }
 
-func buildEntityPrompt(ch store.ChapterRow, paragraphs []store.ParagraphRow) string {
+type entityExtractionContext struct {
+	BookSummary    *SummaryRecord
+	ChapterSummary *SummaryRecord
+	SceneCards     []SceneCardRecord
+}
+
+func entityExtractionContextForChapter(st *store.Store, ch store.ChapterRow, summaries summaryIndex) (entityExtractionContext, error) {
+	var out entityExtractionContext
+	if summaries.Book != nil && strings.TrimSpace(summaries.Book.Summary) != "" {
+		rec := *summaries.Book
+		out.BookSummary = &rec
+	}
+	if rec, ok := summaries.Chapters[ch.ID]; ok && strings.TrimSpace(rec.Summary) != "" {
+		rec := rec
+		out.ChapterSummary = &rec
+	}
+
+	scenes, err := st.ScenesByChapter(ch.ID)
+	if err != nil {
+		return out, err
+	}
+	for _, sc := range scenes {
+		card, err := st.InspectSceneCard(sc.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return out, err
+		}
+		rec := sceneCardRecordFromRow(card)
+		if strings.TrimSpace(rec.Title) == "" && strings.TrimSpace(rec.Summary) == "" {
+			continue
+		}
+		out.SceneCards = append(out.SceneCards, rec)
+	}
+	return out, nil
+}
+
+func (c entityExtractionContext) hasContent() bool {
+	return c.BookSummary != nil || c.ChapterSummary != nil || len(c.SceneCards) > 0
+}
+
+func writeEntityExtractionContext(sb *strings.Builder, promptContext entityExtractionContext) {
+	if !promptContext.hasContent() {
+		return
+	}
+
+	sb.WriteString("\nExisting extraction context (orientation only; do not cite this section):\n")
+	writeEntitySummaryContext(sb, "Book summary", promptContext.BookSummary)
+	writeEntitySummaryContext(sb, "Chapter summary", promptContext.ChapterSummary)
+	if len(promptContext.SceneCards) > 0 {
+		sb.WriteString("Scene cards:\n")
+		for _, card := range promptContext.SceneCards {
+			writeEntitySceneCardContext(sb, card)
+		}
+	}
+}
+
+func writeEntitySummaryContext(sb *strings.Builder, label string, rec *SummaryRecord) {
+	if rec == nil {
+		return
+	}
+	summary := cleanEntityContextText(rec.Summary)
+	if summary == "" && len(rec.Themes) == 0 && len(rec.Unresolved) == 0 {
+		return
+	}
+	sb.WriteString(label)
+	sb.WriteString(":")
+	if summary != "" {
+		sb.WriteString(" ")
+		sb.WriteString(summary)
+	}
+	if len(rec.Themes) > 0 {
+		sb.WriteString(" Themes: ")
+		sb.WriteString(strings.Join(rec.Themes, ", "))
+	}
+	if len(rec.Unresolved) > 0 {
+		sb.WriteString(" Unresolved: ")
+		sb.WriteString(strings.Join(rec.Unresolved, ", "))
+	}
+	sb.WriteString("\n")
+}
+
+func writeEntitySceneCardContext(sb *strings.Builder, card SceneCardRecord) {
+	sb.WriteString("- ")
+	if card.SceneID != "" {
+		sb.WriteString(card.SceneID)
+		sb.WriteString(": ")
+	}
+	if title := strings.TrimSpace(card.Title); title != "" {
+		sb.WriteString(title)
+	}
+	if summary := cleanEntityContextText(card.Summary); summary != "" {
+		if strings.TrimSpace(card.Title) != "" {
+			sb.WriteString(" - ")
+		}
+		sb.WriteString(summary)
+	}
+	writeEntityContextList(sb, "POV", card.POV)
+	writeEntityContextList(sb, "Participants", card.Participants)
+	writeEntityContextList(sb, "Locations", card.Locations)
+	writeEntityContextList(sb, "Unresolved", card.Unresolved)
+	writeEntityContextList(sb, "Card evidence IDs", card.Evidence)
+	sb.WriteString("\n")
+}
+
+func writeEntityContextList(sb *strings.Builder, label string, values []string) {
+	values = dedupeStrings(values)
+	if len(values) == 0 {
+		return
+	}
+	sb.WriteString(" ")
+	sb.WriteString(label)
+	sb.WriteString(": ")
+	sb.WriteString(strings.Join(values, ", "))
+	sb.WriteString(".")
+}
+
+func cleanEntityContextText(text string) string {
+	return strings.TrimSpace(chapterSummaryTextForBookPrompt(text))
+}
+
+func buildEntityPrompt(ch store.ChapterRow, paragraphs []store.ParagraphRow, promptContext entityExtractionContext) string {
 	var sb strings.Builder
 	sb.WriteString("Extract candidate entities and textual mentions from this chapter as JSON.\n")
 	sb.WriteString("Chapter ID: ")
@@ -218,7 +352,10 @@ func buildEntityPrompt(ch store.ChapterRow, paragraphs []store.ParagraphRow) str
 	sb.WriteString(ch.Title)
 	sb.WriteString("\nReturn JSON matching the schema:\n")
 	sb.WriteString(`{"entities":[{"canonical_name":"...","type":"character|location|object|organization|group|document|event-concept|unknown","aliases":[],"mentions":[{"paragraph_id":"p-...","surface_text":"...","confidence":0.9}]}]}`)
-	sb.WriteString("\nUse only paragraph IDs from the excerpts below. Preserve ambiguity; do not merge uncertain aliases.\n\n")
+	sb.WriteString("\nUse only paragraph IDs from the excerpts below. Preserve ambiguity; do not merge uncertain aliases.")
+	sb.WriteString(" Existing extraction context, when present, is orientation only and not evidence.\n")
+	writeEntityExtractionContext(&sb, promptContext)
+	sb.WriteString("\nAuthoritative manuscript paragraph excerpts:\n")
 	writeParagraphExcerpts(&sb, paragraphs)
 	return sb.String()
 }

@@ -22,8 +22,8 @@ type Capabilities struct {
 
 // Message is one chat message.
 type Message struct {
-	Role    string // "system", "user", or "assistant"
-	Content string
+	Role    string `json:"role"` // "system", "user", or "assistant"
+	Content string `json:"content"`
 }
 
 // GenerationRequest is the input to a chat-completion call.

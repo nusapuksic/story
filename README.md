@@ -76,7 +76,7 @@ This flow assumes you just downloaded a release zip and have not installed `stor
    default_model = "llama3.1:8b"
    base_url = "http://127.0.0.1:11434/v1"
    api_key_env = ""
-   request_timeout_seconds = 300
+   request_timeout_seconds = 3000
    ```
 
    `default_model` should match the exact model ID from the previous step. If your server is not on the same machine, update `base_url`. If your endpoint requires an API key, put the environment variable name in `api_key_env`; do not put the key itself in this file.
@@ -97,7 +97,7 @@ This flow assumes you just downloaded a release zip and have not installed `stor
    "$HOME/Documents/Obsidian Vault/My Novel Draft.md"
    ```
 
-After `env.toml` is configured, create a project and import the manuscript. Import itself does not upload your manuscript. It creates a local project copy and normalizes it into chapters and paragraphs. The `compile` command then builds scenes, scene cards, entities, verification records, and summaries that manage context for the LLM. With the default local setup, `compile` and `ask` talk to a model server on your machine; if you configure a remote provider, excerpted evidence is sent to that endpoint.
+After `env.toml` is configured, create a project and import the manuscript. Import itself does not upload your manuscript. It creates a local project copy and normalizes it into chapters and paragraphs. The `compile` command then builds scenes, scene cards, verification records, summaries, and entities that manage context for the LLM. With the default local setup, `compile` and `ask` talk to a model server on your machine; if you configure a remote provider, excerpted evidence is sent to that endpoint.
 
 Each command below is shown for Windows PowerShell first, then macOS/Linux.
 
@@ -167,7 +167,7 @@ Each command below is shown for Windows PowerShell first, then macOS/Linux.
 
 11. Compile the story model.
 
-   Builds scenes, scene cards, entities, verification records, and summaries from the imported manuscript. Args/options: `--project` points at the project folder; LLM-backed layers expect `llm doctor` to pass first.
+   Builds scenes, scene cards, verification records, summaries, and entities from the imported manuscript. Args/options: `--project` points at the project folder; LLM-backed layers expect `llm doctor` to pass first.
 
    ```powershell
    .\story.exe --project "C:\Users\YourName\story-projects\my-novel" compile
@@ -247,7 +247,7 @@ Missing environment config files are ignored and the built-in fallback uses `htt
    default_model = "llama3.1:8b"
    base_url = "http://127.0.0.1:11434/v1"
    api_key_env = ""
-   request_timeout_seconds = 300
+   request_timeout_seconds = 3000
    ```
 
    Use your LAN server URL for `base_url` when the model server is not on the same machine. New `story init` and `story import md` initializations copy these values into the generated project `story.toml`.
@@ -296,9 +296,9 @@ These examples use `./story` for a binary in the current folder. In Windows Powe
 ./story --project ./my-novel compile status
 ./story --project ./my-novel compile --layer scenes
 ./story --project ./my-novel compile --layer scene-cards
-./story --project ./my-novel compile --layer entities
 ./story --project ./my-novel compile --layer verification
 ./story --project ./my-novel compile --layer summaries
+./story --project ./my-novel compile --layer entities
 ./story --project ./my-novel search "farmhouse fire"
 ./story --project ./my-novel search "Mara" --chapter ch-0004 --limit 10
 ./story --project ./my-novel ask "What does Mara know when she enters the farmhouse?"
@@ -310,7 +310,7 @@ Markdown import accepts either a folder of chapter files or one continuous `.md`
 
 The SQLite index at `.story/index.sqlite` is a rebuildable projection of the canonical project files; deleting it never loses data (`story index rebuild` reconstructs it).
 
-`story compile` builds the story model from the canonical manuscript in layers: `scenes`, `scene-cards`, `entities`, `verification`, and `summaries`. `scenes` can run from explicit manuscript scene breaks without an LLM; model-assisted scene detection and the other compile layers require configured LLM roles (see `docs/cli-spec.md`).
+`story compile` builds the story model from the canonical manuscript in layers: `scenes`, `scene-cards`, optional `verification`, `summaries`, and `entities`. Entity extraction uses existing summaries and scene cards as orientation when available, while paragraph excerpts remain the only evidence for mentions. `scenes` can run from explicit manuscript scene breaks without an LLM; model-assisted scene detection and the other compile layers require configured LLM roles (see `docs/cli-spec.md`).
 
 `story search` runs full-text search over indexed paragraphs and scene cards. The FTS index is populated during indexing; run `story index rebuild` to refresh it.
 

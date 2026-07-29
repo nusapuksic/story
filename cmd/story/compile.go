@@ -24,17 +24,17 @@ func newCompileCmd() *cobra.Command {
 Supported layers:
   scenes        Detect scene boundaries (explicit + optional LLM proposals)
   scene-cards   Extract structured scene cards using the configured LLM
-  entities      Extract candidate entities and paragraph-level mentions
   verification  Verify generated scene cards against cited manuscript evidence
   summaries     Generate chapter and book summaries using the configured LLM
+  entities      Extract candidate entities and paragraph-level mentions
 
-Without --layer, all implemented layers are run in order.`,
+Without --layer, all implemented layers are run in order: scenes, scene-cards, verification when enabled, summaries, entities.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCompile(layer, chapterID, force)
 		},
 	}
-	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes, scene-cards, entities, verification, or summaries")
+	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes, scene-cards, verification, summaries, or entities")
 	cmd.Flags().StringVar(&chapterID, "chapter", "", "restrict to one chapter (e.g. ch-0001)")
 	cmd.Flags().BoolVar(&force, "force", false, "recompute already-generated records")
 	cmd.AddCommand(newCompileStatusCmd())

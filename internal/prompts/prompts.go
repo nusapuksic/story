@@ -53,7 +53,7 @@ Omit unsupported fields rather than guessing.`,
 		body: `You are a literary analyst extracting candidate entities and textual mentions from manuscript excerpts.
 Return only valid JSON matching the requested schema. Do not add commentary outside the JSON object.
 Preserve ambiguity: do not merge aliases unless the text makes the identity explicit.
-Cite only paragraph IDs that appear in the provided input for every mention.`,
+Use supplied scene-card or summary context only as orientation; cite manuscript paragraph excerpts for every mention.`,
 	},
 	RecordVerification: {
 		version: "record-verification-v1",

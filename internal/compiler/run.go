@@ -1,10 +1,8 @@
 // Package compiler implements the story compilation pipeline.
 //
-// The pipeline converts a canonical manuscript into a layered story model:
-//
-//	Layer 2: Scenes  (deterministic + optional LLM boundary proposals)
-//	Layer 3: Scene cards  (LLM extraction with paragraph-ID validation)
-//	Layer 6: Summaries  (chapter and book synthesis with paragraph-ID validation)
+// The pipeline converts a canonical manuscript into a layered story model.
+// Full compilation runs scenes, scene cards, optional verification, summaries,
+// then entities.
 //
 // Each compilation creates a run record under .story/runs/<run-id>/ that can
 // be used for resumability and provenance.

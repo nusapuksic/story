@@ -156,6 +156,61 @@ func TestCompileRequiresProviderForSceneCards(t *testing.T) {
 	}
 }
 
+func TestCompileAllRunsSummariesBeforeEntities(t *testing.T) {
+	p, st := buildTestProject(t)
+	p.Config.Compile.SceneDetection = "explicit"
+	p.Config.Compile.Verification = false
+
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	if len(paragraphs) == 0 {
+		t.Fatal("expected chapter paragraphs")
+	}
+
+	cardJSON := `{"title":"Scene","summary":"Scene summary.","evidence":[]}`
+	chapterSummaryJSON := `{"summary":"Chapter summary.","evidence":["` + paragraphs[0].ID + `"]}`
+	bookSummaryJSON := `{"summary":"Book summary.","evidence":["ch-0001"]}`
+	entitiesJSON := `{"entities":[{"canonical_name":"Mara","type":"character","mentions":[{"paragraph_id":"` + paragraphs[0].ID + `","surface_text":"Mara","confidence":0.95}]}]}`
+	fake := &fakeProvider{responses: []string{
+		cardJSON,
+		cardJSON,
+		chapterSummaryJSON,
+		bookSummaryJSON,
+		entitiesJSON,
+	}}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile all layers: %v", err)
+	}
+	if result.CardsBuilt != 2 || result.SummariesBuilt != 2 || result.EntitiesBuilt != 1 {
+		t.Fatalf("built counts = cards %d, summaries %d, entities %d; want 2, 2, 1",
+			result.CardsBuilt, result.SummariesBuilt, result.EntitiesBuilt)
+	}
+	if len(fake.requests) != 5 {
+		t.Fatalf("Generate calls = %d, want 5", len(fake.requests))
+	}
+
+	wantPrompts := []string{
+		"Extract a structured scene card",
+		"Extract a structured scene card",
+		"Summarize this chapter",
+		"Produce a whole-book orientation summary",
+		"Extract candidate entities",
+	}
+	for i, want := range wantPrompts {
+		prompt := fake.requests[i].Messages[1].Content
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("request %d prompt = %q, want it to contain %q", i, prompt, want)
+		}
+	}
+}
+
 func TestCompileUnknownLayer(t *testing.T) {
 	p, st := buildTestProject(t)
 	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: "unknown"})
@@ -749,6 +804,76 @@ func TestCompileEntitiesWithFakeProvider(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"record_type":"mention"`) {
 		t.Fatalf("mentions.jsonl missing mention record: %s", data)
+	}
+}
+
+func TestCompileEntitiesIncludesExistingExtractionContext(t *testing.T) {
+	p, st := buildTestProject(t)
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerScenes})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
+
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	scenes, err := st.AllScenes()
+	if err != nil {
+		t.Fatalf("AllScenes: %v", err)
+	}
+	if len(paragraphs) == 0 || len(scenes) == 0 {
+		t.Fatal("expected paragraphs and scenes")
+	}
+
+	summaries := `{"record_type":"chapter_summary","chapter_id":"ch-0001","summary":"Mara receives the bell warning [` + paragraphs[0].ID + `].","themes":["warnings"],"unresolved":["Who wrote the warning?"],"evidence":["` + paragraphs[0].ID + `"],"generation":{},"status":"generated"}` + "\n" +
+		`{"record_type":"book_summary","summary":"A lakeside mystery turns on bells and memory.","themes":["memory"],"evidence":["ch-0001"],"generation":{},"status":"generated"}` + "\n"
+	if err := os.WriteFile(p.Path(filepath.Join(project.ModelDir, "summaries.jsonl")), []byte(summaries), 0o644); err != nil {
+		t.Fatalf("write summaries: %v", err)
+	}
+
+	rawCard := `{"record_type":"scene_card","scene_id":"` + scenes[0].ID + `","title":"Bell warning","summary":"Mara meets Old Petar near the lake.","pov":["Mara"],"participants":["Mara","Old Petar"],"locations":["Lake edge"],"unresolved":["Why the bell must stay silent"],"evidence":["` + paragraphs[0].ID + `"],"generation":{},"status":"verified"}`
+	if err := st.InsertSceneCard(store.SceneCardRow{
+		SceneID: scenes[0].ID,
+		Title:   "Bell warning",
+		Summary: "Mara meets Old Petar near the lake.",
+		Evidence: []string{
+			paragraphs[0].ID,
+		},
+		Status:  "verified",
+		RawJSON: rawCard,
+	}); err != nil {
+		t.Fatalf("InsertSceneCard: %v", err)
+	}
+
+	fake := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","mentions":[{"paragraph_id":"` + paragraphs[0].ID + `","surface_text":"Mara","confidence":0.95}]}]}`}
+	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities: %v", err)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("Generate calls = %d, want 1", len(fake.requests))
+	}
+
+	prompt := fake.requests[0].Messages[1].Content
+	for _, want := range []string{
+		"Existing extraction context (orientation only; do not cite this section):",
+		"Book summary: A lakeside mystery turns on bells and memory.",
+		"Chapter summary: Mara receives the bell warning.",
+		"Themes: warnings",
+		"Scene cards:",
+		"Bell warning - Mara meets Old Petar near the lake.",
+		"Participants: Mara, Old Petar.",
+		"Locations: Lake edge.",
+		"Authoritative manuscript paragraph excerpts:",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("entity prompt missing %q:\n%s", want, prompt)
+		}
 	}
 }
 

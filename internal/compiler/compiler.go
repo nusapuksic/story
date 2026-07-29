@@ -148,19 +148,6 @@ func runLayers(
 		}
 		cardsBuilt = n
 	}
-	// Entities layer (Layer 4 MVP).
-	if opts.Layer == "" || opts.Layer == LayerEntities {
-		if opts.ExtractionProvider == nil {
-			return scenesBuilt, cardsBuilt, 0, 0, 0, errors.New(
-				"no LLM provider configured: entities require an extraction provider; " +
-					"configure [llm] in story.toml")
-		}
-		n, err := compileEntities(ctx, p, st, chapters, opts, cfg, run)
-		if err != nil {
-			return scenesBuilt, cardsBuilt, 0, 0, 0, err
-		}
-		entitiesBuilt = n
-	}
 
 	// Verification layer verifies generated factual records when enabled.
 	if opts.Layer == LayerVerification || (opts.Layer == "" && p.Config.Compile.Verification) {
@@ -175,7 +162,8 @@ func runLayers(
 		}
 		verificationsBuilt = n
 	}
-	// Summaries layer (Layer 6 MVP).
+
+	// Summaries layer.
 	if opts.Layer == "" || opts.Layer == LayerSummaries {
 		if opts.ExtractionProvider == nil {
 			return scenesBuilt, cardsBuilt, entitiesBuilt, verificationsBuilt, 0, errors.New(
@@ -187,6 +175,20 @@ func runLayers(
 			return scenesBuilt, cardsBuilt, entitiesBuilt, verificationsBuilt, 0, err
 		}
 		summariesBuilt = n
+	}
+
+	// Entities layer.
+	if opts.Layer == "" || opts.Layer == LayerEntities {
+		if opts.ExtractionProvider == nil {
+			return scenesBuilt, cardsBuilt, 0, verificationsBuilt, summariesBuilt, errors.New(
+				"no LLM provider configured: entities require an extraction provider; " +
+					"configure [llm] in story.toml")
+		}
+		n, err := compileEntities(ctx, p, st, chapters, opts, cfg, run)
+		if err != nil {
+			return scenesBuilt, cardsBuilt, 0, verificationsBuilt, summariesBuilt, err
+		}
+		entitiesBuilt = n
 	}
 
 	return scenesBuilt, cardsBuilt, entitiesBuilt, verificationsBuilt, summariesBuilt, nil

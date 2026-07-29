@@ -68,7 +68,7 @@ func (p *OpenAIProvider) Models(ctx context.Context) ([]ModelInfo, error) {
 // Capabilities returns basic capability information for the given model.
 // The OpenAI-compatible API does not expose per-model capability metadata, so
 // this performs a lightweight probe by sending a minimal chat request with
-// json_object response format and observing whether it succeeds.
+// json_schema response format and observing whether it succeeds.
 func (p *OpenAIProvider) Capabilities(ctx context.Context, model string) (Capabilities, error) {
 	models, err := p.Models(ctx)
 	if err != nil {
@@ -100,6 +100,19 @@ func (p *OpenAIProvider) Capabilities(ctx context.Context, model string) (Capabi
 
 // Generate calls POST /v1/chat/completions and returns the response content.
 func (p *OpenAIProvider) Generate(ctx context.Context, req GenerationRequest) (GenerationResponse, error) {
+	body := chatCompletionBody(req)
+	if req.JSONMode {
+		body["response_format"] = jsonSchemaResponseFormat()
+		resp, err := p.generateChatCompletion(ctx, body)
+		if err == nil || !isResponseFormatError(err) {
+			return resp, err
+		}
+		body["response_format"] = map[string]string{"type": "json_object"}
+	}
+	return p.generateChatCompletion(ctx, body)
+}
+
+func chatCompletionBody(req GenerationRequest) map[string]any {
 	body := map[string]any{
 		"model":    req.Model,
 		"messages": req.Messages,
@@ -110,10 +123,10 @@ func (p *OpenAIProvider) Generate(ctx context.Context, req GenerationRequest) (G
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
 	}
-	if req.JSONMode {
-		body["response_format"] = map[string]string{"type": "json_object"}
-	}
+	return body
+}
 
+func (p *OpenAIProvider) generateChatCompletion(ctx context.Context, body map[string]any) (GenerationResponse, error) {
 	var resp struct {
 		Choices []struct {
 			Message struct {
@@ -138,6 +151,24 @@ func (p *OpenAIProvider) Generate(ctx context.Context, req GenerationRequest) (G
 		PromptTokens: resp.Usage.PromptTokens,
 		OutputTokens: resp.Usage.CompletionTokens,
 	}, nil
+}
+
+func jsonSchemaResponseFormat() map[string]any {
+	return map[string]any{
+		"type": "json_schema",
+		"json_schema": map[string]any{
+			"name": "story_json_response",
+			"schema": map[string]any{
+				"type":                 "object",
+				"additionalProperties": true,
+			},
+		},
+	}
+}
+
+func isResponseFormatError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "http 400") && strings.Contains(msg, "response_format")
 }
 
 // Embed calls POST /v1/embeddings.
