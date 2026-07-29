@@ -258,6 +258,51 @@ func TestImportSingleFileRegexSplit(t *testing.T) {
 	}
 }
 
+func TestImportSingleFileIgnoreBeforeFirstChapter(t *testing.T) {
+	p := newTestProject(t)
+	src := filepath.Join(t.TempDir(), "manuscript.md")
+	content := "# Book Title\n\nDedication text that should not be imported.\n\n# Chapter One\n\nMara walked the road.\n\n# Chapter Two\n\nThe house waited."
+	if err := os.WriteFile(src, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := Options{ChapterRegex: `^# (Chapter .+)$`}
+	if _, err := Run(p, src, opts); !errors.Is(err, ErrAmbiguousOrder) {
+		t.Fatalf("err = %v, want ErrAmbiguousOrder without IgnoreBeforeFirst", err)
+	}
+
+	res, err := Run(p, src, Options{
+		ChapterRegex:      `^# (Chapter .+)$`,
+		IgnoreBeforeFirst: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Chapters != 2 || res.Paragraphs != 2 {
+		t.Fatalf("result = %+v, want 2 chapters and 2 paragraphs", res)
+	}
+	got := chapterTitles(t, p)
+	want := []string{"Chapter One", "Chapter Two"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("chapter %d title = %q, want %q", i+1, got[i], want[i])
+		}
+	}
+	ids := paragraphIDs(t, p)
+	s, err := store.Open(p.Path(project.IndexPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	first, err := s.InspectParagraph(ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(first.Text, "Dedication") || strings.Contains(first.Text, "Book Title") {
+		t.Errorf("front matter was imported into first chapter: %q", first.Text)
+	}
+}
+
 func TestImportSingleFileAmbiguousNoHeading(t *testing.T) {
 	p := newTestProject(t)
 	src := filepath.Join(t.TempDir(), "manuscript.md")

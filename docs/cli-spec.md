@@ -395,6 +395,7 @@ Single-file options:
 
 --chapter-heading-level <1-6>
 --chapter-regex <regex>
+--ignore-before-first-chapter
 --single-chapter
 
 Markdown import procedure
@@ -547,12 +548,23 @@ This imports the entire Markdown file as one canonical chapter. The chapter titl
 comes from --title, then from the first level-one heading if present, then from
 the source filename.
 
+Ignoring front matter
+
+story import md manuscript.md --chapter-regex '^# Chapter .+' --ignore-before-first-chapter
+
+By default, single-file import rejects non-empty body text before the first
+detected chapter boundary. With --ignore-before-first-chapter, that prefix is
+treated as front matter and excluded from the canonical manuscript. This option
+is intended to be paired with a deterministic chapter selector such as
+--chapter-heading-level or --chapter-regex.
+
 Ambiguity policy
 
 Single-file import must fail when:
 
 * no chapter boundaries are found and --single-chapter was not supplied;
-* non-empty manuscript body text appears before the first detected chapter;
+* non-empty manuscript body text appears before the first detected chapter and
+  --ignore-before-first-chapter was not supplied;
 * duplicate or empty chapter headings make the split unclear;
 * a chapter boundary regex matches overlapping or zero-length sections;
 * the detected chapter order cannot be represented deterministically.

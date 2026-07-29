@@ -25,6 +25,7 @@ type Options struct {
 	DryRun              bool   // detect and report without modifying the manuscript (--dry-run)
 	ChapterHeadingLevel int    // Markdown heading level for continuous files, default 1
 	ChapterRegex        string // line regex for continuous-file chapter boundaries
+	IgnoreBeforeFirst   bool   // ignore non-empty text before the first continuous-file chapter boundary
 	SingleChapter       bool   // import a continuous file as one chapter
 }
 
@@ -313,8 +314,8 @@ func prepareFileImport(
 		if werr != nil {
 			return nil, errors.Join(err, werr)
 		}
-		return nil, fmt.Errorf("%w\nNo manuscript files were imported.\nAn import report was written to:\n%s\nReview the report and run one of:\nstory import md %s --single-chapter\nstory import md %s --chapter-heading-level 2\nstory import md %s --chapter-regex <regex>",
-			err, reportDir, path, path, path)
+		return nil, fmt.Errorf("%w\nNo manuscript files were imported.\nAn import report was written to:\n%s\nReview the report and run one of:\nstory import md %s --single-chapter\nstory import md %s --chapter-heading-level 2\nstory import md %s --chapter-regex <regex>\nstory import md %s --chapter-regex <regex> --ignore-before-first-chapter",
+			err, reportDir, path, path, path, path)
 	}
 	if err != nil {
 		return nil, err
