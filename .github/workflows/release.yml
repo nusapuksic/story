@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          mkdir -p dist
+
+          targets=(
+            "windows amd64 story.exe"
+            "linux amd64 story"
+            "linux arm64 story"
+            "darwin amd64 story"
+            "darwin arm64 story"
+          )
+
+          assets=()
+          for target in "${targets[@]}"; do
+            read -r goos goarch binary <<< "$target"
+            name="story-${tag}-${goos}-${goarch}"
+            stage="dist/${name}"
+            archive="dist/${name}.zip"
+
+            rm -rf "$stage"
+            mkdir -p "$stage"
+            cp README.md LICENSE env.toml "$stage/"
+
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags="-s -w -X main.version=${version}" \
+              -o "$stage/$binary" ./cmd/story
+
+            (cd "$stage" && zip -qr "../${name}.zip" .)
+            assets+=("$archive")
+          done
+
+          : > dist/SHA256SUMS.txt
+          for asset in "${assets[@]}"; do
+            sha256sum "$asset" | sed 's#dist/##' >> dist/SHA256SUMS.txt
+          done
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          title="story ${tag}"
+          notes_file="release-notes.md"
+
+          cat > "$notes_file" <<EOF
+          Automated release for ${tag}.
+
+          ## Verification
+
+          - \`gofmt -l .\`
+          - \`go vet ./...\`
+          - \`go test ./...\`
+          EOF
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.zip dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "$tag" dist/*.zip dist/SHA256SUMS.txt \
+              --verify-tag \
+              --title "$title" \
+              --notes-file "$notes_file"
+          fi
