@@ -233,6 +233,26 @@ model = ""
 
 API keys must not be stored directly in story.toml. Remote credentials are referenced through environment variables or operating-system credential storage.
 
+5.1 User environment configuration
+
+An optional user-level environment config seeds new project configuration before story.toml is written. The default path is the operating-system user config directory plus story/env.toml:
+
+Windows: %AppData%\story\env.toml
+macOS: ~/Library/Application Support/story/env.toml
+Linux: $XDG_CONFIG_HOME/story/env.toml, or ~/.config/story/env.toml when XDG_CONFIG_HOME is unset
+
+The STORY_ENV_CONFIG environment variable may point to a different file.
+
+Example:
+
+[llm]
+default_model = "llama3.1:8b"
+base_url = "http://192.168.1.50:11434/v1"
+api_key_env = ""
+request_timeout_seconds = 300
+
+story init and story import md copy default_model into all generated LLM roles and copy base_url, api_key_env, and request_timeout_seconds into the generated default provider. Explicit command options take precedence over the user environment config. Missing environment config files are ignored.
+
 ⸻
 
 6. Canonical manuscript representation
@@ -326,13 +346,14 @@ Options:
 --title <title>
 --language <code>
 --model <model-id>    Use one model for all generated LLM roles.
+--llm-base-url <url>  Set the generated default LLM provider base URL.
 --force
 
 Behavior:
 
 1. create the project directory;
 2. generate project_id;
-3. write default configuration, populating all LLM role models from --model when provided;
+3. write default configuration, populating LLM role models and provider base URL from the user environment config and then explicit options when provided;
 4. create canonical directories;
 5. initialize SQLite;
 6. copy default prompts.
@@ -354,6 +375,7 @@ Common options:
 
 --title <title>
 --model <model-id>    Used only when import initializes a missing project.
+--llm-base-url <url>  Used only when import initializes a missing project.
 --replace
 --dry-run
 
@@ -1335,13 +1357,7 @@ motives, relationships, chronology, or world facts.
 
 18. Security and privacy
 
-Default provider URLs must be loopback addresses:
-
-127.0.0.1
-localhost
-::1
-
-User-configured provider URLs may point at private local-network IPs,
+The built-in fallback provider URL may be a loopback address, but project initialization must allow the user environment config or explicit command options to set the model server location. User-configured provider URLs may point at private local-network IPs,
 including RFC1918 addresses, link-local addresses, IPv6 unique-local addresses,
 and shared/VPN address space such as 100.64.0.0/10.
 

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/nusapuksic/story/internal/config"
+	"github.com/nusapuksic/story/internal/envconfig"
 	"github.com/nusapuksic/story/internal/ids"
 	"github.com/nusapuksic/story/internal/prompts"
 )
@@ -79,6 +81,7 @@ type InitOptions struct {
 	Title        string
 	Language     string
 	DefaultModel string
+	LLMBaseURL   string
 	Force        bool
 }
 
@@ -122,11 +125,8 @@ func Init(dir string, opts InitOptions) (*Project, error) {
 	}
 
 	cfg := config.Default(ids.NewProjectID(), opts.Title, opts.Language)
-	if opts.DefaultModel != "" {
-		for name, role := range cfg.LLM.Roles {
-			role.Model = opts.DefaultModel
-			cfg.LLM.Roles[name] = role
-		}
+	if err := applyInitLLMDefaults(&cfg, opts); err != nil {
+		return nil, fmt.Errorf("init %s: %w", dir, err)
 	}
 	if err := config.Save(dir, cfg); err != nil {
 		return nil, fmt.Errorf("init %s: %w", dir, err)
@@ -160,6 +160,7 @@ func OpenOrInit(dir string, opts InitOptions) (*Project, bool, error) {
 		Title:        opts.Title,
 		Language:     opts.Language,
 		DefaultModel: opts.DefaultModel,
+		LLMBaseURL:   opts.LLMBaseURL,
 		Force:        true,
 	})
 	if err != nil {
@@ -171,6 +172,60 @@ func OpenOrInit(dir string, opts InitOptions) (*Project, bool, error) {
 // Path returns an absolute path inside the project.
 func (p *Project) Path(rel string) string {
 	return filepath.Join(p.Dir, rel)
+}
+
+func applyInitLLMDefaults(cfg *config.Config, opts InitOptions) error {
+	env, _, _, err := envconfig.Load()
+	if err != nil {
+		return err
+	}
+
+	model := strings.TrimSpace(opts.DefaultModel)
+	if model == "" {
+		model = env.LLM.DefaultModel
+	}
+	if model != "" {
+		for name, role := range cfg.LLM.Roles {
+			role.Model = model
+			cfg.LLM.Roles[name] = role
+		}
+	}
+
+	baseURL := strings.TrimRight(strings.TrimSpace(opts.LLMBaseURL), "/")
+	if baseURL == "" {
+		baseURL = env.LLM.BaseURL
+	}
+	if baseURL != "" {
+		setDefaultProviderBaseURL(cfg, baseURL)
+	}
+	if env.LLM.APIKeyEnv != "" {
+		setDefaultProviderAPIKeyEnv(cfg, env.LLM.APIKeyEnv)
+	}
+	if env.LLM.RequestTimeoutSeconds > 0 {
+		setDefaultProviderTimeout(cfg, env.LLM.RequestTimeoutSeconds)
+	}
+	return nil
+}
+
+func setDefaultProviderBaseURL(cfg *config.Config, baseURL string) {
+	providerName := cfg.LLM.DefaultProvider
+	pc := cfg.LLM.Providers[providerName]
+	pc.BaseURL = baseURL
+	cfg.LLM.Providers[providerName] = pc
+}
+
+func setDefaultProviderAPIKeyEnv(cfg *config.Config, apiKeyEnv string) {
+	providerName := cfg.LLM.DefaultProvider
+	pc := cfg.LLM.Providers[providerName]
+	pc.APIKeyEnv = apiKeyEnv
+	cfg.LLM.Providers[providerName] = pc
+}
+
+func setDefaultProviderTimeout(cfg *config.Config, timeoutSeconds int) {
+	providerName := cfg.LLM.DefaultProvider
+	pc := cfg.LLM.Providers[providerName]
+	pc.RequestTimeoutSeconds = timeoutSeconds
+	cfg.LLM.Providers[providerName] = pc
 }
 
 func touch(path string) error {

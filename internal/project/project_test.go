@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+func TestMain(m *testing.M) {
+	path := filepath.Join(os.TempDir(), "story-test-missing-env.toml")
+	_ = os.Remove(path)
+	_ = os.Setenv("STORY_ENV_CONFIG", path)
+	os.Exit(m.Run())
+}
+
 func TestInitCreatesLayout(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "novel")
 	p, err := Init(dir, InitOptions{Title: "My Novel", Language: "en"})
@@ -63,6 +70,70 @@ func TestInitDefaultModelPopulatesLLMRoles(t *testing.T) {
 	}
 	if reopened.Config.LLM.Roles["discussion"].Model != "llama3.1" {
 		t.Errorf("reopened discussion model = %q, want llama3.1", reopened.Config.LLM.Roles["discussion"].Model)
+	}
+}
+
+func TestInitUsesEnvConfigDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "env.toml")
+	data := []byte(`
+[llm]
+default_model = "llama3.1:8b"
+base_url = "http://192.168.1.50:11434/v1"
+request_timeout_seconds = 180
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STORY_ENV_CONFIG", path)
+
+	dir := filepath.Join(t.TempDir(), "novel")
+	p, err := Init(dir, InitOptions{Title: "My Novel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"extraction", "verification", "discussion"} {
+		role := p.Config.LLM.Roles[name]
+		if role.Model != "llama3.1:8b" {
+			t.Errorf("role %s model = %q, want llama3.1:8b", name, role.Model)
+		}
+	}
+	local := p.Config.LLM.Providers["local"]
+	if local.BaseURL != "http://192.168.1.50:11434/v1" {
+		t.Errorf("base URL = %q, want LAN server", local.BaseURL)
+	}
+	if local.RequestTimeoutSeconds != 180 {
+		t.Errorf("timeout = %d, want 180", local.RequestTimeoutSeconds)
+	}
+}
+
+func TestInitOptionsOverrideEnvConfigDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "env.toml")
+	data := []byte(`
+[llm]
+default_model = "env-model"
+base_url = "http://192.168.1.50:11434/v1"
+`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STORY_ENV_CONFIG", path)
+
+	dir := filepath.Join(t.TempDir(), "novel")
+	p, err := Init(dir, InitOptions{
+		Title:        "My Novel",
+		DefaultModel: "flag-model",
+		LLMBaseURL:   "http://10.0.0.5:1234/v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if p.Config.LLM.Roles["discussion"].Model != "flag-model" {
+		t.Errorf("discussion model = %q, want flag-model", p.Config.LLM.Roles["discussion"].Model)
+	}
+	if p.Config.LLM.Providers["local"].BaseURL != "http://10.0.0.5:1234/v1" {
+		t.Errorf("base URL = %q, want explicit flag URL", p.Config.LLM.Providers["local"].BaseURL)
 	}
 }
 
