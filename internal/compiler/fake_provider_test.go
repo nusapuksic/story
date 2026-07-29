@@ -8,10 +8,13 @@ import (
 
 // fakeProvider implements provider.Provider using a fixed response string.
 type fakeProvider struct {
-	response  string
-	responses []string
-	err       error
-	requests  []provider.GenerationRequest
+	response     string
+	responses    []string
+	finishReason string
+	promptTokens int
+	outputTokens int
+	err          error
+	requests     []provider.GenerationRequest
 }
 
 func (f *fakeProvider) Health(_ context.Context) error { return f.err }
@@ -31,7 +34,12 @@ func (f *fakeProvider) Generate(_ context.Context, req provider.GenerationReques
 		}
 		content = f.responses[idx]
 	}
-	return provider.GenerationResponse{Content: content}, f.err
+	return provider.GenerationResponse{
+		Content:      content,
+		FinishReason: f.finishReason,
+		PromptTokens: f.promptTokens,
+		OutputTokens: f.outputTokens,
+	}, f.err
 }
 func (f *fakeProvider) Embed(_ context.Context, _ provider.EmbeddingRequest) (provider.EmbeddingResponse, error) {
 	return provider.EmbeddingResponse{}, f.err

@@ -15,10 +15,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nusapuksic/story/internal/ids"
 	"github.com/nusapuksic/story/internal/project"
+	"github.com/nusapuksic/story/internal/provider"
 )
 
 // RunStatus values for compilation runs.
@@ -51,15 +53,26 @@ type RunRecord struct {
 
 // TaskRecord is one entry appended to .story/runs/<run-id>/tasks.jsonl.
 type TaskRecord struct {
-	TaskID        string `json:"task_id"`
-	RunID         string `json:"run_id"`
-	TaskType      string `json:"task_type"`
-	ChapterID     string `json:"chapter_id,omitempty"`
-	SceneID       string `json:"scene_id,omitempty"`
-	RecordID      string `json:"record_id,omitempty"`
-	PromptVersion string `json:"prompt_version,omitempty"`
-	Status        string `json:"status"`
-	Error         string `json:"error,omitempty"`
+	TaskID        string         `json:"task_id"`
+	RunID         string         `json:"run_id"`
+	TaskType      string         `json:"task_type"`
+	ChapterID     string         `json:"chapter_id,omitempty"`
+	SceneID       string         `json:"scene_id,omitempty"`
+	RecordID      string         `json:"record_id,omitempty"`
+	PromptVersion string         `json:"prompt_version,omitempty"`
+	Status        string         `json:"status"`
+	Error         string         `json:"error,omitempty"`
+	Response      *ResponseAudit `json:"response,omitempty"`
+}
+
+// ResponseAudit records provider metadata for one raw model response.
+type ResponseAudit struct {
+	CapturedAt   string `json:"captured_at,omitempty"`
+	FinishReason string `json:"finish_reason,omitempty"`
+	PromptTokens int    `json:"prompt_tokens,omitempty"`
+	OutputTokens int    `json:"output_tokens,omitempty"`
+	ContentBytes int    `json:"content_bytes"`
+	ContentEmpty bool   `json:"content_empty,omitempty"`
 }
 
 // Run manages the lifecycle of one compilation run.
@@ -122,6 +135,9 @@ func (r *Run) fail(runErr error) error {
 
 // recordTask appends a task record to tasks.jsonl.
 func (r *Run) recordTask(t TaskRecord) error {
+	if t.Response == nil {
+		t.Response = r.responseAuditForTask(t.TaskID)
+	}
 	path := filepath.Join(r.dir, "tasks.jsonl")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -131,10 +147,44 @@ func (r *Run) recordTask(t TaskRecord) error {
 	return json.NewEncoder(f).Encode(t)
 }
 
-// saveRawResponse writes a raw model response to raw-responses/<task-id>.json.
-func (r *Run) saveRawResponse(taskID, content string) error {
-	path := filepath.Join(r.dir, "raw-responses", taskID+".json")
-	return os.WriteFile(path, []byte(content), 0o644)
+// saveRawResponse writes raw model content and provider metadata under raw-responses/.
+func (r *Run) saveRawResponse(taskID string, resp provider.GenerationResponse) error {
+	contentPath := filepath.Join(r.dir, "raw-responses", taskID+".json")
+	if err := os.WriteFile(contentPath, []byte(resp.Content), 0o644); err != nil {
+		return err
+	}
+
+	audit := newResponseAudit(resp)
+	data, err := json.MarshalIndent(audit, "", "  ")
+	if err != nil {
+		return err
+	}
+	metaPath := filepath.Join(r.dir, "raw-responses", taskID+".meta.json")
+	return os.WriteFile(metaPath, data, 0o644)
+}
+
+func (r *Run) responseAuditForTask(taskID string) *ResponseAudit {
+	path := filepath.Join(r.dir, "raw-responses", taskID+".meta.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var audit ResponseAudit
+	if err := json.Unmarshal(data, &audit); err != nil {
+		return nil
+	}
+	return &audit
+}
+
+func newResponseAudit(resp provider.GenerationResponse) ResponseAudit {
+	return ResponseAudit{
+		CapturedAt:   time.Now().UTC().Format(time.RFC3339),
+		FinishReason: resp.FinishReason,
+		PromptTokens: resp.PromptTokens,
+		OutputTokens: resp.OutputTokens,
+		ContentBytes: len(resp.Content),
+		ContentEmpty: strings.TrimSpace(resp.Content) == "",
+	}
 }
 
 func (r *Run) save() error {

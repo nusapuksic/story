@@ -203,7 +203,7 @@ func extractEntitiesForChapter(
 	}
 	resp, err := prov.Generate(ctx, req)
 	if run != nil {
-		_ = run.saveRawResponse(taskID, resp.Content)
+		_ = run.saveRawResponse(taskID, resp)
 	}
 	if err != nil {
 		recordEntityTask(run, taskID, ch.ID, TaskStatusFailed, loadedPrompt.Version, err.Error())
@@ -363,10 +363,24 @@ func buildEntityPrompt(ch store.ChapterRow, paragraphs []store.ParagraphRow, pro
 func parseEntityResponse(content, chapterID string, paragraphs []store.ParagraphRow, runID, model, promptVersion string) ([]EntityRecord, []MentionRecord, error) {
 	content = stripJSONFences(content)
 	var raw rawEntityResponse
+	strictEvidence := true
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
-		return nil, nil, fmt.Errorf("parse entity response for %s: %w", chapterID, err)
+		if !isTruncatedJSONError(err) {
+			return nil, nil, fmt.Errorf("parse entity response for %s: %w", chapterID, err)
+		}
+		raw = salvageTruncatedEntityResponse(content)
+		strictEvidence = false
 	}
+	return entityRecordsFromRaw(raw, chapterID, paragraphs, runID, model, promptVersion, strictEvidence)
+}
 
+func entityRecordsFromRaw(
+	raw rawEntityResponse,
+	chapterID string,
+	paragraphs []store.ParagraphRow,
+	runID, model, promptVersion string,
+	strictEvidence bool,
+) ([]EntityRecord, []MentionRecord, error) {
 	paragraphByID := make(map[string]store.ParagraphRow, len(paragraphs))
 	for _, pp := range paragraphs {
 		paragraphByID[pp.ID] = pp
@@ -393,7 +407,10 @@ func parseEntityResponse(content, chapterID string, paragraphs []store.Paragraph
 			pid := strings.TrimSpace(string(rawMention.ParagraphID))
 			pp, ok := paragraphByID[pid]
 			if !ok {
-				return nil, nil, fmt.Errorf("entity %q cites unknown paragraph ID %q", name, pid)
+				if strictEvidence {
+					return nil, nil, fmt.Errorf("entity %q cites unknown paragraph ID %q", name, pid)
+				}
+				continue
 			}
 			surface := strings.TrimSpace(string(rawMention.SurfaceText))
 			if surface == "" {
@@ -437,6 +454,93 @@ func parseEntityResponse(content, chapterID string, paragraphs []store.Paragraph
 		mentions = append(mentions, entityMentions...)
 	}
 	return entities, mentions, nil
+}
+
+func salvageTruncatedEntityResponse(content string) rawEntityResponse {
+	arrayStart, ok := entityArrayStart(content)
+	if !ok {
+		return rawEntityResponse{}
+	}
+
+	var out rawEntityResponse
+	for _, snippet := range completeJSONObjectSnippets(content, arrayStart) {
+		var cand rawEntityCandidate
+		if err := json.Unmarshal([]byte(snippet), &cand); err == nil {
+			out.Entities = append(out.Entities, cand)
+		}
+	}
+	return out
+}
+
+func entityArrayStart(content string) (int, bool) {
+	key := strings.Index(content, `"entities"`)
+	if key < 0 {
+		return -1, false
+	}
+	for i := key + len(`"entities"`); i < len(content); i++ {
+		switch content[i] {
+		case '[':
+			return i, true
+		case ':', ' ', '\n', '\r', '\t':
+			continue
+		default:
+			return -1, false
+		}
+	}
+	return -1, false
+}
+
+func completeJSONObjectSnippets(content string, arrayStart int) []string {
+	var snippets []string
+	inString := false
+	escaped := false
+	depth := 0
+	objectStart := -1
+
+	for i := arrayStart + 1; i < len(content); i++ {
+		ch := content[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch ch {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '"':
+			inString = true
+		case ']':
+			if objectStart < 0 {
+				return snippets
+			}
+			depth--
+		case '{':
+			if objectStart < 0 {
+				objectStart = i
+			}
+			depth++
+		case '[':
+			if objectStart >= 0 {
+				depth++
+			}
+		case '}':
+			if objectStart >= 0 {
+				depth--
+				if depth == 0 {
+					snippets = append(snippets, content[objectStart:i+1])
+					objectStart = -1
+				}
+			}
+		}
+	}
+	return snippets
 }
 
 func normalizeEntityType(value string) string {

@@ -201,7 +201,7 @@ func proposeSceneBoundaries(
 		}
 		resp, err := prov.Generate(ctx, req)
 		if run != nil {
-			_ = run.saveRawResponse(taskID, resp.Content)
+			_ = run.saveRawResponse(taskID, resp)
 		}
 		if err != nil {
 			t := TaskRecord{

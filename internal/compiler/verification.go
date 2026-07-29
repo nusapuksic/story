@@ -143,7 +143,7 @@ func verifySceneCard(
 	}
 	resp, err := prov.Generate(ctx, req)
 	if run != nil {
-		_ = run.saveRawResponse(taskID, resp.Content)
+		_ = run.saveRawResponse(taskID, resp)
 	}
 	if err != nil {
 		recordVerificationTask(run, taskID, card.SceneID, TaskStatusFailed, loadedPrompt.Version, err.Error())

@@ -807,6 +807,126 @@ func TestCompileEntitiesWithFakeProvider(t *testing.T) {
 	}
 }
 
+func TestCompileEntitiesSalvagesTruncatedJSON(t *testing.T) {
+	p, st := buildTestProject(t)
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	if len(paragraphs) == 0 {
+		t.Fatal("expected chapter paragraphs")
+	}
+
+	truncated := `{"entities":[` +
+		`{"canonical_name":"Mara","type":"character","aliases":["she"],"mentions":[{"paragraph_id":"` + paragraphs[0].ID + `","surface_text":"Mara","confidence":0.95}]},` +
+		`{"canonical_name":"Petar","type":"character","mentions":[{"paragraph_id":"` + paragraphs[0].ID + `","surface_text":"Petar"}`
+	fake := &fakeProvider{response: truncated}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities with truncated JSON: %v", err)
+	}
+	if result.EntitiesBuilt != 1 {
+		t.Fatalf("EntitiesBuilt = %d, want 1 salvaged entity", result.EntitiesBuilt)
+	}
+
+	entities, mentions, err := st.EntityCounts()
+	if err != nil {
+		t.Fatalf("EntityCounts: %v", err)
+	}
+	if entities != 1 || mentions != 1 {
+		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, mentions)
+	}
+}
+
+func TestCompileEntitiesEmptyTruncatedJSONDoesNotFail(t *testing.T) {
+	p, st := buildTestProject(t)
+	fake := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara"`}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities with empty truncated JSON: %v", err)
+	}
+	if result.EntitiesBuilt != 0 {
+		t.Fatalf("EntitiesBuilt = %d, want 0", result.EntitiesBuilt)
+	}
+}
+
+func TestCompileWritesResponseAudit(t *testing.T) {
+	p, st := buildTestProject(t)
+	fake := &fakeProvider{
+		response:     "",
+		finishReason: "length",
+		promptTokens: 101,
+		outputTokens: 202,
+	}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities with empty response: %v", err)
+	}
+
+	runDir := p.Path(filepath.Join(project.RunsDir, result.RunID))
+	rawDir := filepath.Join(runDir, "raw-responses")
+	entries, err := os.ReadDir(rawDir)
+	if err != nil {
+		t.Fatalf("read raw responses: %v", err)
+	}
+	var metaPath string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".meta.json") {
+			metaPath = filepath.Join(rawDir, entry.Name())
+			break
+		}
+	}
+	if metaPath == "" {
+		t.Fatal("expected raw response metadata sidecar")
+	}
+
+	meta, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read response metadata: %v", err)
+	}
+	for _, want := range []string{
+		`"finish_reason": "length"`,
+		`"prompt_tokens": 101`,
+		`"output_tokens": 202`,
+		`"content_bytes": 0`,
+		`"content_empty": true`,
+	} {
+		if !strings.Contains(string(meta), want) {
+			t.Fatalf("metadata missing %s:\n%s", want, meta)
+		}
+	}
+
+	tasks, err := os.ReadFile(filepath.Join(runDir, "tasks.jsonl"))
+	if err != nil {
+		t.Fatalf("read tasks: %v", err)
+	}
+	for _, want := range []string{
+		`"finish_reason":"length"`,
+		`"prompt_tokens":101`,
+		`"output_tokens":202`,
+		`"content_bytes":0`,
+		`"content_empty":true`,
+	} {
+		if !strings.Contains(string(tasks), want) {
+			t.Fatalf("tasks missing %s:\n%s", want, tasks)
+		}
+	}
+}
 func TestCompileEntitiesIncludesExistingExtractionContext(t *testing.T) {
 	p, st := buildTestProject(t)
 	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerScenes})

@@ -295,6 +295,53 @@ func TestImportConflictWithoutReplace(t *testing.T) {
 	}
 }
 
+func TestReplaceClearsStaleDerivedModelFiles(t *testing.T) {
+	p := newTestProject(t)
+	if _, err := Run(p, "testdata/ordered", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	ids := paragraphIDs(t, p)
+	if len(ids) == 0 {
+		t.Fatal("no paragraphs imported")
+	}
+
+	modelFiles := []string{
+		"scenes.jsonl",
+		"entities.jsonl",
+		"mentions.jsonl",
+		"claims.jsonl",
+		"events.jsonl",
+		"character-states.jsonl",
+		"unresolved.jsonl",
+		"summaries.jsonl",
+	}
+	for _, name := range modelFiles {
+		content := "stale\n"
+		if name == "scenes.jsonl" {
+			content = `{"record_type":"scene","id":"sc-stale","chapter_id":"ch-0001","paragraph_start":"` +
+				ids[0] + `","paragraph_end":"` + ids[0] +
+				`","ordinal":1,"boundary_source":"explicit","status":"generated"}` + "\n" +
+				`{"record_type":"chapter_snapshot","chapter_id":"ch-0001","scene_count":1,"committed_at":"2026-07-29T00:00:00Z"}` + "\n"
+		}
+		if err := os.WriteFile(p.Path(filepath.Join(project.ModelDir, name)), []byte(content), 0o644); err != nil {
+			t.Fatalf("write stale %s: %v", name, err)
+		}
+	}
+
+	if _, err := Run(p, "testdata/ordered", Options{Replace: true}); err != nil {
+		t.Fatalf("replace import with stale model files: %v", err)
+	}
+	for _, name := range modelFiles {
+		data, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, name)))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if len(data) != 0 {
+			t.Errorf("%s was not cleared: %q", name, data)
+		}
+	}
+}
+
 func TestImportDryRunDoesNotMutate(t *testing.T) {
 	p := newTestProject(t)
 	res, err := Run(p, "testdata/ordered", Options{DryRun: true})

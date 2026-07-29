@@ -206,7 +206,7 @@ func extractChapterSummaryWindow(
 
 	resp, err := prov.Generate(ctx, req)
 	if run != nil {
-		_ = run.saveRawResponse(taskID, resp.Content)
+		_ = run.saveRawResponse(taskID, resp)
 	}
 	if err != nil {
 		recordSummaryTask(run, taskID, taskType, ch.ID, TaskStatusFailed, err.Error())
@@ -255,7 +255,7 @@ func synthesizeChapterSummary(
 
 	resp, err := prov.Generate(ctx, req)
 	if run != nil {
-		_ = run.saveRawResponse(taskID, resp.Content)
+		_ = run.saveRawResponse(taskID, resp)
 	}
 	if err != nil {
 		recordSummaryTask(run, taskID, "chapter-summary", ch.ID, TaskStatusFailed, err.Error())
@@ -349,7 +349,7 @@ func extractBookSummary(
 
 	resp, err := prov.Generate(ctx, req)
 	if run != nil {
-		_ = run.saveRawResponse(taskID, resp.Content)
+		_ = run.saveRawResponse(taskID, resp)
 	}
 	if err != nil {
 		recordSummaryTask(run, taskID, "book-summary", "", TaskStatusFailed, err.Error())

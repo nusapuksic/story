@@ -150,6 +150,9 @@ func Run(p *project.Project, sourcePath string, opts Options) (*Result, error) {
 		if err := os.RemoveAll(chaptersDir); err != nil {
 			return nil, fmt.Errorf("replace manuscript: %w", err)
 		}
+		if err := p.ResetModelFiles(); err != nil {
+			return nil, fmt.Errorf("replace manuscript: %w", err)
+		}
 	}
 	if err := os.MkdirAll(chaptersDir, 0o755); err != nil {
 		return nil, fmt.Errorf("write manuscript: %w", err)

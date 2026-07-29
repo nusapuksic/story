@@ -174,6 +174,21 @@ func (p *Project) Path(rel string) string {
 	return filepath.Join(p.Dir, rel)
 }
 
+// ResetModelFiles clears paragraph-derived model records while preserving the
+// canonical model file layout.
+func (p *Project) ResetModelFiles() error {
+	if err := os.MkdirAll(p.Path(ModelDir), 0o755); err != nil {
+		return fmt.Errorf("reset model files: %w", err)
+	}
+	for _, f := range modelFiles {
+		path := p.Path(filepath.Join(ModelDir, f))
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			return fmt.Errorf("reset model file %s: %w", f, err)
+		}
+	}
+	return nil
+}
+
 func applyInitLLMDefaults(cfg *config.Config, opts InitOptions) error {
 	env, _, _, err := envconfig.Load()
 	if err != nil {

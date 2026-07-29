@@ -1244,6 +1244,8 @@ Every compilation creates:
   run.json
   tasks.jsonl
   raw-responses/
+    <task-id>.json
+    <task-id>.meta.json
   errors.jsonl
   summary.json
 
