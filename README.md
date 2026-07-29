@@ -87,6 +87,16 @@ This flow assumes you just downloaded a release zip and have not installed `stor
 
    Use one Markdown file or a folder of chapter Markdown files. The examples below use `C:\Users\YourName\Documents\my-novel\draft.md` and `~/Documents/my-novel/draft.md`; replace that path with your own manuscript.
 
+   Spaces in file or folder names are fine. When any path contains spaces, wrap the whole path in quotes:
+
+   ```powershell
+   "C:\Users\YourName\Documents\Obsidian Vault\My Novel Draft.md"
+   ```
+
+   ```bash
+   "$HOME/Documents/Obsidian Vault/My Novel Draft.md"
+   ```
+
 After `env.toml` is configured, create a project and import the manuscript. Import itself does not upload your manuscript. It creates a local project copy and normalizes it into chapters and paragraphs. The `compile` command then builds scenes, scene cards, entities, verification records, and summaries that manage context for the LLM. With the default local setup, `compile` and `ask` talk to a model server on your machine; if you configure a remote provider, excerpted evidence is sent to that endpoint.
 
 Each command below is shown for Windows PowerShell first, then macOS/Linux.
@@ -94,6 +104,8 @@ Each command below is shown for Windows PowerShell first, then macOS/Linux.
 6. Initialize a Story project.
 
    Creates the project folder and writes its initial `story.toml`, using the LLM defaults from `env.toml`. Args/options: the first path is the new project folder; `--title` is the book title to store in project metadata.
+
+   In the following example, `my-folder` can exist, but needs to be empty, or it will be created for you within `story-projects`.
 
    ```powershell
    .\story.exe init "C:\Users\YourName\story-projects\my-novel" --title "My Novel"
@@ -103,9 +115,11 @@ Each command below is shown for Windows PowerShell first, then macOS/Linux.
    ./story init ~/story-projects/my-novel --title "My Novel"
    ```
 
+   The project folder is the memory, and the LLM is the brain. The folder contains the canonical manuscript, generated records, and a rebuildable SQLite index. You can move or copy the project folder to another machine, and `story` can rebuild the index and generated records from the canonical files.
+
 7. Import your manuscript.
 
-   Copies the Markdown source into the project and splits it into chapters and paragraphs. Args/options: `--project` is the project folder from step 6; the final path is your manuscript `.md` file or chapter folder.
+   Copies the Markdown source into the project and splits it into chapters and paragraphs. Args/options: `--project` is the project folder from step 6; the final path is your manuscript `.md` file or chapter folder. Quote either path if it contains spaces.
 
    ```powershell
    .\story.exe --project "C:\Users\YourName\story-projects\my-novel" import md "C:\Users\YourName\Documents\my-novel\draft.md"
@@ -191,11 +205,7 @@ Missing environment config files are ignored and the built-in fallback uses `htt
 
 1. Start a model server that exposes an OpenAI-compatible API.
 
-   Ollama's default loopback endpoint matches the built-in fallback config:
-
-   ```
-   ollama serve
-   ```
+   Ollama's default loopback endpoint matches the built-in fallback config.
 
    LM Studio or another OpenAI-compatible server can also work; use its `/v1` base URL, for example `http://127.0.0.1:1234/v1`.
 
@@ -240,7 +250,7 @@ Missing environment config files are ignored and the built-in fallback uses `htt
    request_timeout_seconds = 300
    ```
 
-   Use your LAN server URL for `base_url` when the model server is not on the same machine. New `story init` and `story import md` initializations copy these values into the generated project `story.toml`, setting the same model for extraction, verification, and discussion.
+   Use your LAN server URL for `base_url` when the model server is not on the same machine. New `story init` and `story import md` initializations copy these values into the generated project `story.toml`.
 
    If your endpoint requires an API key, store the environment variable name in `api_key_env`; do not put the key itself in `story.toml`.
 
@@ -332,10 +342,6 @@ Each compile run also writes `.story/runs/<run-id>/` with `run.json`, `summary.j
 `story ask` retrieves relevant evidence from the index, sends it to the configured discussion model, validates cited paragraph identifiers, and returns an answer with provenance. Available modes: `recall` (default), `continuity`, `interpretation`, `style`, `development`. When the index does not contain enough evidence to answer, the command exits with code 40.
 
 ## Development
-
-### Codex Agent Note
-
-In this Windows workspace, sandboxed shell spawns can fail before commands run with `helper_unknown_error: apply deny-read ACLs`. Codex agents should start repository shell commands through `C:\Program Files\PowerShell\7\pwsh.exe` with `sandbox_permissions=require_escalated` instead of trying a sandboxed first spawn.
 
 ```
 gofmt -l .
