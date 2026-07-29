@@ -18,15 +18,15 @@ import (
 
 // Options control a Markdown import.
 type Options struct {
-	TOC                 string // explicit manifest path (--toc), folder mode only
-	Pattern             string // source file glob (--pattern), folder mode only, default *.md
-	Title               string // project title override (--title)
-	Replace             bool   // replace an existing canonical manuscript (--replace)
-	DryRun              bool   // detect and report without modifying the manuscript (--dry-run)
-	ChapterHeadingLevel int    // Markdown heading level for continuous files, default 1
-	ChapterRegex        string // line regex for continuous-file chapter boundaries
-	IgnoreBeforeFirst   bool   // ignore non-empty text before the first continuous-file chapter boundary
-	SingleChapter       bool   // import a continuous file as one chapter
+	TOC                     string // explicit manifest path (--toc), folder mode only
+	Pattern                 string // source file glob (--pattern), folder mode only, default *.md
+	Title                   string // project title override (--title)
+	Replace                 bool   // replace an existing canonical manuscript (--replace)
+	DryRun                  bool   // detect and report without modifying the manuscript (--dry-run)
+	ChapterHeadingLevel     int    // Markdown heading level for continuous files, default 1
+	ChapterRegex            string // line regex for continuous-file chapter boundaries
+	RequireEmptyBeforeFirst bool   // reject non-empty text before the first continuous-file chapter boundary
+	SingleChapter           bool   // import a continuous file as one chapter
 }
 
 // Result summarizes a completed (or dry-run) import.
@@ -314,7 +314,7 @@ func prepareFileImport(
 		if werr != nil {
 			return nil, errors.Join(err, werr)
 		}
-		return nil, fmt.Errorf("%w\nNo manuscript files were imported.\nAn import report was written to:\n%s\nReview the report and run one of:\nstory import md %s --single-chapter\nstory import md %s --chapter-heading-level 2\nstory import md %s --chapter-regex <regex>\nstory import md %s --chapter-regex <regex> --ignore-before-first-chapter",
+		return nil, fmt.Errorf("%w\nNo manuscript files were imported.\nAn import report was written to:\n%s\nReview the report and run one of:\nstory import md %s --single-chapter\nstory import md %s --chapter-heading-level 2\nstory import md %s --chapter-regex <regex>\nstory import md %s --ignore-before-first-chapter=true",
 			err, reportDir, path, path, path, path)
 	}
 	if err != nil {

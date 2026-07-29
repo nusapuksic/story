@@ -308,7 +308,7 @@ These examples use `./story` for a binary in the current folder. In Windows Powe
 
 Markdown import accepts either a folder of chapter files or one continuous `.md` manuscript. If `--project` points at a directory without `story.toml`, `story import md` initializes the default project layout and generated config before importing, using the same LLM environment defaults as `story init`. Folder import is deterministic: it uses an explicit `toc.toml`/`book.toml` manifest when present (or `--toc <path>`), and otherwise requires unique numeric filename prefixes (`01-road.md`, `2-house.md`). Continuous-file import splits on deterministic chapter headings, or imports the whole file as one chapter with `--single-chapter`. When ordering or chapter boundaries are ambiguous, the import fails without touching the canonical manuscript and writes an actionable report under `source/import-records/<run-id>/` for review.
 
-For a continuous manuscript with a title page, dedication, notes, or other front matter before the first real chapter, combine a precise chapter selector such as `--chapter-heading-level 2` or `--chapter-regex <regex>` with `--ignore-before-first-chapter`.
+For a continuous manuscript with a title page, dedication, notes, or other front matter before the first real chapter, front matter is ignored by default once the first chapter boundary is detected. Use a precise chapter selector such as `--chapter-heading-level 2` or `--chapter-regex <regex>` when needed; pass `--ignore-before-first-chapter=false` only if you want import to reject non-empty text before chapter one.
 
 The SQLite index at `.story/index.sqlite` is a rebuildable projection of the canonical project files; deleting it never loses data (`story index rebuild` reconstructs it).
 

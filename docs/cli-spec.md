@@ -395,7 +395,7 @@ Single-file options:
 
 --chapter-heading-level <1-6>
 --chapter-regex <regex>
---ignore-before-first-chapter
+--ignore-before-first-chapter, default true
 --single-chapter
 
 Markdown import procedure
@@ -550,13 +550,13 @@ the source filename.
 
 Ignoring front matter
 
-story import md manuscript.md --chapter-regex '^# Chapter .+' --ignore-before-first-chapter
+story import md manuscript.md --chapter-regex '^# Chapter .+'
 
-By default, single-file import rejects non-empty body text before the first
-detected chapter boundary. With --ignore-before-first-chapter, that prefix is
-treated as front matter and excluded from the canonical manuscript. This option
-is intended to be paired with a deterministic chapter selector such as
---chapter-heading-level or --chapter-regex.
+By default, non-empty body text before the first detected chapter boundary is
+treated as front matter and excluded from the canonical manuscript. Pass
+--ignore-before-first-chapter=false to reject that prefix instead. The default
+front-matter behavior is intended to be paired with a deterministic chapter
+selector such as --chapter-heading-level or --chapter-regex.
 
 Ambiguity policy
 
@@ -564,7 +564,7 @@ Single-file import must fail when:
 
 * no chapter boundaries are found and --single-chapter was not supplied;
 * non-empty manuscript body text appears before the first detected chapter and
-  --ignore-before-first-chapter was not supplied;
+  --ignore-before-first-chapter=false was supplied;
 * duplicate or empty chapter headings make the split unclear;
 * a chapter boundary regex matches overlapping or zero-length sections;
 * the detected chapter order cannot be represented deterministically.

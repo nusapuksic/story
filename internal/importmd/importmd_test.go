@@ -258,23 +258,24 @@ func TestImportSingleFileRegexSplit(t *testing.T) {
 	}
 }
 
-func TestImportSingleFileIgnoreBeforeFirstChapter(t *testing.T) {
-	p := newTestProject(t)
+func TestImportSingleFileIgnoresBeforeFirstChapterByDefault(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "manuscript.md")
 	content := "# Book Title\n\nDedication text that should not be imported.\n\n# Chapter One\n\nMara walked the road.\n\n# Chapter Two\n\nThe house waited."
 	if err := os.WriteFile(src, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	opts := Options{ChapterRegex: `^# (Chapter .+)$`}
-	if _, err := Run(p, src, opts); !errors.Is(err, ErrAmbiguousOrder) {
-		t.Fatalf("err = %v, want ErrAmbiguousOrder without IgnoreBeforeFirst", err)
+	strictProject := newTestProject(t)
+	_, err := Run(strictProject, src, Options{
+		ChapterRegex:            `^# (Chapter .+)$`,
+		RequireEmptyBeforeFirst: true,
+	})
+	if !errors.Is(err, ErrAmbiguousOrder) {
+		t.Fatalf("err = %v, want ErrAmbiguousOrder with RequireEmptyBeforeFirst", err)
 	}
 
-	res, err := Run(p, src, Options{
-		ChapterRegex:      `^# (Chapter .+)$`,
-		IgnoreBeforeFirst: true,
-	})
+	p := newTestProject(t)
+	res, err := Run(p, src, Options{ChapterRegex: `^# (Chapter .+)$`})
 	if err != nil {
 		t.Fatal(err)
 	}

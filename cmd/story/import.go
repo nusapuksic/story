@@ -27,11 +27,13 @@ func newImportMDCmd() *cobra.Command {
 	var opts importmd.Options
 	var defaultModel string
 	var llmBaseURL string
+	ignoreBeforeFirst := true
 	cmd := &cobra.Command{
 		Use:   "md <path>",
 		Short: "Import Markdown from a chapter folder or continuous file",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.RequireEmptyBeforeFirst = !ignoreBeforeFirst
 			p, initialized, err := project.OpenOrInit(flags.projectDir, project.InitOptions{
 				Title:        opts.Title,
 				DefaultModel: defaultModel,
@@ -76,7 +78,7 @@ func newImportMDCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "detect and report without modifying the manuscript")
 	cmd.Flags().IntVar(&opts.ChapterHeadingLevel, "chapter-heading-level", 1, "heading level for splitting a continuous Markdown file")
 	cmd.Flags().StringVar(&opts.ChapterRegex, "chapter-regex", "", "line regex for chapter boundaries in a continuous Markdown file")
-	cmd.Flags().BoolVar(&opts.IgnoreBeforeFirst, "ignore-before-first-chapter", false, "ignore non-empty text before the first detected chapter boundary")
+	cmd.Flags().BoolVar(&ignoreBeforeFirst, "ignore-before-first-chapter", true, "ignore non-empty text before the first detected chapter boundary")
 	cmd.Flags().BoolVar(&opts.SingleChapter, "single-chapter", false, "import a continuous Markdown file as one chapter")
 	return cmd
 }

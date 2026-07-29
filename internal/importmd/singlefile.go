@@ -44,7 +44,7 @@ func planContinuousFile(sourceName, content string, opts Options) ([]plannedChap
 	if len(boundaries) == 0 {
 		return nil, fmt.Errorf("%w: no chapter boundaries found in %s (use --single-chapter to import as one chapter)", ErrAmbiguousOrder, sourceName)
 	}
-	if !opts.IgnoreBeforeFirst && hasNonEmptyLine(lines[:boundaries[0].Line]) {
+	if opts.RequireEmptyBeforeFirst && hasNonEmptyLine(lines[:boundaries[0].Line]) {
 		return nil, fmt.Errorf("%w: non-empty manuscript text appears before the first chapter boundary in %s", ErrAmbiguousOrder, sourceName)
 	}
 	if err := validateBoundaryTitles(sourceName, boundaries); err != nil {
@@ -167,7 +167,7 @@ func writeFileAmbiguityRecord(p *project.Project, runID, sourcePath string, caus
 		"- import the file as one chapter with --single-chapter\n" +
 		"- choose a different heading level with --chapter-heading-level\n" +
 		"- provide an explicit boundary regex with --chapter-regex\n" +
-		"- ignore front matter before the first detected chapter with --ignore-before-first-chapter\n"
+		"- keep the default front-matter behavior with --ignore-before-first-chapter=true\n"
 	if err := os.WriteFile(filepath.Join(dir, "warnings.txt"), []byte(warnings), 0o644); err != nil {
 		return "", fmt.Errorf("write import record: %w", err)
 	}
