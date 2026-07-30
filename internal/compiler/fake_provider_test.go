@@ -14,6 +14,7 @@ type fakeProvider struct {
 	promptTokens int
 	outputTokens int
 	err          error
+	errors       []error
 	requests     []provider.GenerationRequest
 }
 
@@ -26,20 +27,32 @@ func (f *fakeProvider) Capabilities(_ context.Context, _ string) (provider.Capab
 }
 func (f *fakeProvider) Generate(_ context.Context, req provider.GenerationRequest) (provider.GenerationResponse, error) {
 	f.requests = append(f.requests, req)
+	idx := len(f.requests) - 1
+
 	content := f.response
 	if len(f.responses) > 0 {
-		idx := len(f.requests) - 1
-		if idx >= len(f.responses) {
-			idx = len(f.responses) - 1
+		responseIdx := idx
+		if responseIdx >= len(f.responses) {
+			responseIdx = len(f.responses) - 1
 		}
-		content = f.responses[idx]
+		content = f.responses[responseIdx]
 	}
+
+	err := f.err
+	if len(f.errors) > 0 {
+		errIdx := idx
+		if errIdx >= len(f.errors) {
+			errIdx = len(f.errors) - 1
+		}
+		err = f.errors[errIdx]
+	}
+
 	return provider.GenerationResponse{
 		Content:      content,
 		FinishReason: f.finishReason,
 		PromptTokens: f.promptTokens,
 		OutputTokens: f.outputTokens,
-	}, f.err
+	}, err
 }
 func (f *fakeProvider) Embed(_ context.Context, _ provider.EmbeddingRequest) (provider.EmbeddingResponse, error) {
 	return provider.EmbeddingResponse{}, f.err

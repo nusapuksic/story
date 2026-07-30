@@ -38,6 +38,7 @@ type CompileConfig struct {
 	MaximumOutputTokens     int     `toml:"maximum_output_tokens"`
 	WindowOverlapParagraphs int     `toml:"window_overlap_paragraphs"`
 	SceneDetection          string  `toml:"scene_detection"`
+	SceneCardFailurePolicy  string  `toml:"scene_card_failure_policy"`
 	Verification            bool    `toml:"verification"`
 	AutoAcceptVerified      bool    `toml:"auto_accept_verified"`
 	Temperature             float64 `toml:"temperature"`
@@ -89,6 +90,7 @@ func Default(projectID, title, language string) Config {
 			MaximumOutputTokens:     0,
 			WindowOverlapParagraphs: 3,
 			SceneDetection:          "hybrid",
+			SceneCardFailurePolicy:  "retry-fallback",
 			Verification:            true,
 			AutoAcceptVerified:      false,
 			Temperature:             0.1,

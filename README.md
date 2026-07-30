@@ -296,6 +296,7 @@ These examples use `./story` for a binary in the current folder. In Windows Powe
 ./story --project ./my-novel compile status
 ./story --project ./my-novel compile --layer scenes
 ./story --project ./my-novel compile --layer scene-cards
+./story --project ./my-novel compile --strict-extraction
 ./story --project ./my-novel compile --layer verification
 ./story --project ./my-novel compile --layer summaries
 ./story --project ./my-novel compile --layer entities
@@ -312,7 +313,7 @@ For a continuous manuscript with a title page, dedication, notes, or other front
 
 The SQLite index at `.story/index.sqlite` is a rebuildable projection of the canonical project files; deleting it never loses data (`story index rebuild` reconstructs it).
 
-`story compile` builds the story model from the canonical manuscript in layers: `scenes`, `scene-cards`, optional `verification`, `summaries`, and `entities`. Entity extraction uses existing summaries and scene cards as orientation when available, while paragraph excerpts remain the only evidence for mentions. `scenes` can run from explicit manuscript scene breaks without an LLM; model-assisted scene detection and the other compile layers require configured LLM roles (see `docs/cli-spec.md`).
+`story compile` builds the story model from the canonical manuscript in layers: `scenes`, `scene-cards`, optional `verification`, `summaries`, and `entities`. Entity extraction uses existing summaries and scene cards as orientation when available, while paragraph excerpts remain the only evidence for mentions. Scene-card extraction retries invalid model citations once, retries timed-out scene-card calls with a compact evidence packet, then writes a simple valid fallback card instead of stopping the whole compile; use `--strict-extraction` or `[compile].scene_card_failure_policy = "strict"` for developer/debug runs. Recovered scene cards are listed in compile output, `story compile status`, and `.story/runs/<run-id>/summary.json`; fallback cards are marked as regeneration recommended and can be regenerated with `story compile --layer scene-cards --chapter <chapter-id> --force`. `scenes` can run from explicit manuscript scene breaks without an LLM; model-assisted scene detection and the other compile layers require configured LLM roles (see `docs/cli-spec.md`).
 
 `story search` runs full-text search over indexed paragraphs and scene cards. The FTS index is populated during indexing; run `story index rebuild` to refresh it.
 

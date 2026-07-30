@@ -209,16 +209,18 @@ func (r *Run) save() error {
 }
 
 // SaveSummary writes a summary.json to the run directory.
-func (r *Run) saveSummary(scenes, cards, entities, verifications, summaries int) error {
+func (r *Run) saveSummary(scenes, cards, sceneCardRecoveries int, sceneCardRecoveryEvents []SceneCardRecoveryEvent, entities, verifications, summaries int) error {
 	data, err := json.MarshalIndent(map[string]any{
-		"run_id":              r.Record.RunID,
-		"scenes_built":        scenes,
-		"cards_built":         cards,
-		"entities_built":      entities,
-		"verifications_built": verifications,
-		"summaries_built":     summaries,
-		"finished_at":         r.Record.FinishedAt,
-		"status":              r.Record.Status,
+		"run_id":                     r.Record.RunID,
+		"scenes_built":               scenes,
+		"cards_built":                cards,
+		"scene_card_recoveries":      sceneCardRecoveries,
+		"scene_card_recovery_events": sceneCardRecoveryEvents,
+		"entities_built":             entities,
+		"verifications_built":        verifications,
+		"summaries_built":            summaries,
+		"finished_at":                r.Record.FinishedAt,
+		"status":                     r.Record.Status,
 	}, "", "  ")
 	if err != nil {
 		return err

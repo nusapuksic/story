@@ -1,6 +1,9 @@
 package compiler_test
 
 import (
+	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/nusapuksic/story/internal/compiler"
@@ -78,6 +81,7 @@ func TestParseSceneCardResponseEvidenceObjectsWithIDs(t *testing.T) {
 		t.Errorf("Evidence = %v, want [p-001 p-002 p-003]", got)
 	}
 }
+
 func TestParseSceneCardResponseObjectEvidenceField(t *testing.T) {
 	raw := `{
 		"title": "Mara hides the letter",
@@ -94,6 +98,7 @@ func TestParseSceneCardResponseObjectEvidenceField(t *testing.T) {
 		t.Errorf("Evidence = %v, want [p-001 p-002]", got)
 	}
 }
+
 func TestParseSceneCardResponseUnknownParagraphID(t *testing.T) {
 	raw := `{
 		"title": "Test",
@@ -258,7 +263,7 @@ func TestExtractSceneCardTruncatedJSONUsesSceneText(t *testing.T) {
 	}
 }
 
-func TestExtractSceneCardInvalidEvidence(t *testing.T) {
+func TestExtractSceneCardInvalidEvidenceRetriesSuccessfully(t *testing.T) {
 	paragraphs := []store.ParagraphRow{
 		{ID: "p-A", ChapterID: "ch-0001", Ordinal: 1, Text: "She found the letter."},
 	}
@@ -268,11 +273,213 @@ func TestExtractSceneCardInvalidEvidence(t *testing.T) {
 		ParagraphStart: "p-A",
 		ParagraphEnd:   "p-A",
 	}
-	// LLM returns a paragraph ID that does not exist in the scene.
-	responseJSON := `{"title":"T","summary":"S.","evidence":["p-NONEXISTENT"]}`
-	fake := &fakeProvider{response: responseJSON}
+	fake := &fakeProvider{responses: []string{
+		`{"title":"T","summary":"S.","evidence":["p-NONEXISTENT"]}`,
+		`{"title":"Corrected","summary":"She finds the letter.","evidence":["p-A"]}`,
+	}}
+
+	card, err := compiler.ExtractSceneCardForTest(fake, scene, paragraphs, "test-model")
+	if err != nil {
+		t.Fatalf("expected retry to recover invalid evidence, got %v", err)
+	}
+	if card.Title != "Corrected" {
+		t.Fatalf("Title = %q, want Corrected", card.Title)
+	}
+	if len(card.Evidence) != 1 || card.Evidence[0] != "p-A" {
+		t.Fatalf("Evidence = %v, want [p-A]", card.Evidence)
+	}
+	if card.Recovery == nil || card.Recovery.Action != "retry" || card.Recovery.Attempts != 2 {
+		t.Fatalf("Recovery = %#v, want retry after 2 attempts", card.Recovery)
+	}
+	if len(fake.requests) != 2 {
+		t.Fatalf("Generate calls = %d, want 2", len(fake.requests))
+	}
+	retryPrompt := fake.requests[1].Messages[1].Content
+	if !strings.Contains(retryPrompt, "outside the allowed list") || !strings.Contains(retryPrompt, "p-A") {
+		t.Fatalf("retry prompt missing validation feedback or valid paragraph ID:\n%s", retryPrompt)
+	}
+	if strings.Contains(retryPrompt, "p-NONEXISTENT") {
+		t.Fatalf("retry prompt should not repeat invalid paragraph IDs:\n%s", retryPrompt)
+	}
+}
+
+func TestExtractSceneCardPromptRedactsParagraphIDsFromParagraphText(t *testing.T) {
+	const validID = "p-01AAAAAAAAAAAAAAAAAAAAAAAA"
+	const embeddedID = "p-01BBBBBBBBBBBBBBBBBBBBBBBB"
+	paragraphs := []store.ParagraphRow{
+		{ID: validID, ChapterID: "ch-0001", Ordinal: 1, Text: "A margin note mentions " + embeddedID + " as an old reference."},
+	}
+	scene := store.SceneRow{
+		ID:             "sc-001",
+		ChapterID:      "ch-0001",
+		ParagraphStart: validID,
+		ParagraphEnd:   validID,
+	}
+	fake := &fakeProvider{response: `{"title":"T","summary":"S.","evidence":["` + validID + `"]}`}
+
 	_, err := compiler.ExtractSceneCardForTest(fake, scene, paragraphs, "test-model")
+	if err != nil {
+		t.Fatalf("extract scene card: %v", err)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("Generate calls = %d, want 1", len(fake.requests))
+	}
+	prompt := fake.requests[0].Messages[1].Content
+	if strings.Contains(prompt, embeddedID) {
+		t.Fatalf("prompt should redact paragraph-ID-looking text that is not collected context:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Allowed evidence paragraph IDs:\n- "+validID+"\n") {
+		t.Fatalf("prompt missing allowed ID manifest:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "--- "+validID+" ---") {
+		t.Fatalf("prompt missing paragraph header for valid ID:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "[paragraph-id-redacted]") {
+		t.Fatalf("prompt missing paragraph ID redaction marker:\n%s", prompt)
+	}
+}
+
+func TestExtractSceneCardInvalidEvidenceFallsBack(t *testing.T) {
+	paragraphs := []store.ParagraphRow{
+		{ID: "p-A", ChapterID: "ch-0001", Ordinal: 1, Text: "She found the letter."},
+	}
+	scene := store.SceneRow{
+		ID:             "sc-001",
+		ChapterID:      "ch-0001",
+		ParagraphStart: "p-A",
+		ParagraphEnd:   "p-A",
+	}
+	fake := &fakeProvider{response: `{"title":"T","summary":"S.","evidence":["p-NONEXISTENT"]}`}
+
+	card, err := compiler.ExtractSceneCardForTest(fake, scene, paragraphs, "test-model")
+	if err != nil {
+		t.Fatalf("expected fallback after invalid retry, got %v", err)
+	}
+	if card.Summary != "She found the letter." {
+		t.Fatalf("Summary = %q, want scene-text fallback", card.Summary)
+	}
+	if len(card.Evidence) != 1 || card.Evidence[0] != "p-A" {
+		t.Fatalf("Evidence = %v, want [p-A]", card.Evidence)
+	}
+	if card.Recovery == nil || card.Recovery.Action != "fallback" || card.Recovery.Attempts != 2 {
+		t.Fatalf("Recovery = %#v, want fallback after 2 attempts", card.Recovery)
+	}
+	if !strings.Contains(card.Recovery.Reason, "p-NONEXISTENT") {
+		t.Fatalf("Recovery reason missing invalid paragraph ID: %q", card.Recovery.Reason)
+	}
+	if len(fake.requests) != 2 {
+		t.Fatalf("Generate calls = %d, want 2", len(fake.requests))
+	}
+}
+
+func TestExtractSceneCardTimeoutRetriesWithCompactPrompt(t *testing.T) {
+	paragraphs := timeoutRetryParagraphs()
+	scene := store.SceneRow{
+		ID:             "sc-001",
+		ChapterID:      "ch-0001",
+		ParagraphStart: paragraphs[0].ID,
+		ParagraphEnd:   paragraphs[len(paragraphs)-1].ID,
+	}
+	fake := &fakeProvider{
+		responses: []string{
+			"",
+			`{"title":"Compact","summary":"Opening survives compact retry.","evidence":["p-00"]}`,
+		},
+		errors: []error{context.DeadlineExceeded, nil},
+	}
+
+	card, err := compiler.ExtractSceneCardForTest(fake, scene, paragraphs, "test-model")
+	if err != nil {
+		t.Fatalf("expected compact retry to recover timeout, got %v", err)
+	}
+	if card.Title != "Compact" {
+		t.Fatalf("Title = %q, want Compact", card.Title)
+	}
+	if len(card.Evidence) != 1 || card.Evidence[0] != "p-00" {
+		t.Fatalf("Evidence = %v, want [p-00]", card.Evidence)
+	}
+	if card.Recovery == nil || card.Recovery.Action != "compact-retry" || card.Recovery.Attempts != 2 {
+		t.Fatalf("Recovery = %#v, want compact-retry after 2 attempts", card.Recovery)
+	}
+	if len(fake.requests) != 2 {
+		t.Fatalf("Generate calls = %d, want 2", len(fake.requests))
+	}
+	compactPrompt := fake.requests[1].Messages[1].Content
+	if !strings.Contains(compactPrompt, "compact evidence packet") {
+		t.Fatalf("compact retry prompt missing timeout recovery framing:\n%s", compactPrompt)
+	}
+	if strings.Contains(compactPrompt, "OMITTED_MIDDLE") {
+		t.Fatalf("compact retry prompt should omit middle-only paragraph text:\n%s", compactPrompt)
+	}
+	if strings.Contains(compactPrompt, "context deadline exceeded") {
+		t.Fatalf("compact retry prompt should not include the raw timeout error:\n%s", compactPrompt)
+	}
+}
+
+func TestExtractSceneCardTimeoutFallsBackAfterCompactRetryTimeout(t *testing.T) {
+	paragraphs := timeoutRetryParagraphs()
+	scene := store.SceneRow{
+		ID:             "sc-001",
+		ChapterID:      "ch-0001",
+		ParagraphStart: paragraphs[0].ID,
+		ParagraphEnd:   paragraphs[len(paragraphs)-1].ID,
+	}
+	fake := &fakeProvider{errors: []error{context.DeadlineExceeded, context.DeadlineExceeded}}
+
+	card, err := compiler.ExtractSceneCardForTest(fake, scene, paragraphs, "test-model")
+	if err != nil {
+		t.Fatalf("expected fallback after repeated timeouts, got %v", err)
+	}
+	if card.Summary != "Opening paragraph for timeout retry." {
+		t.Fatalf("Summary = %q, want scene-text fallback", card.Summary)
+	}
+	if len(card.Evidence) != 1 || card.Evidence[0] != "p-00" {
+		t.Fatalf("Evidence = %v, want [p-00]", card.Evidence)
+	}
+	if card.Recovery == nil || card.Recovery.Action != "fallback" || card.Recovery.Attempts != 2 {
+		t.Fatalf("Recovery = %#v, want fallback after 2 attempts", card.Recovery)
+	}
+	if !strings.Contains(card.Recovery.Reason, "context deadline exceeded") {
+		t.Fatalf("Recovery reason missing timeout: %q", card.Recovery.Reason)
+	}
+	if len(fake.requests) != 2 {
+		t.Fatalf("Generate calls = %d, want 2", len(fake.requests))
+	}
+}
+
+func timeoutRetryParagraphs() []store.ParagraphRow {
+	paragraphs := make([]store.ParagraphRow, 15)
+	for i := range paragraphs {
+		paragraphs[i] = store.ParagraphRow{
+			ID:        fmt.Sprintf("p-%02d", i),
+			ChapterID: "ch-0001",
+			Ordinal:   i + 1,
+			Text:      fmt.Sprintf("Paragraph %02d text.", i),
+		}
+	}
+	paragraphs[0].Text = "Opening paragraph for timeout retry. It establishes the scene."
+	paragraphs[9].Text = "OMITTED_MIDDLE This text should not appear in the compact retry prompt."
+	paragraphs[14].Text = "Closing paragraph for timeout retry."
+	return paragraphs
+}
+
+func TestExtractSceneCardStrictInvalidEvidenceFails(t *testing.T) {
+	paragraphs := []store.ParagraphRow{
+		{ID: "p-A", ChapterID: "ch-0001", Ordinal: 1, Text: "She found the letter."},
+	}
+	scene := store.SceneRow{
+		ID:             "sc-001",
+		ChapterID:      "ch-0001",
+		ParagraphStart: "p-A",
+		ParagraphEnd:   "p-A",
+	}
+	fake := &fakeProvider{response: `{"title":"T","summary":"S.","evidence":["p-NONEXISTENT"]}`}
+
+	_, err := compiler.ExtractSceneCardStrictForTest(fake, scene, paragraphs, "test-model")
 	if err == nil {
-		t.Fatal("expected error for unknown evidence paragraph ID")
+		t.Fatal("expected strict extraction to fail for unknown evidence paragraph ID")
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("Generate calls = %d, want 1 in strict mode", len(fake.requests))
 	}
 }

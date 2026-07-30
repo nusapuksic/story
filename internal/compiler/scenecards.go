@@ -3,7 +3,10 @@ package compiler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"os"
 	"sort"
 	"strings"
 
@@ -12,6 +15,16 @@ import (
 	storyprompts "github.com/nusapuksic/story/internal/prompts"
 	"github.com/nusapuksic/story/internal/provider"
 	"github.com/nusapuksic/story/internal/store"
+)
+
+// Scene-card failure policies.
+const (
+	// SceneCardFailurePolicyRetryFallback retries invalid scene-card model output once,
+	// then writes a deterministic valid fallback card if the retry still fails.
+	SceneCardFailurePolicyRetryFallback = "retry-fallback"
+	// SceneCardFailurePolicyStrict preserves developer/debug behavior by failing
+	// the compile on invalid scene-card model output.
+	SceneCardFailurePolicyStrict = "strict"
 )
 
 // SceneCardRecord represents one scene card in model/scenes.jsonl.
@@ -27,7 +40,16 @@ type SceneCardRecord struct {
 	Evidence     []string               `json:"evidence"`
 	Generation   SceneCardGeneration    `json:"generation"`
 	Verification *SceneCardVerification `json:"verification,omitempty"`
+	Recovery     *SceneCardRecovery     `json:"recovery,omitempty"`
 	Status       string                 `json:"status"` // "generated"
+}
+
+// SceneCardRecovery describes a successful recovery from invalid scene-card model output.
+type SceneCardRecovery struct {
+	Policy   string `json:"policy"`
+	Action   string `json:"action"`
+	Attempts int    `json:"attempts"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // SceneCardGeneration is the provenance section of a scene card.
@@ -185,6 +207,7 @@ func dedupeStrings(values []string) []string {
 	}
 	return out
 }
+
 func jsonText(value any) string {
 	switch v := value.(type) {
 	case nil:
@@ -245,8 +268,9 @@ func objectText(value map[string]any) string {
 }
 
 // extractSceneCard calls the LLM extraction prompt for one scene, validates
-// the response, and returns a SceneCardRecord.  If the LLM returns invalid
-// data the function returns an error and a nil record.
+// the response, and returns a SceneCardRecord. Invalid model output is retried
+// once by default, then replaced with a deterministic valid fallback card.
+// Timeout failures get a compact-context retry before falling back.
 func extractSceneCard(
 	ctx context.Context,
 	p *project.Project,
@@ -256,19 +280,123 @@ func extractSceneCard(
 	model string,
 	cfg sceneDetectConfig,
 	run *Run,
+	policy string,
 ) (*SceneCardRecord, error) {
 	if prov == nil {
 		return nil, fmt.Errorf("no LLM provider: cannot extract scene card for %s", scene.ID)
 	}
+	policy, err := normalizeSceneCardFailurePolicy(policy)
+	if err != nil {
+		return nil, err
+	}
 
-	// Build the evidence set – all paragraph IDs in the scene.
+	pidSet := sceneCardParagraphIDSet(paragraphs)
+	loadedPrompt := loadCompilerPrompt(p, storyprompts.SceneExtraction)
+	card, parseErr, genErr := generateSceneCardAttempt(ctx, scene.ID, buildSceneCardPrompt(scene, paragraphs),
+		prov, model, cfg, loadedPrompt, pidSet, paragraphs, run, "scene-extraction")
+	if genErr != nil {
+		if policy == SceneCardFailurePolicyStrict || !isTimeoutError(genErr) {
+			return nil, genErr
+		}
+		return retrySceneCardAfterTimeout(ctx, scene, paragraphs, prov, model, cfg, loadedPrompt, run, policy, genErr)
+	}
+	if parseErr == nil {
+		return card, nil
+	}
+	if policy == SceneCardFailurePolicyStrict {
+		return nil, parseErr
+	}
+
+	retryPrompt := buildSceneCardRetryPrompt(scene, paragraphs, parseErr)
+	retried, retryParseErr, retryGenErr := generateSceneCardAttempt(ctx, scene.ID, retryPrompt,
+		prov, model, cfg, loadedPrompt, pidSet, paragraphs, run, "scene-extraction-retry")
+	if retryGenErr == nil && retryParseErr == nil {
+		retried.Recovery = &SceneCardRecovery{
+			Policy:   policy,
+			Action:   "retry",
+			Attempts: 2,
+			Reason:   parseErr.Error(),
+		}
+		return retried, nil
+	}
+	if retryGenErr != nil && !isTimeoutError(retryGenErr) {
+		return nil, retryGenErr
+	}
+
+	reason := sceneCardRecoveryReason(parseErr, retryParseErr, retryGenErr)
+	fallback := fallbackSceneCardFromSceneText(scene.ID, paragraphs, runID(run), model, loadedPrompt.Version)
+	fallback.Recovery = &SceneCardRecovery{
+		Policy:   policy,
+		Action:   "fallback",
+		Attempts: 2,
+		Reason:   reason,
+	}
+	recordSceneCardFallbackTask(run, scene.ID, loadedPrompt.Version, reason)
+	return fallback, nil
+}
+
+func retrySceneCardAfterTimeout(
+	ctx context.Context,
+	scene store.SceneRow,
+	paragraphs []store.ParagraphRow,
+	prov provider.Provider,
+	model string,
+	cfg sceneDetectConfig,
+	loadedPrompt storyprompts.Loaded,
+	run *Run,
+	policy string,
+	initialErr error,
+) (*SceneCardRecord, error) {
+	compactParagraphs := compactSceneCardParagraphs(paragraphs)
+	retried, retryParseErr, retryGenErr := generateSceneCardAttempt(ctx, scene.ID,
+		buildSceneCardTimeoutRetryPrompt(scene, compactParagraphs, initialErr),
+		prov, model, cfg, loadedPrompt, sceneCardParagraphIDSet(compactParagraphs), compactParagraphs, run, "scene-extraction-timeout-retry")
+	if retryGenErr == nil && retryParseErr == nil {
+		retried.Recovery = &SceneCardRecovery{
+			Policy:   policy,
+			Action:   "compact-retry",
+			Attempts: 2,
+			Reason:   "initial call: " + initialErr.Error(),
+		}
+		return retried, nil
+	}
+	if retryGenErr != nil && !isTimeoutError(retryGenErr) {
+		return nil, retryGenErr
+	}
+
+	reason := sceneCardCallRecoveryReason(initialErr, retryParseErr, retryGenErr)
+	fallback := fallbackSceneCardFromSceneText(scene.ID, paragraphs, runID(run), model, loadedPrompt.Version)
+	fallback.Recovery = &SceneCardRecovery{
+		Policy:   policy,
+		Action:   "fallback",
+		Attempts: 2,
+		Reason:   reason,
+	}
+	recordSceneCardFallbackTask(run, scene.ID, loadedPrompt.Version, reason)
+	return fallback, nil
+}
+
+func sceneCardParagraphIDSet(paragraphs []store.ParagraphRow) map[string]bool {
 	pidSet := make(map[string]bool, len(paragraphs))
 	for _, p := range paragraphs {
 		pidSet[p.ID] = true
 	}
+	return pidSet
+}
 
-	loadedPrompt := loadCompilerPrompt(p, storyprompts.SceneExtraction)
-	prompt := buildSceneCardPrompt(scene, paragraphs)
+func generateSceneCardAttempt(
+	ctx context.Context,
+	sceneID string,
+	prompt string,
+	prov provider.Provider,
+	model string,
+	cfg sceneDetectConfig,
+	loadedPrompt storyprompts.Loaded,
+	pidSet map[string]bool,
+	paragraphs []store.ParagraphRow,
+	run *Run,
+	taskType string,
+) (*SceneCardRecord, error, error) {
 	taskID := ids.NewTaskID()
 	req := provider.GenerationRequest{
 		Model: model,
@@ -286,40 +414,99 @@ func extractSceneCard(
 		_ = run.saveRawResponse(taskID, resp)
 	}
 	if err != nil {
-		t := TaskRecord{
-			TaskID:        taskID,
-			RunID:         runID(run),
-			TaskType:      "scene-extraction",
-			SceneID:       scene.ID,
-			Status:        TaskStatusFailed,
-			Error:         err.Error(),
-			PromptVersion: loadedPrompt.Version,
-		}
-		if run != nil {
-			_ = run.recordTask(t)
-		}
-		return nil, fmt.Errorf("scene card LLM call for scene %s: %w", scene.ID, err)
+		recordSceneCardTask(run, taskID, sceneID, taskType, TaskStatusFailed, loadedPrompt.Version, err.Error())
+		return nil, nil, fmt.Errorf("scene card LLM call for scene %s: %w", sceneID, err)
 	}
 
-	card, parseErr := parseSceneCardResponse(resp.Content, scene.ID, pidSet, paragraphs, runID(run), model, loadedPrompt.Version)
+	card, parseErr := parseSceneCardResponse(resp.Content, sceneID, pidSet, paragraphs, runID(run), model, loadedPrompt.Version)
 	status := TaskStatusCompleted
 	errMsg := ""
 	if parseErr != nil {
 		status = TaskStatusFailed
 		errMsg = parseErr.Error()
 	}
-	if run != nil {
-		_ = run.recordTask(TaskRecord{
-			TaskID:        taskID,
-			RunID:         runID(run),
-			TaskType:      "scene-extraction",
-			SceneID:       scene.ID,
-			Status:        status,
-			PromptVersion: loadedPrompt.Version,
-			Error:         errMsg,
-		})
+	recordSceneCardTask(run, taskID, sceneID, taskType, status, loadedPrompt.Version, errMsg)
+	return card, parseErr, nil
+}
+
+func recordSceneCardTask(run *Run, taskID, sceneID, taskType, status, promptVersion, errMsg string) {
+	if run == nil {
+		return
 	}
-	return card, parseErr
+	_ = run.recordTask(TaskRecord{
+		TaskID:        taskID,
+		RunID:         runID(run),
+		TaskType:      taskType,
+		SceneID:       sceneID,
+		Status:        status,
+		PromptVersion: promptVersion,
+		Error:         errMsg,
+	})
+}
+
+func recordSceneCardFallbackTask(run *Run, sceneID, promptVersion, reason string) {
+	recordSceneCardTask(run, ids.NewTaskID(), sceneID, "scene-extraction-fallback", TaskStatusCompleted, promptVersion, reason)
+}
+
+func sceneCardRecoveryReason(firstErr, retryParseErr, retryGenErr error) string {
+	parts := []string{"initial validation: " + firstErr.Error()}
+	if retryGenErr != nil {
+		parts = append(parts, "retry call: "+retryGenErr.Error())
+	} else if retryParseErr != nil {
+		parts = append(parts, "retry validation: "+retryParseErr.Error())
+	}
+	return strings.Join(parts, "; ")
+}
+
+func sceneCardCallRecoveryReason(firstErr, retryParseErr, retryGenErr error) string {
+	parts := []string{"initial call: " + firstErr.Error()}
+	if retryGenErr != nil {
+		parts = append(parts, "compact retry call: "+retryGenErr.Error())
+	} else if retryParseErr != nil {
+		parts = append(parts, "compact retry validation: "+retryParseErr.Error())
+	}
+	return strings.Join(parts, "; ")
+}
+
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "client.timeout exceeded") ||
+		strings.Contains(msg, "timeout exceeded") ||
+		strings.Contains(msg, "timed out")
+}
+
+func sceneCardFailurePolicy(p *project.Project, opts Options) (string, error) {
+	policy := opts.SceneCardFailurePolicy
+	if strings.TrimSpace(policy) == "" && p != nil {
+		policy = p.Config.Compile.SceneCardFailurePolicy
+	}
+	return normalizeSceneCardFailurePolicy(policy)
+}
+
+func normalizeSceneCardFailurePolicy(policy string) (string, error) {
+	normalized := strings.TrimSpace(strings.ToLower(policy))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	normalized = strings.ReplaceAll(normalized, " ", "-")
+	switch normalized {
+	case "", SceneCardFailurePolicyRetryFallback, "retry-and-fallback", "retry-then-fallback":
+		return SceneCardFailurePolicyRetryFallback, nil
+	case SceneCardFailurePolicyStrict, "strict-fail":
+		return SceneCardFailurePolicyStrict, nil
+	default:
+		return "", fmt.Errorf("unknown scene card failure policy %q; supported: %s, %s",
+			policy, SceneCardFailurePolicyRetryFallback, SceneCardFailurePolicyStrict)
+	}
 }
 
 // parseSceneCardResponse parses and validates the LLM response for scene card
@@ -344,9 +531,6 @@ func parseSceneCardResponse(
 
 	var raw rawSceneCard
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
-		if isTruncatedJSONError(err) {
-			return fallbackSceneCardFromSceneText(sceneID, paragraphs, runID, model, promptVersion), nil
-		}
 		return nil, fmt.Errorf("parse scene card response for %s: %w", sceneID, err)
 	}
 	title := strings.TrimSpace(string(raw.Title))
@@ -491,6 +675,77 @@ func fallbackSceneCardTitle(sceneID string) string {
 	return "Scene " + sceneID
 }
 
+func buildSceneCardRetryPrompt(scene store.SceneRow, paragraphs []store.ParagraphRow, _ error) string {
+	var sb strings.Builder
+	sb.WriteString("The previous scene-card response cited paragraph IDs outside the allowed list and was rejected.\n")
+	sb.WriteString("Return a corrected scene card. Cite only paragraph IDs from the allowed list below.\n\n")
+	sb.WriteString(buildSceneCardPrompt(scene, paragraphs))
+	return sb.String()
+}
+
+func buildSceneCardTimeoutRetryPrompt(scene store.SceneRow, paragraphs []store.ParagraphRow, _ error) string {
+	var sb strings.Builder
+	sb.WriteString("The previous scene-card request timed out before a response was returned.\n")
+	sb.WriteString("Retry with this compact evidence packet. The paragraph text has been selected and trimmed to reduce context. Return conservative JSON and cite only listed paragraph IDs.\n\n")
+	sb.WriteString(buildSceneCardPrompt(scene, paragraphs))
+	return sb.String()
+}
+
+func compactSceneCardParagraphs(paragraphs []store.ParagraphRow) []store.ParagraphRow {
+	const (
+		maxParagraphs     = 12
+		headParagraphs    = 8
+		tailParagraphs    = 4
+		maxParagraphRunes = 600
+	)
+	if len(paragraphs) == 0 {
+		return nil
+	}
+
+	selected := make(map[int]bool, maxParagraphs)
+	if len(paragraphs) <= maxParagraphs {
+		for i := range paragraphs {
+			selected[i] = true
+		}
+	} else {
+		for i := 0; i < headParagraphs && i < len(paragraphs); i++ {
+			selected[i] = true
+		}
+		for i := len(paragraphs) - tailParagraphs; i < len(paragraphs); i++ {
+			if i >= 0 {
+				selected[i] = true
+			}
+		}
+	}
+
+	out := make([]store.ParagraphRow, 0, len(selected))
+	for i, p := range paragraphs {
+		if !selected[i] {
+			continue
+		}
+		pp := p
+		pp.Text = compactSceneCardText(p.Text, maxParagraphRunes)
+		out = append(out, pp)
+	}
+	return out
+}
+
+func compactSceneCardText(text string, maxRunes int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if maxRunes <= 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	text = string(runes[:maxRunes])
+	if i := strings.LastIndex(text, " "); i > 0 {
+		text = text[:i]
+	}
+	return strings.TrimSpace(text) + "..."
+}
+
 // buildSceneCardPrompt constructs the user-turn message for scene card
 // extraction.
 func buildSceneCardPrompt(scene store.SceneRow, paragraphs []store.ParagraphRow) string {
@@ -501,13 +756,27 @@ func buildSceneCardPrompt(scene store.SceneRow, paragraphs []store.ParagraphRow)
 	sb.WriteString("\n")
 	sb.WriteString("Return JSON matching the schema:\n")
 	sb.WriteString(`{"title":"...","summary":"...","pov":[],"participants":[],"locations":[],"unresolved":[],"evidence":["p-..."]}`)
-	sb.WriteString("\n\nCite paragraph IDs for every concrete statement. Use only IDs from the list below.\n\n")
+	sb.WriteString("\n\nCite paragraph IDs for every concrete statement. Use only IDs from the allowed list below.")
+	sb.WriteString("\n\nAllowed evidence paragraph IDs:\n")
+	for _, p := range paragraphs {
+		if strings.TrimSpace(p.ID) == "" {
+			continue
+		}
+		sb.WriteString("- ")
+		sb.WriteString(p.ID)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\nParagraph excerpts:\n")
 	for _, p := range paragraphs {
 		sb.WriteString("--- ")
 		sb.WriteString(p.ID)
 		sb.WriteString(" ---\n")
-		sb.WriteString(p.Text)
+		sb.WriteString(sanitizeSceneCardPromptText(p.Text))
 		sb.WriteString("\n\n")
 	}
 	return sb.String()
+}
+
+func sanitizeSceneCardPromptText(text string) string {
+	return paragraphIDPattern.ReplaceAllString(text, "[paragraph-id-redacted]")
 }

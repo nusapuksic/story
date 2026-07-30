@@ -33,6 +33,9 @@ type Options struct {
 	ChapterID string
 	// Force causes already-generated records to be recomputed.
 	Force bool
+	// SceneCardFailurePolicy controls recovery from invalid scene-card model output.
+	// Empty string uses [compile].scene_card_failure_policy, defaulting to retry-fallback.
+	SceneCardFailurePolicy string
 	// ExtractionProvider is the LLM provider for extraction tasks.
 	// May be nil for explicit-only scene detection.
 	ExtractionProvider provider.Provider
@@ -44,14 +47,25 @@ type Options struct {
 	VerificationModel string
 }
 
+// SceneCardRecoveryEvent identifies a scene card that needed extraction recovery.
+type SceneCardRecoveryEvent struct {
+	SceneID   string `json:"scene_id"`
+	ChapterID string `json:"chapter_id"`
+	Action    string `json:"action"`
+	Attempts  int    `json:"attempts"`
+	Reason    string `json:"reason,omitempty"`
+}
+
 // Result summarizes a completed compilation run.
 type Result struct {
-	RunID              string
-	ScenesBuilt        int
-	CardsBuilt         int
-	EntitiesBuilt      int
-	VerificationsBuilt int
-	SummariesBuilt     int
+	RunID                   string
+	ScenesBuilt             int
+	CardsBuilt              int
+	SceneCardRecoveries     int
+	SceneCardRecoveryEvents []SceneCardRecoveryEvent
+	EntitiesBuilt           int
+	VerificationsBuilt      int
+	SummariesBuilt          int
 }
 
 // Compile runs the compilation pipeline for the given project.  It opens and
@@ -80,7 +94,7 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 		return Result{}, err
 	}
 
-	scenesBuilt, cardsBuilt, entitiesBuilt, verificationsBuilt, summariesBuilt, compileErr := runLayers(ctx, p, st, opts, cfg, run)
+	scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, compileErr := runLayers(ctx, p, st, opts, cfg, run)
 	if compileErr != nil {
 		_ = run.fail(compileErr)
 		return Result{RunID: run.Record.RunID}, compileErr
@@ -88,14 +102,16 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 	if err := run.complete(); err != nil {
 		return Result{RunID: run.Record.RunID}, err
 	}
-	_ = run.saveSummary(scenesBuilt, cardsBuilt, entitiesBuilt, verificationsBuilt, summariesBuilt)
+	_ = run.saveSummary(scenesBuilt, cardsBuilt, len(sceneCardRecoveryEvents), sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt)
 	return Result{
-		RunID:              run.Record.RunID,
-		ScenesBuilt:        scenesBuilt,
-		CardsBuilt:         cardsBuilt,
-		EntitiesBuilt:      entitiesBuilt,
-		VerificationsBuilt: verificationsBuilt,
-		SummariesBuilt:     summariesBuilt,
+		RunID:                   run.Record.RunID,
+		ScenesBuilt:             scenesBuilt,
+		CardsBuilt:              cardsBuilt,
+		SceneCardRecoveries:     len(sceneCardRecoveryEvents),
+		SceneCardRecoveryEvents: sceneCardRecoveryEvents,
+		EntitiesBuilt:           entitiesBuilt,
+		VerificationsBuilt:      verificationsBuilt,
+		SummariesBuilt:          summariesBuilt,
 	}, nil
 }
 
@@ -116,21 +132,21 @@ func runLayers(
 	opts Options,
 	cfg sceneDetectConfig,
 	run *Run,
-) (scenesBuilt, cardsBuilt, entitiesBuilt, verificationsBuilt, summariesBuilt int, err error) {
+) (scenesBuilt, cardsBuilt int, sceneCardRecoveryEvents []SceneCardRecoveryEvent, entitiesBuilt, verificationsBuilt, summariesBuilt int, err error) {
 	// Determine which chapters to process.
 	chapters, err := chaptersToProcess(st, opts.ChapterID)
 	if err != nil {
-		return 0, 0, 0, 0, 0, err
+		return 0, 0, nil, 0, 0, 0, err
 	}
 	if len(chapters) == 0 {
-		return 0, 0, 0, 0, 0, nil
+		return 0, 0, nil, 0, 0, 0, nil
 	}
 
 	// Scenes layer (Layer 2).
 	if opts.Layer == "" || opts.Layer == LayerScenes {
 		n, err := compileScenes(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return 0, 0, 0, 0, 0, err
+			return 0, 0, nil, 0, 0, 0, err
 		}
 		scenesBuilt = n
 	}
@@ -138,27 +154,28 @@ func runLayers(
 	// Scene-cards layer (Layer 3).
 	if opts.Layer == "" || opts.Layer == LayerSceneCards {
 		if opts.ExtractionProvider == nil {
-			return scenesBuilt, 0, 0, 0, 0, errors.New(
+			return scenesBuilt, 0, nil, 0, 0, 0, errors.New(
 				"no LLM provider configured: scene cards require an extraction provider; " +
 					"configure [llm] in story.toml")
 		}
-		n, err := compileSceneCards(ctx, p, st, chapters, opts, cfg, run)
+		n, recoveryEvents, err := compileSceneCards(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return scenesBuilt, 0, 0, 0, 0, err
+			return scenesBuilt, 0, nil, 0, 0, 0, err
 		}
 		cardsBuilt = n
+		sceneCardRecoveryEvents = recoveryEvents
 	}
 
 	// Verification layer verifies generated factual records when enabled.
 	if opts.Layer == LayerVerification || (opts.Layer == "" && p.Config.Compile.Verification) {
 		if opts.VerificationProvider == nil {
-			return scenesBuilt, cardsBuilt, entitiesBuilt, 0, 0, errors.New(
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, 0, 0, errors.New(
 				"no LLM provider configured: verification requires a verification provider; " +
 					"configure [llm.roles.verification] in story.toml")
 		}
 		n, err := compileVerification(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return scenesBuilt, cardsBuilt, entitiesBuilt, 0, 0, err
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, 0, 0, err
 		}
 		verificationsBuilt = n
 	}
@@ -166,13 +183,13 @@ func runLayers(
 	// Summaries layer.
 	if opts.Layer == "" || opts.Layer == LayerSummaries {
 		if opts.ExtractionProvider == nil {
-			return scenesBuilt, cardsBuilt, entitiesBuilt, verificationsBuilt, 0, errors.New(
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, 0, errors.New(
 				"no LLM provider configured: summaries require an extraction provider; " +
 					"configure [llm] in story.toml")
 		}
 		n, err := compileSummaries(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return scenesBuilt, cardsBuilt, entitiesBuilt, verificationsBuilt, 0, err
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, 0, err
 		}
 		summariesBuilt = n
 	}
@@ -180,18 +197,18 @@ func runLayers(
 	// Entities layer.
 	if opts.Layer == "" || opts.Layer == LayerEntities {
 		if opts.ExtractionProvider == nil {
-			return scenesBuilt, cardsBuilt, 0, verificationsBuilt, summariesBuilt, errors.New(
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, 0, verificationsBuilt, summariesBuilt, errors.New(
 				"no LLM provider configured: entities require an extraction provider; " +
 					"configure [llm] in story.toml")
 		}
 		n, err := compileEntities(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return scenesBuilt, cardsBuilt, 0, verificationsBuilt, summariesBuilt, err
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, 0, verificationsBuilt, summariesBuilt, err
 		}
 		entitiesBuilt = n
 	}
 
-	return scenesBuilt, cardsBuilt, entitiesBuilt, verificationsBuilt, summariesBuilt, nil
+	return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, nil
 }
 
 // chaptersToProcess returns the chapters to compile, optionally filtered to one.
@@ -316,26 +333,32 @@ func compileSceneCards(
 	opts Options,
 	cfg sceneDetectConfig,
 	run *Run,
-) (int, error) {
+) (int, []SceneCardRecoveryEvent, error) {
+	policy, err := sceneCardFailurePolicy(p, opts)
+	if err != nil {
+		return 0, nil, err
+	}
+
 	scenesFile, err := openAppendJSONL(p.Path(filepath.Join(project.ModelDir, "scenes.jsonl")))
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer scenesFile.Close()
 
 	total := 0
+	recoveries := []SceneCardRecoveryEvent{}
 	for _, ch := range chapters {
 		scenes, err := st.ScenesByChapter(ch.ID)
 		if err != nil {
-			return total, err
+			return total, recoveries, err
 		}
 		if len(scenes) == 0 {
-			return total, fmt.Errorf("no scenes found for chapter %s; run 'story compile --layer scenes' first", ch.ID)
+			return total, recoveries, fmt.Errorf("no scenes found for chapter %s; run 'story compile --layer scenes' first", ch.ID)
 		}
 
 		paragraphs, err := st.ParagraphsByChapter(ch.ID)
 		if err != nil {
-			return total, err
+			return total, recoveries, err
 		}
 		paraByID := make(map[string]store.ParagraphRow, len(paragraphs))
 		for _, pp := range paragraphs {
@@ -351,10 +374,13 @@ func compileSceneCards(
 			}
 
 			sceneParagraphs := paragraphsInScene(paragraphs, paraByID, sc)
+			if len(sceneParagraphs) == 0 {
+				return total, recoveries, fmt.Errorf("collect scene-card context for %s: no paragraphs found from %q to %q", sc.ID, sc.ParagraphStart, sc.ParagraphEnd)
+			}
 			card, err := extractSceneCard(ctx, p, sc, sceneParagraphs,
-				opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
+				opts.ExtractionProvider, opts.ExtractionModel, cfg, run, policy)
 			if err != nil {
-				return total, fmt.Errorf("extract scene card for %s: %w", sc.ID, err)
+				return total, recoveries, fmt.Errorf("extract scene card for %s: %w", sc.ID, err)
 			}
 
 			row := store.SceneCardRow{
@@ -371,15 +397,24 @@ func compileSceneCards(
 			row.RawJSON = string(rawBytes)
 
 			if err := st.InsertSceneCard(row); err != nil {
-				return total, err
+				return total, recoveries, err
 			}
 			if err := appendJSONL(scenesFile, card); err != nil {
-				return total, err
+				return total, recoveries, err
+			}
+			if card.Recovery != nil {
+				recoveries = append(recoveries, SceneCardRecoveryEvent{
+					SceneID:   card.SceneID,
+					ChapterID: sc.ChapterID,
+					Action:    card.Recovery.Action,
+					Attempts:  card.Recovery.Attempts,
+					Reason:    card.Recovery.Reason,
+				})
 			}
 			total++
 		}
 	}
-	return total, nil
+	return total, recoveries, nil
 }
 
 // paragraphsInScene returns the ordered subset of paragraphs belonging to a

@@ -141,6 +141,172 @@ func TestCompileSceneCardsWithFakeProvider(t *testing.T) {
 	}
 }
 
+func TestCompileSceneCardsRecoversInvalidEvidence(t *testing.T) {
+	p, st := buildTestProject(t)
+
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer: compiler.LayerScenes,
+	})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	if len(paragraphs) < 2 {
+		t.Fatalf("expected two paragraphs, got %d", len(paragraphs))
+	}
+
+	invalid := `{"title":"Bad","summary":"Bad citations.","evidence":["p-NONEXISTENT"]}`
+	fake := &fakeProvider{responses: []string{
+		invalid,
+		invalid,
+		`{"title":"Sunrise","summary":"The sun rises over the hills.","evidence":["` + paragraphs[1].ID + `"]}`,
+	}}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSceneCards,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile scene-cards should recover invalid evidence: %v", err)
+	}
+	if result.CardsBuilt != 2 {
+		t.Fatalf("CardsBuilt = %d, want 2", result.CardsBuilt)
+	}
+	if result.SceneCardRecoveries != 1 {
+		t.Fatalf("SceneCardRecoveries = %d, want 1", result.SceneCardRecoveries)
+	}
+	if len(result.SceneCardRecoveryEvents) != 1 {
+		t.Fatalf("SceneCardRecoveryEvents = %d, want 1", len(result.SceneCardRecoveryEvents))
+	}
+	if result.SceneCardRecoveryEvents[0].ChapterID != "ch-0001" || result.SceneCardRecoveryEvents[0].Action != "fallback" {
+		t.Fatalf("SceneCardRecoveryEvents[0] = %#v, want ch-0001 fallback", result.SceneCardRecoveryEvents[0])
+	}
+	if len(fake.requests) != 3 {
+		t.Fatalf("Generate calls = %d, want 3", len(fake.requests))
+	}
+
+	cards, err := st.AllSceneCards()
+	if err != nil {
+		t.Fatalf("AllSceneCards: %v", err)
+	}
+	if len(cards) != 2 {
+		t.Fatalf("cards = %d, want 2", len(cards))
+	}
+	if len(cards[0].Evidence) != 1 || cards[0].Evidence[0] != paragraphs[0].ID {
+		t.Fatalf("fallback evidence = %v, want [%s]", cards[0].Evidence, paragraphs[0].ID)
+	}
+	if !strings.Contains(cards[0].RawJSON, `"action":"fallback"`) {
+		t.Fatalf("fallback card raw JSON missing recovery block: %s", cards[0].RawJSON)
+	}
+
+	summary, err := os.ReadFile(p.Path(filepath.Join(project.RunsDir, result.RunID, "summary.json")))
+	if err != nil {
+		t.Fatalf("read summary.json: %v", err)
+	}
+	for _, want := range []string{`"scene_card_recovery_events"`, `"scene_id": "` + result.SceneCardRecoveryEvents[0].SceneID + `"`, `"chapter_id": "ch-0001"`, `"action": "fallback"`} {
+		if !strings.Contains(string(summary), want) {
+			t.Fatalf("summary.json missing %s:\n%s", want, summary)
+		}
+	}
+}
+
+func TestCompileSceneCardsRecoversTimeoutWithFallback(t *testing.T) {
+	p, st := buildTestProject(t)
+
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer: compiler.LayerScenes,
+	})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	if len(paragraphs) < 2 {
+		t.Fatalf("expected two paragraphs, got %d", len(paragraphs))
+	}
+
+	fake := &fakeProvider{
+		responses: []string{
+			"",
+			"",
+			`{"title":"Sunrise","summary":"The sun rises over the hills.","evidence":["` + paragraphs[1].ID + `"]}`,
+		},
+		errors: []error{context.DeadlineExceeded, context.DeadlineExceeded, nil},
+	}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSceneCards,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile scene-cards should recover timeout: %v", err)
+	}
+	if result.CardsBuilt != 2 {
+		t.Fatalf("CardsBuilt = %d, want 2", result.CardsBuilt)
+	}
+	if result.SceneCardRecoveries != 1 {
+		t.Fatalf("SceneCardRecoveries = %d, want 1", result.SceneCardRecoveries)
+	}
+	if len(result.SceneCardRecoveryEvents) != 1 {
+		t.Fatalf("SceneCardRecoveryEvents = %d, want 1", len(result.SceneCardRecoveryEvents))
+	}
+	if result.SceneCardRecoveryEvents[0].ChapterID != "ch-0001" || result.SceneCardRecoveryEvents[0].Action != "fallback" {
+		t.Fatalf("SceneCardRecoveryEvents[0] = %#v, want ch-0001 fallback", result.SceneCardRecoveryEvents[0])
+	}
+	if len(fake.requests) != 3 {
+		t.Fatalf("Generate calls = %d, want 3", len(fake.requests))
+	}
+
+	cards, err := st.AllSceneCards()
+	if err != nil {
+		t.Fatalf("AllSceneCards: %v", err)
+	}
+	if len(cards) != 2 {
+		t.Fatalf("cards = %d, want 2", len(cards))
+	}
+	if len(cards[0].Evidence) != 1 || cards[0].Evidence[0] != paragraphs[0].ID {
+		t.Fatalf("fallback evidence = %v, want [%s]", cards[0].Evidence, paragraphs[0].ID)
+	}
+	if !strings.Contains(cards[0].RawJSON, `"action":"fallback"`) {
+		t.Fatalf("timeout fallback raw JSON missing recovery block: %s", cards[0].RawJSON)
+	}
+}
+
+func TestCompileSceneCardsStrictInvalidEvidenceFails(t *testing.T) {
+	p, st := buildTestProject(t)
+
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer: compiler.LayerScenes,
+	})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
+	fake := &fakeProvider{response: `{"title":"Bad","summary":"Bad citations.","evidence":["p-NONEXISTENT"]}`}
+
+	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:                  compiler.LayerSceneCards,
+		SceneCardFailurePolicy: compiler.SceneCardFailurePolicyStrict,
+		ExtractionProvider:     fake,
+		ExtractionModel:        "fake-model",
+	})
+	if err == nil {
+		t.Fatal("expected strict scene-card compile to fail")
+	}
+	if !strings.Contains(err.Error(), "unknown paragraph ID") {
+		t.Fatalf("error = %v, want unknown paragraph ID", err)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("Generate calls = %d, want 1 in strict mode", len(fake.requests))
+	}
+}
+
 func TestCompileRequiresProviderForSceneCards(t *testing.T) {
 	p, st := buildTestProject(t)
 
@@ -564,6 +730,7 @@ func TestCompileChapterSummaryIgnoresNonParagraphInlinePhrases(t *testing.T) {
 		t.Fatalf("Evidence = %v, want [%s]", rec.Evidence, paragraphs[0].ID)
 	}
 }
+
 func TestCompileSummariesSplitsOversizedChapterIntoWindows(t *testing.T) {
 	firstWindowText := "OVERSIZED_WINDOW_ONE The archive shelves hum with names and dust."
 	secondWindowText := "OVERSIZED_WINDOW_TWO The locked gate answers with a silver echo."
@@ -620,6 +787,7 @@ func TestCompileSummariesSplitsOversizedChapterIntoWindows(t *testing.T) {
 		t.Fatalf("synthesis prompt missing window summaries: %s", synthesisPrompt)
 	}
 }
+
 func TestCompileSummariesWithFakeProvider(t *testing.T) {
 	p, st := buildTestProject(t)
 
@@ -695,6 +863,7 @@ func TestCompileSummariesFallsBackOnTruncatedChapterResponse(t *testing.T) {
 		t.Fatalf("fallback summary did not use chapter text: %s", content)
 	}
 }
+
 func TestCompileSummariesAllowsUncappedOutputTokens(t *testing.T) {
 	p, st := buildTestProject(t)
 	p.Config.Compile.MaximumOutputTokens = 0
@@ -721,6 +890,7 @@ func TestCompileSummariesAllowsUncappedOutputTokens(t *testing.T) {
 		t.Fatalf("MaxTokens = %d, want 0 for uncapped output", fake.requests[0].MaxTokens)
 	}
 }
+
 func TestCompileSummariesSkipsExisting(t *testing.T) {
 	p, st := buildTestProject(t)
 	paragraphs, err := st.ParagraphsByChapter("ch-0001")
@@ -927,6 +1097,7 @@ func TestCompileWritesResponseAudit(t *testing.T) {
 		}
 	}
 }
+
 func TestCompileEntitiesIncludesExistingExtractionContext(t *testing.T) {
 	p, st := buildTestProject(t)
 	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerScenes})

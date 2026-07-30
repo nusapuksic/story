@@ -202,6 +202,7 @@ target_context_tokens = 12000
 maximum_output_tokens = 0
 window_overlap_paragraphs = 3
 scene_detection = "hybrid"
+scene_card_failure_policy = "retry-fallback"
 verification = true
 auto_accept_verified = false
 temperature = 0.1
@@ -800,6 +801,7 @@ story compile --layer scenes
 story compile --from scenes --to claims
 story compile --resume
 story compile --force
+story compile --strict-extraction
 
 10.1 Pipeline stages
 
@@ -910,7 +912,7 @@ The application must:
 6. store the raw response with the run record;
 7. write valid records as candidates.
 
-Invalid model output must never be written as accepted story state.
+Invalid model output must never be written as accepted story state. For author-facing scene-card extraction, the default `retry-fallback` policy retries invalid structured output once with validation feedback, retries timed-out scene-card calls with a compact evidence packet, then writes a deterministic fallback scene card using only paragraphs from the scene. Recovery events must be surfaced in compile output, `story compile status`, and `.story/runs/<run-id>/summary.json`, including scene ID, chapter ID, recovery action, and a chapter-level regeneration hint. Strict failure is available with `story compile --strict-extraction` or `[compile].scene_card_failure_policy = "strict"`.
 
 10.6 Evidence verification
 
@@ -1062,6 +1064,7 @@ story compile --from <layer>
 story compile --to <layer>
 story compile --resume
 story compile --force
+story compile --strict-extraction
 story compile status
 
 Supported layer names:
