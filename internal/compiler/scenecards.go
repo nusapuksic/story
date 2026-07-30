@@ -25,6 +25,8 @@ const (
 	// SceneCardFailurePolicyStrict preserves developer/debug behavior by failing
 	// the compile on invalid scene-card model output.
 	SceneCardFailurePolicyStrict = "strict"
+	// SceneCardStatusSkipped marks a scene card intentionally omitted from the live index.
+	SceneCardStatusSkipped = "skipped"
 )
 
 // SceneCardRecord represents one scene card in model/scenes.jsonl.
@@ -281,6 +283,8 @@ func extractSceneCard(
 	cfg sceneDetectConfig,
 	run *Run,
 	policy string,
+	skipRecoveryOnInitialFailure bool,
+	progress ProgressFunc,
 ) (*SceneCardRecord, error) {
 	if prov == nil {
 		return nil, fmt.Errorf("no LLM provider: cannot extract scene card for %s", scene.ID)
@@ -298,7 +302,13 @@ func extractSceneCard(
 		if policy == SceneCardFailurePolicyStrict || !isTimeoutError(genErr) {
 			return nil, genErr
 		}
-		return retrySceneCardAfterTimeout(ctx, scene, paragraphs, prov, model, cfg, loadedPrompt, run, policy, genErr)
+		if skipRecoveryOnInitialFailure {
+			reason := "initial timeout for oversized full-chapter scene: " + genErr.Error()
+			recordSceneCardSkippedTask(run, scene.ID, loadedPrompt.Version, reason)
+			return skippedSceneCardRecord(scene.ID, runID(run), model, loadedPrompt.Version, policy, reason), nil
+		}
+		emitProgress(progress, ProgressEvent{Layer: LayerSceneCards, Stage: "retry", ChapterID: scene.ChapterID, SceneID: scene.ID, Message: fmt.Sprintf("Scene card %s: request timed out; retrying with compact context", scene.ID)})
+		return retrySceneCardAfterTimeout(ctx, scene, paragraphs, prov, model, cfg, loadedPrompt, run, policy, genErr, progress)
 	}
 	if parseErr == nil {
 		return card, nil
@@ -306,7 +316,13 @@ func extractSceneCard(
 	if policy == SceneCardFailurePolicyStrict {
 		return nil, parseErr
 	}
+	if skipRecoveryOnInitialFailure {
+		reason := "initial validation failed for oversized full-chapter scene: " + parseErr.Error()
+		recordSceneCardSkippedTask(run, scene.ID, loadedPrompt.Version, reason)
+		return skippedSceneCardRecord(scene.ID, runID(run), model, loadedPrompt.Version, policy, reason), nil
+	}
 
+	emitProgress(progress, ProgressEvent{Layer: LayerSceneCards, Stage: "retry", ChapterID: scene.ChapterID, SceneID: scene.ID, Message: fmt.Sprintf("Scene card %s: validation failed; retrying once", scene.ID)})
 	retryPrompt := buildSceneCardRetryPrompt(scene, paragraphs, parseErr)
 	retried, retryParseErr, retryGenErr := generateSceneCardAttempt(ctx, scene.ID, retryPrompt,
 		prov, model, cfg, loadedPrompt, pidSet, paragraphs, run, "scene-extraction-retry")
@@ -317,6 +333,7 @@ func extractSceneCard(
 			Attempts: 2,
 			Reason:   parseErr.Error(),
 		}
+		emitProgress(progress, ProgressEvent{Layer: LayerSceneCards, Stage: "recovered", ChapterID: scene.ChapterID, SceneID: scene.ID, Message: fmt.Sprintf("Scene card %s: recovered after validation retry", scene.ID)})
 		return retried, nil
 	}
 	if retryGenErr != nil && !isTimeoutError(retryGenErr) {
@@ -324,6 +341,7 @@ func extractSceneCard(
 	}
 
 	reason := sceneCardRecoveryReason(parseErr, retryParseErr, retryGenErr)
+	emitProgress(progress, ProgressEvent{Layer: LayerSceneCards, Stage: "fallback", ChapterID: scene.ChapterID, SceneID: scene.ID, Message: fmt.Sprintf("Scene card %s: retry failed; writing fallback card", scene.ID)})
 	fallback := fallbackSceneCardFromSceneText(scene.ID, paragraphs, runID(run), model, loadedPrompt.Version)
 	fallback.Recovery = &SceneCardRecovery{
 		Policy:   policy,
@@ -346,6 +364,7 @@ func retrySceneCardAfterTimeout(
 	run *Run,
 	policy string,
 	initialErr error,
+	progress ProgressFunc,
 ) (*SceneCardRecord, error) {
 	compactParagraphs := compactSceneCardParagraphs(paragraphs)
 	retried, retryParseErr, retryGenErr := generateSceneCardAttempt(ctx, scene.ID,
@@ -358,6 +377,7 @@ func retrySceneCardAfterTimeout(
 			Attempts: 2,
 			Reason:   "initial call: " + initialErr.Error(),
 		}
+		emitProgress(progress, ProgressEvent{Layer: LayerSceneCards, Stage: "recovered", ChapterID: scene.ChapterID, SceneID: scene.ID, Message: fmt.Sprintf("Scene card %s: recovered after compact retry", scene.ID)})
 		return retried, nil
 	}
 	if retryGenErr != nil && !isTimeoutError(retryGenErr) {
@@ -365,6 +385,7 @@ func retrySceneCardAfterTimeout(
 	}
 
 	reason := sceneCardCallRecoveryReason(initialErr, retryParseErr, retryGenErr)
+	emitProgress(progress, ProgressEvent{Layer: LayerSceneCards, Stage: "fallback", ChapterID: scene.ChapterID, SceneID: scene.ID, Message: fmt.Sprintf("Scene card %s: compact retry failed; writing fallback card", scene.ID)})
 	fallback := fallbackSceneCardFromSceneText(scene.ID, paragraphs, runID(run), model, loadedPrompt.Version)
 	fallback.Recovery = &SceneCardRecovery{
 		Policy:   policy,
@@ -446,6 +467,30 @@ func recordSceneCardTask(run *Run, taskID, sceneID, taskType, status, promptVers
 
 func recordSceneCardFallbackTask(run *Run, sceneID, promptVersion, reason string) {
 	recordSceneCardTask(run, ids.NewTaskID(), sceneID, "scene-extraction-fallback", TaskStatusCompleted, promptVersion, reason)
+}
+
+func recordSceneCardSkippedTask(run *Run, sceneID, promptVersion, reason string) {
+	recordSceneCardTask(run, ids.NewTaskID(), sceneID, "scene-extraction-skipped", TaskStatusSkipped, promptVersion, reason)
+}
+
+func skippedSceneCardRecord(sceneID, runID, model, promptVersion, policy, reason string) *SceneCardRecord {
+	return &SceneCardRecord{
+		RecordType: "scene_card",
+		SceneID:    sceneID,
+		Evidence:   []string{},
+		Generation: SceneCardGeneration{
+			RunID:         runID,
+			Model:         model,
+			PromptVersion: promptVersion,
+		},
+		Recovery: &SceneCardRecovery{
+			Policy:   policy,
+			Action:   "skipped",
+			Attempts: 1,
+			Reason:   reason,
+		},
+		Status: SceneCardStatusSkipped,
+	}
 }
 
 func sceneCardRecoveryReason(firstErr, retryParseErr, retryGenErr error) string {

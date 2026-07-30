@@ -93,7 +93,7 @@ func compileEntities(
 	}
 
 	total := 0
-	for _, ch := range chapters {
+	for chapterIndex, ch := range chapters {
 		if opts.Force {
 			if err := st.DeleteEntityMentionsForChapter(ch.ID); err != nil {
 				return total, err
@@ -104,6 +104,7 @@ func compileEntities(
 				return total, err
 			}
 			if n > 0 {
+				reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Entities %s (%d/%d): already exists", ch.ID, chapterIndex+1, len(chapters))})
 				continue
 			}
 		}
@@ -113,6 +114,7 @@ func compileEntities(
 			return total, err
 		}
 		if len(paragraphs) == 0 {
+			reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Entities %s (%d/%d): no paragraphs", ch.ID, chapterIndex+1, len(chapters))})
 			continue
 		}
 
@@ -121,6 +123,7 @@ func compileEntities(
 			return total, err
 		}
 
+		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-start", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Entities %s (%d/%d): extracting from %d paragraph(s)", ch.ID, chapterIndex+1, len(chapters), len(paragraphs))})
 		entities, mentions, err := extractEntitiesForChapter(ctx, p, ch, paragraphs, promptContext,
 			opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 		if err != nil {
@@ -170,6 +173,7 @@ func compileEntities(
 				return total, err
 			}
 		}
+		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-complete", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Entities %s (%d/%d): completed (%d entities, %d mentions)", ch.ID, chapterIndex+1, len(chapters), len(entities), len(mentions))})
 	}
 	return total, nil
 }

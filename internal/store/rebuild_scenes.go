@@ -333,6 +333,9 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 			continue
 		}
 		rec := cand.record
+		if strings.EqualFold(strings.TrimSpace(rec.Status), "skipped") {
+			continue
+		}
 		for _, pid := range rec.Evidence {
 			p, ok := paragraphs[pid]
 			if !ok {

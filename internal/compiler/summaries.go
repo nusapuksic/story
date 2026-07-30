@@ -84,9 +84,10 @@ func compileSummaries(
 
 	total := 0
 	chapterSummariesBuilt := 0
-	for _, ch := range chapters {
+	for chapterIndex, ch := range chapters {
 		if !opts.Force {
 			if existing, ok := idx.Chapters[ch.ID]; ok && strings.TrimSpace(existing.Summary) != "" {
+				reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Summary %s (%d/%d): already exists", ch.ID, chapterIndex+1, len(chapters))})
 				continue
 			}
 		}
@@ -96,9 +97,11 @@ func compileSummaries(
 			return total, err
 		}
 		if len(paragraphs) == 0 {
+			reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Summary %s (%d/%d): no paragraphs", ch.ID, chapterIndex+1, len(chapters))})
 			continue
 		}
 
+		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-start", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Summary %s (%d/%d): extracting from %d paragraph(s)", ch.ID, chapterIndex+1, len(chapters), len(paragraphs))})
 		rec, err := extractChapterSummary(ctx, p, ch, paragraphs,
 			opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 		if err != nil {
@@ -110,6 +113,7 @@ func compileSummaries(
 		idx.Chapters[ch.ID] = *rec
 		chapterSummariesBuilt++
 		total++
+		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-complete", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Summary %s (%d/%d): completed", ch.ID, chapterIndex+1, len(chapters))})
 	}
 
 	if opts.ChapterID != "" {
@@ -124,6 +128,7 @@ func compileSummaries(
 		return total, nil
 	}
 
+	reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-start", Message: fmt.Sprintf("Book summary: extracting from %d chapter summary record(s)", len(chapterSummaries))})
 	book, err := extractBookSummary(ctx, p, chapterSummaries,
 		opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 	if err != nil {
@@ -133,6 +138,7 @@ func compileSummaries(
 		return total, err
 	}
 	total++
+	reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-complete", Message: "Book summary: completed"})
 	return total, nil
 }
 

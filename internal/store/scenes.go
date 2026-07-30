@@ -74,6 +74,15 @@ func (s *Store) InsertSceneCard(r SceneCardRow) error {
 	return nil
 }
 
+// DeleteSceneCard removes one scene card from the live index.
+func (s *Store) DeleteSceneCard(sceneID string) error {
+	s.db.Exec(`DELETE FROM scene_cards_fts WHERE scene_id = ?`, sceneID) //nolint:errcheck
+	if _, err := s.db.Exec(`DELETE FROM scene_cards WHERE scene_id = ?`, sceneID); err != nil {
+		return fmt.Errorf("delete scene card %s: %w", sceneID, err)
+	}
+	return nil
+}
+
 // ScenesByChapter returns all scenes for a chapter, ordered by ordinal.
 func (s *Store) ScenesByChapter(chapterID string) ([]SceneRow, error) {
 	rows, err := s.db.Query(

@@ -108,14 +108,17 @@ func runCompile(layer, chapterID string, force, strictExtraction bool) error {
 		ChapterID:              chapterID,
 		Force:                  force,
 		SceneCardFailurePolicy: sceneCardFailurePolicy,
+		Progress:               compileProgressPrinter(),
 		ExtractionProvider:     extractProv,
 		ExtractionModel:        extractModel,
 		VerificationProvider:   verifyProv,
 		VerificationModel:      verifyModel,
 	}
 
-	info("Compiling manuscript (layer=%q, chapter=%q, force=%v, strict_extraction=%v)...",
-		layer, chapterID, force, strictExtraction)
+	if !flags.jsonOut {
+		info("Compiling manuscript (layer=%q, chapter=%q, force=%v, strict_extraction=%v)...",
+			layer, chapterID, force, strictExtraction)
+	}
 
 	result, err := compiler.Compile(nil, p, st, opts)
 	if err != nil {
@@ -143,6 +146,75 @@ func runCompile(layer, chapterID string, force, strictExtraction bool) error {
 	info("Verifications built: %d", result.VerificationsBuilt)
 	info("Summaries built:     %d", result.SummariesBuilt)
 	return nil
+}
+
+func compileProgressPrinter() compiler.ProgressFunc {
+	if flags.jsonOut || flags.quiet {
+		return nil
+	}
+	return func(event compiler.ProgressEvent) {
+		if msg := strings.TrimSpace(event.Message); msg != "" {
+			info("%s", msg)
+		}
+	}
+}
+
+type singleSceneChapterHint struct {
+	ChapterID             string `json:"chapter_id"`
+	SceneID               string `json:"scene_id"`
+	Paragraphs            int    `json:"paragraphs"`
+	BreakAfterParagraphID string `json:"break_after_paragraph_id,omitempty"`
+}
+
+const minParagraphsForSingleSceneStatusHint = 6
+
+func indexedSingleSceneChapterHints(st *store.Store) ([]singleSceneChapterHint, error) {
+	chapters, err := st.AllChapters()
+	if err != nil {
+		return nil, err
+	}
+	hints := []singleSceneChapterHint{}
+	for _, ch := range chapters {
+		scenes, err := st.ScenesByChapter(ch.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(scenes) != 1 {
+			continue
+		}
+		paragraphs, err := st.ParagraphsByChapter(ch.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(paragraphs) < minParagraphsForSingleSceneStatusHint {
+			continue
+		}
+		sc := scenes[0]
+		if sc.ParagraphStart != paragraphs[0].ID || sc.ParagraphEnd != paragraphs[len(paragraphs)-1].ID {
+			continue
+		}
+		hints = append(hints, singleSceneChapterHint{
+			ChapterID:             ch.ID,
+			SceneID:               sc.ID,
+			Paragraphs:            len(paragraphs),
+			BreakAfterParagraphID: paragraphs[len(paragraphs)/2-1].ID,
+		})
+	}
+	return hints, nil
+}
+
+func printSingleSceneChapterHints(hints []singleSceneChapterHint) {
+	if len(hints) == 0 {
+		return
+	}
+	info("Chapters with one full-chapter scene:")
+	for _, hint := range hints {
+		info("  %s (%d paragraphs, scene %s): consider adding an explicit scene break near the midpoint, for example after paragraph %s", hint.ChapterID, hint.Paragraphs, hint.SceneID, hint.BreakAfterParagraphID)
+	}
+	info("Recreate scenes after editing with:")
+	for _, hint := range hints {
+		info("  story compile --layer scenes --chapter %s --force", hint.ChapterID)
+	}
 }
 
 func indexedSceneCardRecoveryEvents(st *store.Store) ([]compiler.SceneCardRecoveryEvent, error) {
@@ -280,22 +352,29 @@ func newCompileStatusCmd() *cobra.Command {
 				return err
 			}
 			fallbacks := sceneCardRecoveryActionCount(recoveryEvents, "fallback")
+			sceneHints, err := indexedSingleSceneChapterHints(st)
+			if err != nil {
+				return err
+			}
 			if flags.jsonOut {
 				return printJSON(map[string]any{
-					"chapters":                   chapters,
-					"paragraphs":                 paragraphs,
-					"scenes":                     scenes,
-					"scene_cards":                cards,
-					"scene_card_recoveries":      len(recoveryEvents),
-					"scene_card_fallbacks":       fallbacks,
-					"scene_card_recovery_events": recoveryEvents,
-					"entities":                   entities,
-					"mentions":                   mentions,
+					"chapters":                         chapters,
+					"paragraphs":                       paragraphs,
+					"scenes":                           scenes,
+					"scene_cards":                      cards,
+					"single_scene_chapter_suggestions": sceneHints,
+					"scene_card_recoveries":            len(recoveryEvents),
+					"scene_card_fallbacks":             fallbacks,
+					"scene_card_recovery_events":       recoveryEvents,
+					"entities":                         entities,
+					"mentions":                         mentions,
 				})
 			}
 			info("Chapters:              %d", chapters)
 			info("Paragraphs:            %d", paragraphs)
 			info("Scenes:                %d", scenes)
+			info("Scene split suggestions: %d", len(sceneHints))
+			printSingleSceneChapterHints(sceneHints)
 			info("Scene cards:           %d", cards)
 			info("Scene card recoveries: %d", len(recoveryEvents))
 			info("Scene card fallbacks:  %d", fallbacks)

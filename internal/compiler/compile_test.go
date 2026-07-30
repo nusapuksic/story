@@ -113,6 +113,57 @@ func TestCompileScenesExplicitOnly(t *testing.T) {
 	}
 }
 
+func TestCompileScenesSuggestsSplitForSingleFullChapterScene(t *testing.T) {
+	p, st := buildTestProjectWithChapters(t, []compileTestChapter{
+		{title: "One Long Scene", paragraphs: []string{
+			"Mara enters the archive.",
+			"The door closes behind her.",
+			"Dust gathers in the green light.",
+			"A locked drawer waits beneath the desk.",
+			"She hears footsteps in the hall.",
+			"The key warms in her hand.",
+		}},
+	})
+
+	var events []compiler.ProgressEvent
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer: compiler.LayerScenes,
+		Progress: func(event compiler.ProgressEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if result.ScenesBuilt != 1 {
+		t.Fatalf("ScenesBuilt = %d, want 1", result.ScenesBuilt)
+	}
+
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	wantMidpoint := paragraphs[len(paragraphs)/2-1].ID
+	suggestion := ""
+	for _, event := range events {
+		if event.Layer == compiler.LayerScenes && event.Stage == "suggestion" {
+			suggestion = event.Message
+			break
+		}
+	}
+	if suggestion == "" {
+		t.Fatalf("missing single-scene chapter suggestion: %#v", events)
+	}
+	for _, want := range []string{
+		"one scene spans the full chapter",
+		wantMidpoint,
+		"story compile --layer scenes --chapter ch-0001 --force",
+	} {
+		if !strings.Contains(suggestion, want) {
+			t.Fatalf("suggestion = %q, want it to contain %q", suggestion, want)
+		}
+	}
+}
 func TestCompileSceneCardsWithFakeProvider(t *testing.T) {
 	p, st := buildTestProject(t)
 
@@ -139,6 +190,167 @@ func TestCompileSceneCardsWithFakeProvider(t *testing.T) {
 	if result.CardsBuilt != 2 {
 		t.Errorf("CardsBuilt = %d, want 2", result.CardsBuilt)
 	}
+}
+
+func TestCompileSceneCardsKeepsSuccessfulFullChapterScene(t *testing.T) {
+	p, st := buildTestProjectWithChapters(t, []compileTestChapter{
+		{title: "One Long Scene", paragraphs: []string{
+			"Mara enters the archive.",
+			"The door closes behind her.",
+		}},
+	})
+
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer: compiler.LayerScenes,
+	})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
+
+	fake := &fakeProvider{response: `{"title":"Archive","summary":"Mara enters the archive.","evidence":[]}`}
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSceneCards,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile scene-cards: %v", err)
+	}
+	if result.CardsBuilt != 1 {
+		t.Fatalf("CardsBuilt = %d, want 1", result.CardsBuilt)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("Generate calls = %d, want 1", len(fake.requests))
+	}
+	cards, err := st.AllSceneCards()
+	if err != nil {
+		t.Fatalf("AllSceneCards: %v", err)
+	}
+	if len(cards) != 1 || cards[0].Title != "Archive" {
+		t.Fatalf("scene cards = %#v, want successful Archive card", cards)
+	}
+}
+
+func TestCompileSceneCardsSkipsOversizedFullChapterSceneAfterInitialFailure(t *testing.T) {
+	p, st := buildTestProjectWithChapters(t, []compileTestChapter{
+		{title: "One Long Scene", paragraphs: []string{
+			"Mara enters the archive.",
+			"The door closes behind her.",
+		}},
+	})
+
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer: compiler.LayerScenes,
+	})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
+
+	firstFake := &fakeProvider{response: `{"title":"Archive","summary":"Mara enters the archive.","evidence":[]}`}
+	first, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSceneCards,
+		ExtractionProvider: firstFake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile initial scene-card: %v", err)
+	}
+	if first.CardsBuilt != 1 {
+		t.Fatalf("initial CardsBuilt = %d, want 1", first.CardsBuilt)
+	}
+
+	p.Config.Compile.TargetContextTokens = 1
+	fake := &fakeProvider{response: `{"title":"Bad","summary":"Bad citations.","evidence":["p-NONEXISTENT"]}`}
+	var events []compiler.ProgressEvent
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSceneCards,
+		Force:              true,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+		Progress: func(event compiler.ProgressEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile scene-cards: %v", err)
+	}
+	if result.CardsBuilt != 0 {
+		t.Fatalf("CardsBuilt = %d, want 0", result.CardsBuilt)
+	}
+	if result.SceneCardRecoveries != 0 {
+		t.Fatalf("SceneCardRecoveries = %d, want 0", result.SceneCardRecoveries)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("Generate calls = %d, want 1", len(fake.requests))
+	}
+	cards, err := st.AllSceneCards()
+	if err != nil {
+		t.Fatalf("AllSceneCards: %v", err)
+	}
+	if len(cards) != 0 {
+		t.Fatalf("scene cards = %d, want 0", len(cards))
+	}
+	if !progressEventsContain(events, compiler.LayerSceneCards, "item-start", "trying once without retry/fallback") {
+		t.Fatalf("progress events missing oversized one-shot notice: %#v", events)
+	}
+	if !progressEventsContain(events, compiler.LayerSceneCards, "item-skip", "skipped after initial failure") {
+		t.Fatalf("progress events missing full-chapter failure skip: %#v", events)
+	}
+	scenesJSONL, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, "scenes.jsonl")))
+	if err != nil {
+		t.Fatalf("read scenes.jsonl: %v", err)
+	}
+	if !strings.Contains(string(scenesJSONL), `"status":"skipped"`) || !strings.Contains(string(scenesJSONL), `"action":"skipped"`) {
+		t.Fatalf("scenes.jsonl missing skipped scene-card marker:\n%s", scenesJSONL)
+	}
+}
+
+func TestCompileReportsSceneCardProgress(t *testing.T) {
+	p, st := buildTestProject(t)
+
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer: compiler.LayerScenes,
+	})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
+
+	fake := &fakeProvider{response: `{"title":"Mara walks","summary":"Mara walks the road.","evidence":[]}`}
+	var events []compiler.ProgressEvent
+	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSceneCards,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+		Progress: func(event compiler.ProgressEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile scene-cards: %v", err)
+	}
+
+	for _, want := range []struct {
+		stage string
+		text  string
+	}{
+		{stage: "layer-start", text: "Scene cards: starting"},
+		{stage: "item-start", text: "extracting from"},
+		{stage: "item-complete", text: "completed"},
+		{stage: "layer-complete", text: "Scene cards: completed"},
+	} {
+		if !progressEventsContain(events, compiler.LayerSceneCards, want.stage, want.text) {
+			t.Fatalf("progress events missing %s/%q: %#v", want.stage, want.text, events)
+		}
+	}
+}
+
+func progressEventsContain(events []compiler.ProgressEvent, layer, stage, text string) bool {
+	for _, event := range events {
+		if event.Layer == layer && event.Stage == stage && strings.Contains(event.Message, text) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCompileSceneCardsRecoversInvalidEvidence(t *testing.T) {

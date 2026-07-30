@@ -28,7 +28,7 @@ func ExtractSceneCardForTest(
 		MaxOutputTokens: 3000,
 		Temperature:     0.1,
 	}
-	return extractSceneCard(context.Background(), nil, scene, paragraphs, prov, model, cfg, nil, SceneCardFailurePolicyRetryFallback)
+	return extractSceneCard(context.Background(), nil, scene, paragraphs, prov, model, cfg, nil, SceneCardFailurePolicyRetryFallback, false, nil)
 }
 
 // ExtractSceneCardStrictForTest exercises extractSceneCard with strict failure behavior.
@@ -43,5 +43,5 @@ func ExtractSceneCardStrictForTest(
 		MaxOutputTokens: 3000,
 		Temperature:     0.1,
 	}
-	return extractSceneCard(context.Background(), nil, scene, paragraphs, prov, model, cfg, nil, SceneCardFailurePolicyStrict)
+	return extractSceneCard(context.Background(), nil, scene, paragraphs, prov, model, cfg, nil, SceneCardFailurePolicyStrict, false, nil)
 }

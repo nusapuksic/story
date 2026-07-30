@@ -3,6 +3,16 @@ A local-first Go CLI that compiles a fiction manuscript into a layered, source-a
 
 The authoritative specification is [docs/cli-spec.md](docs/cli-spec.md).
 
+## Usage Cycle
+
+The basic loop is: 
+- initialize a project folder, 
+- import a Markdown manuscript, 
+- compile generated artifacts from the canonical manuscript, then 
+- search and ask questions against those artifacts.
+
+After import, edit the canonical files inside the project `manuscript/` folder. When you change the manuscript, rebuild the index and regenerate the affected artifacts before relying on search or answers again. 
+
 ## Releases
 
 Prebuilt release archives are published on the [GitHub Releases](https://github.com/nusapuksic/story/releases) page.
@@ -313,7 +323,35 @@ For a continuous manuscript with a title page, dedication, notes, or other front
 
 The SQLite index at `.story/index.sqlite` is a rebuildable projection of the canonical project files; deleting it never loses data (`story index rebuild` reconstructs it).
 
-`story compile` builds the story model from the canonical manuscript in layers: `scenes`, `scene-cards`, optional `verification`, `summaries`, and `entities`. Entity extraction uses existing summaries and scene cards as orientation when available, while paragraph excerpts remain the only evidence for mentions. Scene-card extraction retries invalid model citations once, retries timed-out scene-card calls with a compact evidence packet, then writes a simple valid fallback card instead of stopping the whole compile; use `--strict-extraction` or `[compile].scene_card_failure_policy = "strict"` for developer/debug runs. Recovered scene cards are listed in compile output, `story compile status`, and `.story/runs/<run-id>/summary.json`; fallback cards are marked as regeneration recommended and can be regenerated with `story compile --layer scene-cards --chapter <chapter-id> --force`. `scenes` can run from explicit manuscript scene breaks without an LLM; model-assisted scene detection and the other compile layers require configured LLM roles (see `docs/cli-spec.md`).
+`story compile` builds the story model from the canonical manuscript in layers: `scenes`, `scene-cards`, optional `verification`, `summaries`, and `entities`. Normal terminal runs print live progress by layer, chapter, and long-running scene-card/summary/entity/verification calls. Entity extraction uses existing summaries and scene cards as orientation when available, while paragraph excerpts remain the only evidence for mentions. Scene-card extraction retries invalid model citations once, retries timed-out scene-card calls with a compact evidence packet, then writes a simple valid fallback card instead of stopping the whole compile. Oversized full-chapter scenes get one scene-card attempt; successful cards are kept, but failed first attempts are marked skipped instead of retried or replaced with fallback cards. Use `--strict-extraction` or `[compile].scene_card_failure_policy = "strict"` for developer/debug runs. Recovered scene cards are listed in compile output, `story compile status`, and `.story/runs/<run-id>/summary.json`; fallback cards are marked as regeneration recommended and can be regenerated with `story compile --layer scene-cards --chapter <chapter-id> --force`. If scene detection leaves a long chapter as one full-chapter scene, compile progress and `story compile status` suggest adding an explicit scene break. `scenes` can run from explicit manuscript scene breaks without an LLM; model-assisted scene detection and the other compile layers require configured LLM roles (see `docs/cli-spec.md`).
+
+## Editing the Manuscript
+
+To split a one-scene chapter, edit the canonical chapter file under the project `manuscript/` folder, not the backup under `source/original/` and not generated files under `model/` or `.story/`. The exact path is listed in `manuscript/toc.toml`; for chapter `ch-0007` it is usually `manuscript/chapters/ch-0007.md`. Insert a configured scene break marker, such as `***`, on its own line between paragraphs, with blank lines around it:
+
+```markdown
+A paragraph before the new scene break.
+
+***
+
+A paragraph after the new scene break.
+```
+
+After saving the chapter file, refresh the index and rebuild the affected generated records:
+
+```bash
+story index rebuild
+story compile --layer scenes --chapter ch-0007 --force
+story compile --layer scene-cards --chapter ch-0007 --force
+```
+
+If verification is enabled for your project, refresh verification for the affected chapter too:
+
+```bash
+story compile --layer verification --chapter ch-0007 --force
+```
+
+If you changed prose as well as scene breaks, also regenerate the chapter summary and entity mentions for that chapter with `story compile --layer summaries --chapter ch-0007 --force` and `story compile --layer entities --chapter ch-0007 --force`.
 
 `story search` runs full-text search over indexed paragraphs and scene cards. The FTS index is populated during indexing; run `story index rebuild` to refresh it.
 

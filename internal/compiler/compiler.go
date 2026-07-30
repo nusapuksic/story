@@ -24,6 +24,8 @@ const (
 	LayerSummaries    = "summaries"
 )
 
+const minParagraphsForSingleSceneSplitSuggestion = 6
+
 // Options controls a compilation run.
 type Options struct {
 	// Layer restricts compilation to a single layer.
@@ -36,6 +38,8 @@ type Options struct {
 	// SceneCardFailurePolicy controls recovery from invalid scene-card model output.
 	// Empty string uses [compile].scene_card_failure_policy, defaulting to retry-fallback.
 	SceneCardFailurePolicy string
+	// Progress receives optional compile progress events. Nil disables reporting.
+	Progress ProgressFunc
 	// ExtractionProvider is the LLM provider for extraction tasks.
 	// May be nil for explicit-only scene detection.
 	ExtractionProvider provider.Provider
@@ -45,6 +49,30 @@ type Options struct {
 	VerificationProvider provider.Provider
 	// VerificationModel is the model to use for verification calls.
 	VerificationModel string
+}
+
+// ProgressFunc receives structured progress updates during compile.
+type ProgressFunc func(ProgressEvent)
+
+// ProgressEvent describes a human-readable compile progress update.
+type ProgressEvent struct {
+	Layer     string `json:"layer,omitempty"`
+	Stage     string `json:"stage,omitempty"`
+	ChapterID string `json:"chapter_id,omitempty"`
+	SceneID   string `json:"scene_id,omitempty"`
+	Current   int    `json:"current,omitempty"`
+	Total     int    `json:"total,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+func reportProgress(opts Options, event ProgressEvent) {
+	emitProgress(opts.Progress, event)
+}
+
+func emitProgress(progress ProgressFunc, event ProgressEvent) {
+	if progress != nil {
+		progress(event)
+	}
 }
 
 // SceneCardRecoveryEvent identifies a scene card that needed extraction recovery.
@@ -141,18 +169,26 @@ func runLayers(
 	if len(chapters) == 0 {
 		return 0, 0, nil, 0, 0, 0, nil
 	}
+	reportProgress(opts, ProgressEvent{
+		Stage:   "run-start",
+		Total:   len(chapters),
+		Message: fmt.Sprintf("Compile: %d chapter(s) selected", len(chapters)),
+	})
 
 	// Scenes layer (Layer 2).
 	if opts.Layer == "" || opts.Layer == LayerScenes {
+		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "layer-start", Total: len(chapters), Message: "Scenes: starting"})
 		n, err := compileScenes(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
 			return 0, 0, nil, 0, 0, 0, err
 		}
 		scenesBuilt = n
+		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Scenes: completed (%d built)", n)})
 	}
 
 	// Scene-cards layer (Layer 3).
 	if opts.Layer == "" || opts.Layer == LayerSceneCards {
+		reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "layer-start", Total: len(chapters), Message: "Scene cards: starting"})
 		if opts.ExtractionProvider == nil {
 			return scenesBuilt, 0, nil, 0, 0, 0, errors.New(
 				"no LLM provider configured: scene cards require an extraction provider; " +
@@ -164,10 +200,12 @@ func runLayers(
 		}
 		cardsBuilt = n
 		sceneCardRecoveryEvents = recoveryEvents
+		reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Scene cards: completed (%d built, %d recovered)", n, len(recoveryEvents))})
 	}
 
 	// Verification layer verifies generated factual records when enabled.
 	if opts.Layer == LayerVerification || (opts.Layer == "" && p.Config.Compile.Verification) {
+		reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "layer-start", Total: len(chapters), Message: "Verification: starting"})
 		if opts.VerificationProvider == nil {
 			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, 0, 0, errors.New(
 				"no LLM provider configured: verification requires a verification provider; " +
@@ -178,10 +216,12 @@ func runLayers(
 			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, 0, 0, err
 		}
 		verificationsBuilt = n
+		reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Verification: completed (%d built)", n)})
 	}
 
 	// Summaries layer.
 	if opts.Layer == "" || opts.Layer == LayerSummaries {
+		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "layer-start", Total: len(chapters), Message: "Summaries: starting"})
 		if opts.ExtractionProvider == nil {
 			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, 0, errors.New(
 				"no LLM provider configured: summaries require an extraction provider; " +
@@ -192,10 +232,12 @@ func runLayers(
 			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, 0, err
 		}
 		summariesBuilt = n
+		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Summaries: completed (%d built)", n)})
 	}
 
 	// Entities layer.
 	if opts.Layer == "" || opts.Layer == LayerEntities {
+		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "layer-start", Total: len(chapters), Message: "Entities: starting"})
 		if opts.ExtractionProvider == nil {
 			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, 0, verificationsBuilt, summariesBuilt, errors.New(
 				"no LLM provider configured: entities require an extraction provider; " +
@@ -206,6 +248,7 @@ func runLayers(
 			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, 0, verificationsBuilt, summariesBuilt, err
 		}
 		entitiesBuilt = n
+		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Entities: completed (%d built)", n)})
 	}
 
 	return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, nil
@@ -241,7 +284,8 @@ func compileScenes(
 	defer scenesFile.Close()
 
 	total := 0
-	for _, ch := range chapters {
+	for chapterIndex, ch := range chapters {
+		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-start", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Scenes %s (%d/%d): preparing", ch.ID, chapterIndex+1, len(chapters))})
 		if opts.Force {
 			// --force: delete existing scenes (including snapshot marker) and recompute.
 			if err := st.DeleteScenesForChapter(ch.ID); err != nil {
@@ -254,6 +298,7 @@ func compileScenes(
 			}
 			if committed {
 				// A complete, validated snapshot already exists; skip this chapter.
+				reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Scenes %s (%d/%d): already current", ch.ID, chapterIndex+1, len(chapters))})
 				continue
 			}
 			// No committed snapshot: a previous run may have left partial scenes.
@@ -273,6 +318,7 @@ func compileScenes(
 			return total, err
 		}
 
+		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-running", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Scenes %s (%d/%d): detecting boundaries across %d paragraph(s)", ch.ID, chapterIndex+1, len(chapters), len(paragraphs))})
 		scenes, err := detectScenes(ctx, p, ch, paragraphs, nil, breakOrdinals,
 			opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 		if err != nil {
@@ -319,6 +365,10 @@ func compileScenes(
 		if err := st.MarkChapterSnapshotCommitted(ch.ID, committedAt); err != nil {
 			return total, err
 		}
+		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-complete", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Scenes %s (%d/%d): built %d scene(s)", ch.ID, chapterIndex+1, len(chapters), len(scenes))})
+		if shouldSuggestSingleSceneChapterSplit(scenes, paragraphs) {
+			reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "suggestion", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: singleSceneChapterSplitSuggestion(ch.ID, paragraphs)})
+		}
 	}
 	return total, nil
 }
@@ -347,7 +397,7 @@ func compileSceneCards(
 
 	total := 0
 	recoveries := []SceneCardRecoveryEvent{}
-	for _, ch := range chapters {
+	for chapterIndex, ch := range chapters {
 		scenes, err := st.ScenesByChapter(ch.ID)
 		if err != nil {
 			return total, recoveries, err
@@ -355,6 +405,7 @@ func compileSceneCards(
 		if len(scenes) == 0 {
 			return total, recoveries, fmt.Errorf("no scenes found for chapter %s; run 'story compile --layer scenes' first", ch.ID)
 		}
+		reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "chapter-start", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Scene cards %s (%d/%d): processing %d scene(s)", ch.ID, chapterIndex+1, len(chapters), len(scenes))})
 
 		paragraphs, err := st.ParagraphsByChapter(ch.ID)
 		if err != nil {
@@ -365,10 +416,11 @@ func compileSceneCards(
 			paraByID[pp.ID] = pp
 		}
 
-		for _, sc := range scenes {
+		for sceneIndex, sc := range scenes {
 			if !opts.Force {
 				if _, err := st.InspectSceneCard(sc.ID); err == nil {
 					// Already extracted.
+					reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-skip", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: already exists", sc.ID, sceneIndex+1, len(scenes))})
 					continue
 				}
 			}
@@ -377,10 +429,26 @@ func compileSceneCards(
 			if len(sceneParagraphs) == 0 {
 				return total, recoveries, fmt.Errorf("collect scene-card context for %s: no paragraphs found from %q to %q", sc.ID, sc.ParagraphStart, sc.ParagraphEnd)
 			}
+			skipRecoveryOnFailure, promptTokens := sceneCardSkipsRecoveryOnInitialFailure(sc, paragraphs, sceneParagraphs, cfg)
+			if skipRecoveryOnFailure {
+				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-start", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: full-chapter oversized prompt (~%d tokens); trying once without retry/fallback", sc.ID, sceneIndex+1, len(scenes), promptTokens)})
+			} else {
+				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-start", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: extracting from %d paragraph(s)", sc.ID, sceneIndex+1, len(scenes), len(sceneParagraphs))})
+			}
 			card, err := extractSceneCard(ctx, p, sc, sceneParagraphs,
-				opts.ExtractionProvider, opts.ExtractionModel, cfg, run, policy)
+				opts.ExtractionProvider, opts.ExtractionModel, cfg, run, policy, skipRecoveryOnFailure, opts.Progress)
 			if err != nil {
 				return total, recoveries, fmt.Errorf("extract scene card for %s: %w", sc.ID, err)
+			}
+			if card.Status == SceneCardStatusSkipped {
+				if err := appendJSONL(scenesFile, card); err != nil {
+					return total, recoveries, err
+				}
+				if err := st.DeleteSceneCard(sc.ID); err != nil {
+					return total, recoveries, err
+				}
+				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-skip", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: skipped after initial failure for oversized full-chapter scene", sc.ID, sceneIndex+1, len(scenes))})
+				continue
 			}
 
 			row := store.SceneCardRow{
@@ -410,11 +478,55 @@ func compileSceneCards(
 					Attempts:  card.Recovery.Attempts,
 					Reason:    card.Recovery.Reason,
 				})
+				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-complete", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: completed with %s recovery", sc.ID, sceneIndex+1, len(scenes), card.Recovery.Action)})
+			} else {
+				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-complete", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: completed", sc.ID, sceneIndex+1, len(scenes))})
 			}
 			total++
 		}
 	}
 	return total, recoveries, nil
+}
+
+func sceneCardSkipsRecoveryOnInitialFailure(scene store.SceneRow, chapterParagraphs, sceneParagraphs []store.ParagraphRow, cfg sceneDetectConfig) (bool, int) {
+	promptTokens := approxTokens(buildSceneCardPrompt(scene, sceneParagraphs))
+	if !sceneSpansFullChapter(scene, chapterParagraphs) {
+		return false, promptTokens
+	}
+	targetTokens := cfg.TargetContextTokens
+	if targetTokens <= 0 {
+		targetTokens = 12000
+	}
+	return promptTokens > targetTokens, promptTokens
+}
+
+func sceneSpansFullChapter(scene store.SceneRow, paragraphs []store.ParagraphRow) bool {
+	if len(paragraphs) == 0 {
+		return false
+	}
+	return scene.ParagraphStart == paragraphs[0].ID && scene.ParagraphEnd == paragraphs[len(paragraphs)-1].ID
+}
+
+func shouldSuggestSingleSceneChapterSplit(scenes []SceneRecord, paragraphs []store.ParagraphRow) bool {
+	if len(scenes) != 1 || len(paragraphs) < minParagraphsForSingleSceneSplitSuggestion {
+		return false
+	}
+	return scenes[0].ParagraphStart == paragraphs[0].ID && scenes[0].ParagraphEnd == paragraphs[len(paragraphs)-1].ID
+}
+
+func singleSceneChapterSplitSuggestion(chapterID string, paragraphs []store.ParagraphRow) string {
+	breakAfter := suggestedMidpointBreakAfterParagraph(paragraphs)
+	if breakAfter == "" {
+		return fmt.Sprintf("Scenes %s: one scene spans the full chapter; consider adding an explicit scene break and rerun: story compile --layer scenes --chapter %s --force", chapterID, chapterID)
+	}
+	return fmt.Sprintf("Scenes %s: one scene spans the full chapter; consider adding an explicit scene break near the midpoint, for example after paragraph %s, then rerun: story compile --layer scenes --chapter %s --force", chapterID, breakAfter, chapterID)
+}
+
+func suggestedMidpointBreakAfterParagraph(paragraphs []store.ParagraphRow) string {
+	if len(paragraphs) < 2 {
+		return ""
+	}
+	return paragraphs[len(paragraphs)/2-1].ID
 }
 
 // paragraphsInScene returns the ordered subset of paragraphs belonging to a

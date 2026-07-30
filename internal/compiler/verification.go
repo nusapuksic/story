@@ -53,17 +53,19 @@ func compileVerification(
 	defer scenesFile.Close()
 
 	total := 0
-	for _, ch := range chapters {
+	for chapterIndex, ch := range chapters {
 		scenes, err := st.ScenesByChapter(ch.ID)
 		if err != nil {
 			return total, err
 		}
 		if len(scenes) == 0 {
+			reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Verification %s (%d/%d): no scenes", ch.ID, chapterIndex+1, len(chapters))})
 			continue
 		}
+		reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "chapter-start", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Verification %s (%d/%d): checking %d scene(s)", ch.ID, chapterIndex+1, len(chapters), len(scenes))})
 
 		cardsSeen := 0
-		for _, sc := range scenes {
+		for sceneIndex, sc := range scenes {
 			card, err := st.InspectSceneCard(sc.ID)
 			if errors.Is(err, store.ErrNotFound) {
 				continue
@@ -73,6 +75,7 @@ func compileVerification(
 			}
 			cardsSeen++
 			if !opts.Force && isVerifiedSceneCardStatus(card.Status) {
+				reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-skip", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Verification %s %d/%d: already verified", sc.ID, sceneIndex+1, len(scenes))})
 				continue
 			}
 
@@ -80,6 +83,7 @@ func compileVerification(
 			if err != nil {
 				return total, err
 			}
+			reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-start", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Verification %s %d/%d: verifying scene card", sc.ID, sceneIndex+1, len(scenes))})
 			verification, err := verifySceneCard(ctx, p, sceneCardRecordFromRow(card), evidenceParagraphs,
 				opts.VerificationProvider, opts.VerificationModel, cfg, run)
 			if err != nil {
@@ -108,6 +112,7 @@ func compileVerification(
 				return total, err
 			}
 			total++
+			reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-complete", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Verification %s %d/%d: completed (%s)", sc.ID, sceneIndex+1, len(scenes), updated.Status)})
 		}
 		if opts.Layer == LayerVerification && cardsSeen == 0 {
 			return total, fmt.Errorf("no scene cards found for chapter %s; run 'story compile --layer scene-cards' first", ch.ID)
