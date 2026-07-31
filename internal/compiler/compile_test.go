@@ -84,6 +84,8 @@ func TestCompileScenesExplicitOnly(t *testing.T) {
 	if result.ScenesBuilt != 2 {
 		t.Errorf("ScenesBuilt = %d, want 2 (one scene per explicit break + chapter end)", result.ScenesBuilt)
 	}
+	assertRunPendingFiles(t, p, result.RunID, compiler.LayerScenes, 1)
+	assertRunCommitLogSequences(t, p, result.RunID, compiler.LayerScenes, []int{0})
 
 	scenes, err := st.AllScenes()
 	if err != nil {

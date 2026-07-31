@@ -332,100 +332,148 @@ func compileScenes(
 	cfg sceneDetectConfig,
 	run *Run,
 ) (int, error) {
+	staging, err := optionalRunStagingStore(run)
+	if err != nil {
+		return 0, err
+	}
 	scenesFile, err := openAppendJSONL(p.Path(filepath.Join(project.ModelDir, "scenes.jsonl")))
 	if err != nil {
 		return 0, err
 	}
 	defer scenesFile.Close()
 
-	total := 0
+	items := make([]OrderedWorkItem[sceneWorkInput], 0, len(chapters))
 	for chapterIndex, ch := range chapters {
 		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-start", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Scenes %s (%d/%d): preparing", ch.ID, chapterIndex+1, len(chapters))})
-		if opts.Force {
-			// --force: delete existing scenes (including snapshot marker) and recompute.
-			if err := st.DeleteScenesForChapter(ch.ID); err != nil {
-				return total, err
-			}
-		} else {
+		if !opts.Force {
 			committed, err := st.IsChapterSnapshotCommitted(ch.ID)
 			if err != nil {
-				return total, err
+				return 0, err
 			}
 			if committed {
 				// A complete, validated snapshot already exists; skip this chapter.
 				reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Scenes %s (%d/%d): already current", ch.ID, chapterIndex+1, len(chapters))})
 				continue
 			}
-			// No committed snapshot: a previous run may have left partial scenes.
-			// Discard them so detection starts fresh.
-			if err := st.DeleteScenesForChapter(ch.ID); err != nil {
-				return total, err
-			}
 		}
 
 		paragraphs, err := st.ParagraphsByChapter(ch.ID)
 		if err != nil {
-			return total, err
+			return 0, err
 		}
-
 		breakOrdinals, err := st.SceneBreakOrdinals(ch.ID)
 		if err != nil {
-			return total, err
+			return 0, err
 		}
+		items = append(items, OrderedWorkItem[sceneWorkInput]{
+			Sequence: len(items),
+			TaskID:   ch.ID,
+			Input: sceneWorkInput{
+				Chapter:       ch,
+				ChapterIndex:  chapterIndex,
+				ChapterTotal:  len(chapters),
+				Paragraphs:    paragraphs,
+				BreakOrdinals: breakOrdinals,
+			},
+		})
+	}
 
-		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-running", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Scenes %s (%d/%d): detecting boundaries across %d paragraph(s)", ch.ID, chapterIndex+1, len(chapters), len(paragraphs))})
-		scenes, err := detectScenes(ctx, p, ch, paragraphs, nil, breakOrdinals,
+	total := 0
+	err = RunOrderedWork(ctx, items, OrderedExecutorOptions{WorkerLimit: 1}, func(ctx context.Context, item OrderedWorkItem[sceneWorkInput]) (sceneWorkOutput, error) {
+		input := item.Input
+		scenes, err := detectScenes(ctx, p, input.Chapter, input.Paragraphs, nil, input.BreakOrdinals,
 			opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 		if err != nil {
-			return total, fmt.Errorf("detect scenes for chapter %s: %w", ch.ID, err)
+			return sceneWorkOutput{}, fmt.Errorf("detect scenes for chapter %s: %w", input.Chapter.ID, err)
 		}
-
 		// Validate the detected scenes form a complete partition before committing.
-		if err := ValidateScenePartition(paragraphs, scenes); err != nil {
-			return total, fmt.Errorf("scene partition invalid for chapter %s: %w", ch.ID, err)
+		if err := ValidateScenePartition(input.Paragraphs, scenes); err != nil {
+			return sceneWorkOutput{}, fmt.Errorf("scene partition invalid for chapter %s: %w", input.Chapter.ID, err)
 		}
-
-		for _, sc := range scenes {
-			row := store.SceneRow{
-				ID:             sc.ID,
-				ChapterID:      sc.ChapterID,
-				ParagraphStart: sc.ParagraphStart,
-				ParagraphEnd:   sc.ParagraphEnd,
-				Ordinal:        sc.Ordinal,
-				BoundarySource: sc.BoundarySource,
-				Status:         sc.Status,
+		output := sceneWorkOutput{
+			Input:  input,
+			Scenes: scenes,
+			Snapshot: ChapterSnapshotRecord{
+				RecordType:  "chapter_snapshot",
+				ChapterID:   input.Chapter.ID,
+				SceneCount:  len(scenes),
+				CommittedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		}
+		if staging != nil {
+			ref, err := stageScenesWorkResult(staging, item.Sequence, output)
+			if err != nil {
+				return sceneWorkOutput{}, err
 			}
-			if err := st.InsertScene(row); err != nil {
-				return total, err
+			output.Staged = ref
+		}
+		return output, nil
+	}, func(ctx context.Context, result OrderedWorkResult[sceneWorkOutput]) error {
+		output := result.Output
+		input := output.Input
+		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-running", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Scenes %s (%d/%d): detecting boundaries across %d paragraph(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(input.Paragraphs))})
+
+		// --force and uncommitted partial snapshots both start from a clean chapter.
+		if err := st.DeleteScenesForChapter(input.Chapter.ID); err != nil {
+			return err
+		}
+		for _, sc := range output.Scenes {
+			if err := st.InsertScene(sceneRowFromRecord(sc)); err != nil {
+				return err
 			}
 			if err := appendJSONL(scenesFile, sc); err != nil {
-				return total, err
+				return err
 			}
 			total++
 		}
-
-		// Explicitly commit the snapshot: append a chapter_snapshot record to the
-		// JSONL and mark the chapter as committed in the store.  Both writes must
-		// succeed for the snapshot to be considered complete.
-		committedAt := time.Now().UTC().Format(time.RFC3339)
-		snap := ChapterSnapshotRecord{
-			RecordType:  "chapter_snapshot",
-			ChapterID:   ch.ID,
-			SceneCount:  len(scenes),
-			CommittedAt: committedAt,
+		if err := appendJSONL(scenesFile, output.Snapshot); err != nil {
+			return fmt.Errorf("write chapter_snapshot for %s: %w", input.Chapter.ID, err)
 		}
-		if err := appendJSONL(scenesFile, snap); err != nil {
-			return total, fmt.Errorf("write chapter_snapshot for %s: %w", ch.ID, err)
+		if err := st.MarkChapterSnapshotCommitted(input.Chapter.ID, output.Snapshot.CommittedAt); err != nil {
+			return err
 		}
-		if err := st.MarkChapterSnapshotCommitted(ch.ID, committedAt); err != nil {
-			return total, err
+		if staging != nil {
+			if err := staging.RecordCommit(output.Staged); err != nil {
+				return err
+			}
 		}
-		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-complete", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Scenes %s (%d/%d): built %d scene(s)", ch.ID, chapterIndex+1, len(chapters), len(scenes))})
-		if shouldSuggestSingleSceneChapterSplit(scenes, paragraphs) {
-			reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "suggestion", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: singleSceneChapterSplitSuggestion(ch.ID, paragraphs)})
+		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-complete", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Scenes %s (%d/%d): built %d scene(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(output.Scenes))})
+		if shouldSuggestSingleSceneChapterSplit(output.Scenes, input.Paragraphs) {
+			reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "suggestion", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: singleSceneChapterSplitSuggestion(input.Chapter.ID, input.Paragraphs)})
 		}
+		return nil
+	})
+	if err != nil {
+		return total, err
 	}
 	return total, nil
+}
+
+func sceneRowFromRecord(sc SceneRecord) store.SceneRow {
+	return store.SceneRow{
+		ID:             sc.ID,
+		ChapterID:      sc.ChapterID,
+		ParagraphStart: sc.ParagraphStart,
+		ParagraphEnd:   sc.ParagraphEnd,
+		Ordinal:        sc.Ordinal,
+		BoundarySource: sc.BoundarySource,
+		Status:         sc.Status,
+	}
+}
+
+func stageScenesWorkResult(staging *RunStagingStore, sequence int, output sceneWorkOutput) (StagedResultRef, error) {
+	if staging == nil {
+		return StagedResultRef{}, nil
+	}
+	return staging.StageJSON(LayerScenes, StagedResultMeta{
+		Sequence:      sequence,
+		TaskID:        output.Input.Chapter.ID,
+		TargetID:      output.Input.Chapter.ID,
+		SchemaVersion: 1,
+	}, stagedScenesPayload{
+		Scenes:   output.Scenes,
+		Snapshot: output.Snapshot,
+	})
 }
 
 // compileSceneCards runs scene card extraction for all scenes in the requested

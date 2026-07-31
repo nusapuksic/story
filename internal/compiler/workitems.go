@@ -2,6 +2,26 @@ package compiler
 
 import "github.com/nusapuksic/story/internal/store"
 
+type sceneWorkInput struct {
+	Chapter       store.ChapterRow
+	ChapterIndex  int
+	ChapterTotal  int
+	Paragraphs    []store.ParagraphRow
+	BreakOrdinals []int
+}
+
+type sceneWorkOutput struct {
+	Input    sceneWorkInput
+	Scenes   []SceneRecord
+	Snapshot ChapterSnapshotRecord
+	Staged   StagedResultRef
+}
+
+type stagedScenesPayload struct {
+	Scenes   []SceneRecord         `json:"scenes"`
+	Snapshot ChapterSnapshotRecord `json:"snapshot"`
+}
+
 type sceneCardWorkInput struct {
 	ChapterID             string
 	ChapterIndex          int
