@@ -430,12 +430,9 @@ func generateSceneCardAttempt(
 		JSONMode:    true,
 	}
 
-	resp, err := prov.Generate(ctx, req)
-	if run != nil {
-		_ = run.saveRawResponse(taskID, resp)
-	}
+	resp, timing, err := generateWithAudit(ctx, run, taskID, prov, req)
 	if err != nil {
-		recordSceneCardTask(run, taskID, sceneID, taskType, TaskStatusFailed, loadedPrompt.Version, err.Error())
+		recordSceneCardTask(run, taskID, sceneID, taskType, TaskStatusFailed, loadedPrompt.Version, err.Error(), timing)
 		return nil, nil, fmt.Errorf("scene card LLM call for scene %s: %w", sceneID, err)
 	}
 
@@ -446,15 +443,15 @@ func generateSceneCardAttempt(
 		status = TaskStatusFailed
 		errMsg = parseErr.Error()
 	}
-	recordSceneCardTask(run, taskID, sceneID, taskType, status, loadedPrompt.Version, errMsg)
+	recordSceneCardTask(run, taskID, sceneID, taskType, status, loadedPrompt.Version, errMsg, timing)
 	return card, parseErr, nil
 }
 
-func recordSceneCardTask(run *Run, taskID, sceneID, taskType, status, promptVersion, errMsg string) {
+func recordSceneCardTask(run *Run, taskID, sceneID, taskType, status, promptVersion, errMsg string, timings ...taskTiming) {
 	if run == nil {
 		return
 	}
-	_ = run.recordTask(TaskRecord{
+	record := TaskRecord{
 		TaskID:        taskID,
 		RunID:         runID(run),
 		TaskType:      taskType,
@@ -462,7 +459,11 @@ func recordSceneCardTask(run *Run, taskID, sceneID, taskType, status, promptVers
 		Status:        status,
 		PromptVersion: promptVersion,
 		Error:         errMsg,
-	})
+	}
+	if len(timings) > 0 {
+		timings[0].applyTo(&record)
+	}
+	_ = run.recordTask(record)
 }
 
 func recordSceneCardFallbackTask(run *Run, sceneID, promptVersion, reason string) {

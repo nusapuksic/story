@@ -538,6 +538,7 @@ func TestCompileAllRunsSummariesBeforeEntities(t *testing.T) {
 	p, st := buildTestProject(t)
 	p.Config.Compile.SceneDetection = "explicit"
 	p.Config.Compile.Verification = false
+	p.Config.Compile.VerificationMode = compiler.VerificationModeOff
 
 	paragraphs, err := st.ParagraphsByChapter("ch-0001")
 	if err != nil {
@@ -1303,9 +1304,43 @@ func TestCompileWritesResponseAudit(t *testing.T) {
 		`"output_tokens":202`,
 		`"content_bytes":0`,
 		`"content_empty":true`,
+		`"started_at":`,
+		`"finished_at":`,
 	} {
 		if !strings.Contains(string(tasks), want) {
 			t.Fatalf("tasks missing %s:\n%s", want, tasks)
+		}
+	}
+
+	firstTaskLine := strings.Split(strings.TrimSpace(string(tasks)), "\n")[0]
+	var task compiler.TaskRecord
+	if err := json.Unmarshal([]byte(firstTaskLine), &task); err != nil {
+		t.Fatalf("parse task record: %v", err)
+	}
+	if task.StartedAt == "" || task.FinishedAt == "" {
+		t.Fatalf("task timing missing: %#v", task)
+	}
+	if task.Response == nil {
+		t.Fatal("task response audit missing")
+	}
+
+	summaryData, err := os.ReadFile(filepath.Join(runDir, "summary.json"))
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	var summary map[string]any
+	if err := json.Unmarshal(summaryData, &summary); err != nil {
+		t.Fatalf("parse summary: %v", err)
+	}
+	for key, want := range map[string]float64{
+		"total_tasks":                       1,
+		"total_provider_calls":              1,
+		"total_prompt_tokens":               101,
+		"total_output_tokens":               202,
+		"max_observed_provider_concurrency": 1,
+	} {
+		if got, _ := summary[key].(float64); got != want {
+			t.Fatalf("summary[%s] = %v, want %v\n%s", key, summary[key], want, summaryData)
 		}
 	}
 }

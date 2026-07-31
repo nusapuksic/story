@@ -199,10 +199,7 @@ func proposeSceneBoundaries(
 			MaxTokens:   cfg.MaxOutputTokens,
 			JSONMode:    true,
 		}
-		resp, err := prov.Generate(ctx, req)
-		if run != nil {
-			_ = run.saveRawResponse(taskID, resp)
-		}
+		resp, timing, err := generateWithAudit(ctx, run, taskID, prov, req)
 		if err != nil {
 			t := TaskRecord{
 				TaskID:        taskID,
@@ -213,6 +210,7 @@ func proposeSceneBoundaries(
 				Error:         err.Error(),
 				PromptVersion: loadedPrompt.Version,
 			}
+			timing.applyTo(&t)
 			if run != nil {
 				_ = run.recordTask(t)
 			}
@@ -228,7 +226,7 @@ func proposeSceneBoundaries(
 			errMsg = parseErr.Error()
 		}
 		if run != nil {
-			_ = run.recordTask(TaskRecord{
+			t := TaskRecord{
 				TaskID:        taskID,
 				RunID:         runID(run),
 				TaskType:      "scene-boundaries",
@@ -236,7 +234,9 @@ func proposeSceneBoundaries(
 				Status:        status,
 				PromptVersion: loadedPrompt.Version,
 				Error:         errMsg,
-			})
+			}
+			timing.applyTo(&t)
+			_ = run.recordTask(t)
 		}
 		if parseErr != nil {
 			return nil, parseErr
@@ -314,7 +314,7 @@ func runID(r *Run) string {
 	if r == nil {
 		return ""
 	}
-	return r.Record.RunID
+	return r.id()
 }
 
 // DetectScenesNoLLM is an exported wrapper around detectScenes for tests.

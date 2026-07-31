@@ -205,12 +205,9 @@ func extractEntitiesForChapter(
 		MaxTokens:   cfg.MaxOutputTokens,
 		JSONMode:    true,
 	}
-	resp, err := prov.Generate(ctx, req)
-	if run != nil {
-		_ = run.saveRawResponse(taskID, resp)
-	}
+	resp, timing, err := generateWithAudit(ctx, run, taskID, prov, req)
 	if err != nil {
-		recordEntityTask(run, taskID, ch.ID, TaskStatusFailed, loadedPrompt.Version, err.Error())
+		recordEntityTask(run, taskID, ch.ID, TaskStatusFailed, loadedPrompt.Version, err.Error(), timing)
 		return nil, nil, fmt.Errorf("entity extraction LLM call for %s: %w", ch.ID, err)
 	}
 
@@ -221,7 +218,7 @@ func extractEntitiesForChapter(
 		status = TaskStatusFailed
 		errMsg = parseErr.Error()
 	}
-	recordEntityTask(run, taskID, ch.ID, status, loadedPrompt.Version, errMsg)
+	recordEntityTask(run, taskID, ch.ID, status, loadedPrompt.Version, errMsg, timing)
 	return entities, mentions, parseErr
 }
 
@@ -556,11 +553,11 @@ func normalizeEntityType(value string) string {
 	}
 }
 
-func recordEntityTask(run *Run, taskID, chapterID, status, promptVersion, errMsg string) {
+func recordEntityTask(run *Run, taskID, chapterID, status, promptVersion, errMsg string, timings ...taskTiming) {
 	if run == nil {
 		return
 	}
-	_ = run.recordTask(TaskRecord{
+	record := TaskRecord{
 		TaskID:        taskID,
 		RunID:         runID(run),
 		TaskType:      "entity-resolution",
@@ -568,5 +565,9 @@ func recordEntityTask(run *Run, taskID, chapterID, status, promptVersion, errMsg
 		PromptVersion: promptVersion,
 		Status:        status,
 		Error:         errMsg,
-	})
+	}
+	if len(timings) > 0 {
+		timings[0].applyTo(&record)
+	}
+	_ = run.recordTask(record)
 }

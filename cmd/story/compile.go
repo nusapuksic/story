@@ -86,9 +86,14 @@ func runCompile(layer, chapterID string, force, strictExtraction bool) error {
 		// clear compiler error for mandatory LLM-backed layers.
 	}
 
+	verificationMode, err := compiler.EffectiveVerificationMode(compiler.Options{}, p.Config.Compile)
+	if err != nil {
+		return err
+	}
+
 	var verifyProv provider.Provider
 	var verifyModel string
-	if compileNeedsVerificationProvider(layer, p.Config.Compile.Verification) {
+	if compileNeedsVerificationProvider(layer, verificationMode) {
 		prov, model, provErr := provider.ForRole(p.Config.LLM, "verification")
 		if provErr == nil {
 			verifyProv = prov
@@ -111,13 +116,14 @@ func runCompile(layer, chapterID string, force, strictExtraction bool) error {
 		Progress:               compileProgressPrinter(),
 		ExtractionProvider:     extractProv,
 		ExtractionModel:        extractModel,
+		VerificationMode:       verificationMode,
 		VerificationProvider:   verifyProv,
 		VerificationModel:      verifyModel,
 	}
 
 	if !flags.jsonOut {
-		info("Compiling manuscript (layer=%q, chapter=%q, force=%v, strict_extraction=%v)...",
-			layer, chapterID, force, strictExtraction)
+		info("Compiling manuscript (layer=%q, chapter=%q, force=%v, strict_extraction=%v, verification_mode=%q)...",
+			layer, chapterID, force, strictExtraction, verificationMode)
 	}
 
 	result, err := compiler.Compile(nil, p, st, opts)
@@ -315,8 +321,8 @@ func compileNeedsExtractionProvider(layer string) bool {
 	}
 }
 
-func compileNeedsVerificationProvider(layer string, verificationEnabled bool) bool {
-	return layer == compiler.LayerVerification || (layer == "" && verificationEnabled)
+func compileNeedsVerificationProvider(layer, verificationMode string) bool {
+	return layer == compiler.LayerVerification || (layer == "" && verificationMode != compiler.VerificationModeOff)
 }
 
 // newCompileStatusCmd shows the current compilation status.

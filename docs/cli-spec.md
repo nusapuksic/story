@@ -204,6 +204,7 @@ window_overlap_paragraphs = 3
 scene_detection = "hybrid"
 scene_card_failure_policy = "retry-fallback"
 verification = true
+verification_mode = "all"
 auto_accept_verified = false
 temperature = 0.1
 
@@ -916,7 +917,9 @@ Invalid model output must never be written as accepted story state. For author-f
 
 10.6 Evidence verification
 
-For every generated factual record, a verification task receives:
+During ordinary full compile, `[compile].verification_mode` selects which generated records enter the verification layer. Supported values are `off`, `recovered`, `selective`, and `all`; `all` is the default. `recovered` verifies recovered scene cards, while `selective` verifies recovered cards plus deterministic suspicious cases such as missing evidence or very short summaries. If `verification_mode` is omitted, legacy `[compile].verification = true` maps to `all` and `false` maps to `off`. `story compile --layer verification` runs the explicit verification layer over all otherwise eligible unverified records regardless of the full-compile mode.
+
+For every selected generated factual record, a verification task receives:
 
 * the proposed record;
 * the cited paragraphs;
@@ -1272,6 +1275,8 @@ completed
 failed
 skipped
 cancelled
+
+Task records include `started_at`, `finished_at`, and `duration_ms`. Raw response metadata includes finish reason, token counts, content size, empty-content status, and provider-call duration. `summary.json` includes `started_at`, `finished_at`, `wall_clock_duration_ms`, `total_tasks`, `total_provider_calls`, `total_prompt_tokens`, `total_output_tokens`, `total_provider_call_duration_ms`, `max_observed_provider_concurrency`, `task_type_counts`, `retry_tasks`, and `recovery_tasks`. Provider calls remain serial until provider parallelization is explicitly introduced; the observed-concurrency counter is audit telemetry and should remain no higher than 1 in this release.
 
 A run interrupted by process termination can resume:
 

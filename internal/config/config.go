@@ -40,6 +40,7 @@ type CompileConfig struct {
 	SceneDetection          string  `toml:"scene_detection"`
 	SceneCardFailurePolicy  string  `toml:"scene_card_failure_policy"`
 	Verification            bool    `toml:"verification"`
+	VerificationMode        string  `toml:"verification_mode"`
 	AutoAcceptVerified      bool    `toml:"auto_accept_verified"`
 	Temperature             float64 `toml:"temperature"`
 }
@@ -92,6 +93,7 @@ func Default(projectID, title, language string) Config {
 			SceneDetection:          "hybrid",
 			SceneCardFailurePolicy:  "retry-fallback",
 			Verification:            true,
+			VerificationMode:        "all",
 			AutoAcceptVerified:      false,
 			Temperature:             0.1,
 		},

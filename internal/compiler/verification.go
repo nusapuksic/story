@@ -52,6 +52,7 @@ func compileVerification(
 	}
 	defer scenesFile.Close()
 
+	mode := verificationModeForLayer(opts)
 	total := 0
 	for chapterIndex, ch := range chapters {
 		scenes, err := st.ScenesByChapter(ch.ID)
@@ -79,18 +80,24 @@ func compileVerification(
 				continue
 			}
 
+			cardRecord := sceneCardRecordFromRow(card)
+			if !shouldVerifySceneCardForMode(cardRecord, mode) {
+				reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-skip", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Verification %s %d/%d: not selected by verification_mode=%s", sc.ID, sceneIndex+1, len(scenes), mode)})
+				continue
+			}
+
 			evidenceParagraphs, err := verificationEvidenceParagraphs(st, sc, card.Evidence)
 			if err != nil {
 				return total, err
 			}
 			reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-start", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Verification %s %d/%d: verifying scene card", sc.ID, sceneIndex+1, len(scenes))})
-			verification, err := verifySceneCard(ctx, p, sceneCardRecordFromRow(card), evidenceParagraphs,
+			verification, err := verifySceneCard(ctx, p, cardRecord, evidenceParagraphs,
 				opts.VerificationProvider, opts.VerificationModel, cfg, run)
 			if err != nil {
 				return total, fmt.Errorf("verify scene card %s: %w", card.SceneID, err)
 			}
 
-			updated := sceneCardRecordFromRow(card)
+			updated := cardRecord
 			updated.Verification = &verification
 			updated.Status = verificationStatus(verification.Supported, p.Config.Compile.AutoAcceptVerified)
 			rawBytes, _ := json.Marshal(updated)
@@ -146,12 +153,9 @@ func verifySceneCard(
 		MaxTokens:   cfg.MaxOutputTokens,
 		JSONMode:    true,
 	}
-	resp, err := prov.Generate(ctx, req)
-	if run != nil {
-		_ = run.saveRawResponse(taskID, resp)
-	}
+	resp, timing, err := generateWithAudit(ctx, run, taskID, prov, req)
 	if err != nil {
-		recordVerificationTask(run, taskID, card.SceneID, TaskStatusFailed, loadedPrompt.Version, err.Error())
+		recordVerificationTask(run, taskID, card.SceneID, TaskStatusFailed, loadedPrompt.Version, err.Error(), timing)
 		return SceneCardVerification{}, fmt.Errorf("verification LLM call for scene card %s: %w", card.SceneID, err)
 	}
 	verification, parseErr := parseVerificationResponse(resp.Content, runID(run), model, loadedPrompt.Version)
@@ -161,7 +165,7 @@ func verifySceneCard(
 		status = TaskStatusFailed
 		errMsg = parseErr.Error()
 	}
-	recordVerificationTask(run, taskID, card.SceneID, status, loadedPrompt.Version, errMsg)
+	recordVerificationTask(run, taskID, card.SceneID, status, loadedPrompt.Version, errMsg, timing)
 	return verification, parseErr
 }
 
@@ -315,6 +319,56 @@ func isVerifiedSceneCardStatus(status string) bool {
 	}
 }
 
+func verificationModeForLayer(opts Options) string {
+	if opts.Layer == LayerVerification {
+		return VerificationModeAll
+	}
+	if strings.TrimSpace(opts.VerificationMode) == "" {
+		return VerificationModeAll
+	}
+	return opts.VerificationMode
+}
+
+func shouldVerifySceneCardForMode(card SceneCardRecord, mode string) bool {
+	switch mode {
+	case VerificationModeOff:
+		return false
+	case VerificationModeRecovered:
+		return isRecoveredSceneCard(card)
+	case VerificationModeSelective:
+		return isRecoveredSceneCard(card) || isSuspiciousSceneCard(card)
+	case VerificationModeAll, "":
+		return true
+	default:
+		return true
+	}
+}
+
+func isRecoveredSceneCard(card SceneCardRecord) bool {
+	if card.Recovery == nil {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(card.Recovery.Action)) {
+	case "retry", "compact-retry", "fallback":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSuspiciousSceneCard(card SceneCardRecord) bool {
+	if len(card.Evidence) == 0 {
+		return true
+	}
+	if len([]rune(strings.TrimSpace(card.Summary))) < 40 {
+		return true
+	}
+	if len(card.Participants)+len(card.Unresolved) > 16 {
+		return true
+	}
+	return false
+}
+
 func normalizeSupportLevel(value string, supported bool) string {
 	v := strings.TrimSpace(strings.ToLower(value))
 	v = strings.ReplaceAll(v, " ", "-")
@@ -342,11 +396,11 @@ func normalizeEpistemicType(value string) string {
 	return v
 }
 
-func recordVerificationTask(run *Run, taskID, sceneID, status, promptVersion, errMsg string) {
+func recordVerificationTask(run *Run, taskID, sceneID, status, promptVersion, errMsg string, timings ...taskTiming) {
 	if run == nil {
 		return
 	}
-	_ = run.recordTask(TaskRecord{
+	record := TaskRecord{
 		TaskID:        taskID,
 		RunID:         runID(run),
 		TaskType:      "record-verification",
@@ -355,5 +409,9 @@ func recordVerificationTask(run *Run, taskID, sceneID, status, promptVersion, er
 		PromptVersion: promptVersion,
 		Status:        status,
 		Error:         errMsg,
-	})
+	}
+	if len(timings) > 0 {
+		timings[0].applyTo(&record)
+	}
+	_ = run.recordTask(record)
 }

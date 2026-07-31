@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nusapuksic/story/internal/ids"
@@ -61,6 +62,9 @@ type TaskRecord struct {
 	RecordID      string         `json:"record_id,omitempty"`
 	PromptVersion string         `json:"prompt_version,omitempty"`
 	Status        string         `json:"status"`
+	StartedAt     string         `json:"started_at,omitempty"`
+	FinishedAt    string         `json:"finished_at,omitempty"`
+	DurationMS    int64          `json:"duration_ms,omitempty"`
 	Error         string         `json:"error,omitempty"`
 	Response      *ResponseAudit `json:"response,omitempty"`
 }
@@ -71,6 +75,7 @@ type ResponseAudit struct {
 	FinishReason string `json:"finish_reason,omitempty"`
 	PromptTokens int    `json:"prompt_tokens,omitempty"`
 	OutputTokens int    `json:"output_tokens,omitempty"`
+	DurationMS   int64  `json:"duration_ms,omitempty"`
 	ContentBytes int    `json:"content_bytes"`
 	ContentEmpty bool   `json:"content_empty,omitempty"`
 }
@@ -79,6 +84,62 @@ type ResponseAudit struct {
 type Run struct {
 	Record RunRecord
 	dir    string
+
+	tasksMu sync.Mutex
+	stateMu sync.Mutex
+
+	metricsMu sync.Mutex
+	metrics   runMetrics
+}
+
+type runMetrics struct {
+	TaskCount                      int
+	ProviderCalls                  int
+	PromptTokens                   int
+	OutputTokens                   int
+	ProviderCallDurationMS         int64
+	MaxObservedProviderConcurrency int
+	TaskTypeCounts                 map[string]int
+	RetryTasks                     int
+	RecoveryTasks                  int
+	activeProviderCalls            int
+}
+
+type runMetricsSnapshot struct {
+	TaskCount                      int
+	ProviderCalls                  int
+	PromptTokens                   int
+	OutputTokens                   int
+	ProviderCallDurationMS         int64
+	MaxObservedProviderConcurrency int
+	TaskTypeCounts                 map[string]int
+	RetryTasks                     int
+	RecoveryTasks                  int
+}
+
+type taskTiming struct {
+	Started  time.Time
+	Finished time.Time
+}
+
+func (t taskTiming) duration() time.Duration {
+	if t.Started.IsZero() || t.Finished.IsZero() || t.Finished.Before(t.Started) {
+		return 0
+	}
+	return t.Finished.Sub(t.Started)
+}
+
+func (t taskTiming) applyTo(record *TaskRecord) {
+	if record == nil || t.Started.IsZero() {
+		return
+	}
+	record.StartedAt = formatAuditTime(t.Started)
+	if t.Finished.IsZero() {
+		record.FinishedAt = record.StartedAt
+		return
+	}
+	record.FinishedAt = formatAuditTime(t.Finished)
+	record.DurationMS = t.duration().Milliseconds()
 }
 
 // newRun creates a run directory and writes the initial run.json.
@@ -94,12 +155,18 @@ func newRun(p *project.Project, runType, layer, chapterID string) (*Run, error) 
 	rec := RunRecord{
 		RunID:     runID,
 		RunType:   runType,
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		StartedAt: formatAuditTime(time.Now().UTC()),
 		Status:    RunStatusRunning,
 		Layer:     layer,
 		ChapterID: chapterID,
 	}
-	r := &Run{Record: rec, dir: dir}
+	r := &Run{
+		Record: rec,
+		dir:    dir,
+		metrics: runMetrics{
+			TaskTypeCounts: make(map[string]int),
+		},
+	}
 	if err := r.save(); err != nil {
 		return nil, err
 	}
@@ -108,16 +175,21 @@ func newRun(p *project.Project, runType, layer, chapterID string) (*Run, error) 
 
 // complete marks the run as completed and updates run.json.
 func (r *Run) complete() error {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
 	r.Record.Status = RunStatusCompleted
-	r.Record.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-	return r.save()
+	r.Record.FinishedAt = formatAuditTime(time.Now().UTC())
+	return r.saveLocked()
 }
 
 // fail marks the run as failed, records the error, and updates run.json.
 func (r *Run) fail(runErr error) error {
+	r.stateMu.Lock()
 	r.Record.Status = RunStatusFailed
-	r.Record.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-	if saveErr := r.save(); saveErr != nil {
+	r.Record.FinishedAt = formatAuditTime(time.Now().UTC())
+	saveErr := r.saveLocked()
+	r.stateMu.Unlock()
+	if saveErr != nil {
 		return errors.Join(runErr, saveErr)
 	}
 	errPath := filepath.Join(r.dir, "errors.jsonl")
@@ -126,35 +198,75 @@ func (r *Run) fail(runErr error) error {
 		return errors.Join(runErr, err)
 	}
 	defer f.Close()
-	json.NewEncoder(f).Encode(map[string]string{
-		"time":  time.Now().UTC().Format(time.RFC3339),
+	if err := json.NewEncoder(f).Encode(map[string]string{
+		"time":  formatAuditTime(time.Now().UTC()),
 		"error": runErr.Error(),
-	})
+	}); err != nil {
+		return errors.Join(runErr, err)
+	}
 	return runErr
 }
 
 // recordTask appends a task record to tasks.jsonl.
 func (r *Run) recordTask(t TaskRecord) error {
+	if t.RunID == "" {
+		t.RunID = r.id()
+	}
 	if t.Response == nil {
 		t.Response = r.responseAuditForTask(t.TaskID)
 	}
+	t = normalizeTaskTiming(t, time.Now().UTC())
+
 	path := filepath.Join(r.dir, "tasks.jsonl")
+	r.tasksMu.Lock()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
+		r.tasksMu.Unlock()
 		return fmt.Errorf("record task: %w", err)
 	}
-	defer f.Close()
-	return json.NewEncoder(f).Encode(t)
+	encodeErr := json.NewEncoder(f).Encode(t)
+	closeErr := f.Close()
+	r.tasksMu.Unlock()
+	if encodeErr != nil {
+		return encodeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+
+	r.recordTaskMetrics(t)
+	return nil
+}
+
+// generateWithAudit calls a provider and captures timing plus raw response metadata.
+func generateWithAudit(
+	ctx context.Context,
+	run *Run,
+	taskID string,
+	prov provider.Provider,
+	req provider.GenerationRequest,
+) (provider.GenerationResponse, taskTiming, error) {
+	timing := taskTiming{Started: time.Now().UTC()}
+	if run != nil {
+		run.beginProviderCall()
+	}
+	resp, err := prov.Generate(ctx, req)
+	timing.Finished = time.Now().UTC()
+	if run != nil {
+		run.endProviderCall()
+		_ = run.saveRawResponse(taskID, resp, timing.duration())
+	}
+	return resp, timing, err
 }
 
 // saveRawResponse writes raw model content and provider metadata under raw-responses/.
-func (r *Run) saveRawResponse(taskID string, resp provider.GenerationResponse) error {
+func (r *Run) saveRawResponse(taskID string, resp provider.GenerationResponse, duration time.Duration) error {
 	contentPath := filepath.Join(r.dir, "raw-responses", taskID+".json")
 	if err := os.WriteFile(contentPath, []byte(resp.Content), 0o644); err != nil {
 		return err
 	}
 
-	audit := newResponseAudit(resp)
+	audit := newResponseAudit(resp, duration)
 	data, err := json.MarshalIndent(audit, "", "  ")
 	if err != nil {
 		return err
@@ -176,18 +288,25 @@ func (r *Run) responseAuditForTask(taskID string) *ResponseAudit {
 	return &audit
 }
 
-func newResponseAudit(resp provider.GenerationResponse) ResponseAudit {
+func newResponseAudit(resp provider.GenerationResponse, duration time.Duration) ResponseAudit {
 	return ResponseAudit{
-		CapturedAt:   time.Now().UTC().Format(time.RFC3339),
+		CapturedAt:   formatAuditTime(time.Now().UTC()),
 		FinishReason: resp.FinishReason,
 		PromptTokens: resp.PromptTokens,
 		OutputTokens: resp.OutputTokens,
+		DurationMS:   duration.Milliseconds(),
 		ContentBytes: len(resp.Content),
 		ContentEmpty: strings.TrimSpace(resp.Content) == "",
 	}
 }
 
 func (r *Run) save() error {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	return r.saveLocked()
+}
+
+func (r *Run) saveLocked() error {
 	data, err := json.MarshalIndent(r.Record, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal run record: %w", err)
@@ -210,22 +329,151 @@ func (r *Run) save() error {
 
 // SaveSummary writes a summary.json to the run directory.
 func (r *Run) saveSummary(scenes, cards, sceneCardRecoveries int, sceneCardRecoveryEvents []SceneCardRecoveryEvent, entities, verifications, summaries int) error {
+	record := r.recordSnapshot()
+	metrics := r.metricsSnapshot()
 	data, err := json.MarshalIndent(map[string]any{
-		"run_id":                     r.Record.RunID,
-		"scenes_built":               scenes,
-		"cards_built":                cards,
-		"scene_card_recoveries":      sceneCardRecoveries,
-		"scene_card_recovery_events": sceneCardRecoveryEvents,
-		"entities_built":             entities,
-		"verifications_built":        verifications,
-		"summaries_built":            summaries,
-		"finished_at":                r.Record.FinishedAt,
-		"status":                     r.Record.Status,
+		"run_id":                            record.RunID,
+		"started_at":                        record.StartedAt,
+		"finished_at":                       record.FinishedAt,
+		"status":                            record.Status,
+		"wall_clock_duration_ms":            runRecordDurationMS(record),
+		"scenes_built":                      scenes,
+		"cards_built":                       cards,
+		"scene_card_recoveries":             sceneCardRecoveries,
+		"scene_card_recovery_events":        sceneCardRecoveryEvents,
+		"entities_built":                    entities,
+		"verifications_built":               verifications,
+		"summaries_built":                   summaries,
+		"total_tasks":                       metrics.TaskCount,
+		"total_provider_calls":              metrics.ProviderCalls,
+		"total_prompt_tokens":               metrics.PromptTokens,
+		"total_output_tokens":               metrics.OutputTokens,
+		"total_provider_call_duration_ms":   metrics.ProviderCallDurationMS,
+		"max_observed_provider_concurrency": metrics.MaxObservedProviderConcurrency,
+		"task_type_counts":                  metrics.TaskTypeCounts,
+		"retry_tasks":                       metrics.RetryTasks,
+		"recovery_tasks":                    metrics.RecoveryTasks,
 	}, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(r.dir, "summary.json"), data, 0o644)
+}
+
+func (r *Run) id() string {
+	if r == nil {
+		return ""
+	}
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	return r.Record.RunID
+}
+
+func (r *Run) recordSnapshot() RunRecord {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	return r.Record
+}
+
+func (r *Run) beginProviderCall() {
+	r.metricsMu.Lock()
+	defer r.metricsMu.Unlock()
+	r.metrics.activeProviderCalls++
+	if r.metrics.activeProviderCalls > r.metrics.MaxObservedProviderConcurrency {
+		r.metrics.MaxObservedProviderConcurrency = r.metrics.activeProviderCalls
+	}
+}
+
+func (r *Run) endProviderCall() {
+	r.metricsMu.Lock()
+	defer r.metricsMu.Unlock()
+	if r.metrics.activeProviderCalls > 0 {
+		r.metrics.activeProviderCalls--
+	}
+}
+
+func (r *Run) recordTaskMetrics(t TaskRecord) {
+	r.metricsMu.Lock()
+	defer r.metricsMu.Unlock()
+	if r.metrics.TaskTypeCounts == nil {
+		r.metrics.TaskTypeCounts = make(map[string]int)
+	}
+	r.metrics.TaskCount++
+	r.metrics.TaskTypeCounts[t.TaskType]++
+	if t.Response != nil {
+		r.metrics.ProviderCalls++
+		r.metrics.PromptTokens += t.Response.PromptTokens
+		r.metrics.OutputTokens += t.Response.OutputTokens
+		r.metrics.ProviderCallDurationMS += t.Response.DurationMS
+	}
+	kind := strings.ToLower(t.TaskType)
+	if strings.Contains(kind, "retry") {
+		r.metrics.RetryTasks++
+	}
+	if strings.Contains(kind, "fallback") || strings.Contains(kind, "recovered") {
+		r.metrics.RecoveryTasks++
+	}
+}
+
+func (r *Run) metricsSnapshot() runMetricsSnapshot {
+	r.metricsMu.Lock()
+	defer r.metricsMu.Unlock()
+	counts := make(map[string]int, len(r.metrics.TaskTypeCounts))
+	for key, value := range r.metrics.TaskTypeCounts {
+		counts[key] = value
+	}
+	return runMetricsSnapshot{
+		TaskCount:                      r.metrics.TaskCount,
+		ProviderCalls:                  r.metrics.ProviderCalls,
+		PromptTokens:                   r.metrics.PromptTokens,
+		OutputTokens:                   r.metrics.OutputTokens,
+		ProviderCallDurationMS:         r.metrics.ProviderCallDurationMS,
+		MaxObservedProviderConcurrency: r.metrics.MaxObservedProviderConcurrency,
+		TaskTypeCounts:                 counts,
+		RetryTasks:                     r.metrics.RetryTasks,
+		RecoveryTasks:                  r.metrics.RecoveryTasks,
+	}
+}
+
+func normalizeTaskTiming(t TaskRecord, now time.Time) TaskRecord {
+	if strings.TrimSpace(t.StartedAt) == "" {
+		t.StartedAt = formatAuditTime(now)
+	}
+	if strings.TrimSpace(t.FinishedAt) == "" {
+		t.FinishedAt = formatAuditTime(now)
+	}
+	if t.DurationMS == 0 {
+		started, okStart := parseAuditTime(t.StartedAt)
+		finished, okFinish := parseAuditTime(t.FinishedAt)
+		if okStart && okFinish && !finished.Before(started) {
+			t.DurationMS = finished.Sub(started).Milliseconds()
+		}
+	}
+	return t
+}
+
+func runRecordDurationMS(record RunRecord) int64 {
+	started, okStart := parseAuditTime(record.StartedAt)
+	finished, okFinish := parseAuditTime(record.FinishedAt)
+	if !okStart || !okFinish || finished.Before(started) {
+		return 0
+	}
+	return finished.Sub(started).Milliseconds()
+}
+
+func formatAuditTime(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func parseAuditTime(value string) (time.Time, bool) {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // contextOrBackground returns ctx if non-nil, otherwise context.Background().

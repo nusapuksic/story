@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/nusapuksic/story/internal/config"
 	"github.com/nusapuksic/story/internal/project"
 	"github.com/nusapuksic/story/internal/provider"
 	"github.com/nusapuksic/story/internal/store"
@@ -38,6 +40,9 @@ type Options struct {
 	// SceneCardFailurePolicy controls recovery from invalid scene-card model output.
 	// Empty string uses [compile].scene_card_failure_policy, defaulting to retry-fallback.
 	SceneCardFailurePolicy string
+	// VerificationMode controls verification during ordinary full compile.
+	// Empty string uses [compile].verification_mode or legacy [compile].verification.
+	VerificationMode string
 	// Progress receives optional compile progress events. Nil disables reporting.
 	Progress ProgressFunc
 	// ExtractionProvider is the LLM provider for extraction tasks.
@@ -117,6 +122,12 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 		cfg.TargetContextTokens = 12000
 	}
 
+	verificationMode, err := EffectiveVerificationMode(opts, p.Config.Compile)
+	if err != nil {
+		return Result{}, err
+	}
+	opts.VerificationMode = verificationMode
+
 	run, err := newRun(p, "compile", opts.Layer, opts.ChapterID)
 	if err != nil {
 		return Result{}, err
@@ -125,14 +136,14 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 	scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, compileErr := runLayers(ctx, p, st, opts, cfg, run)
 	if compileErr != nil {
 		_ = run.fail(compileErr)
-		return Result{RunID: run.Record.RunID}, compileErr
+		return Result{RunID: run.id()}, compileErr
 	}
 	if err := run.complete(); err != nil {
-		return Result{RunID: run.Record.RunID}, err
+		return Result{RunID: run.id()}, err
 	}
 	_ = run.saveSummary(scenesBuilt, cardsBuilt, len(sceneCardRecoveryEvents), sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt)
 	return Result{
-		RunID:                   run.Record.RunID,
+		RunID:                   run.id(),
 		ScenesBuilt:             scenesBuilt,
 		CardsBuilt:              cardsBuilt,
 		SceneCardRecoveries:     len(sceneCardRecoveryEvents),
@@ -150,6 +161,50 @@ func isSupportedLayer(layer string) bool {
 	default:
 		return false
 	}
+}
+
+// Verification modes used by [compile].verification_mode.
+const (
+	VerificationModeOff       = "off"
+	VerificationModeRecovered = "recovered"
+	VerificationModeSelective = "selective"
+	VerificationModeAll       = "all"
+)
+
+// EffectiveVerificationMode normalizes the verification mode for one compile run.
+func EffectiveVerificationMode(opts Options, cfg config.CompileConfig) (string, error) {
+	if strings.TrimSpace(opts.VerificationMode) != "" {
+		return normalizeVerificationMode(opts.VerificationMode)
+	}
+	if strings.TrimSpace(cfg.VerificationMode) != "" {
+		return normalizeVerificationMode(cfg.VerificationMode)
+	}
+	if cfg.Verification {
+		return VerificationModeAll, nil
+	}
+	return VerificationModeOff, nil
+}
+
+func normalizeVerificationMode(mode string) (string, error) {
+	normalized := strings.TrimSpace(strings.ToLower(mode))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	normalized = strings.ReplaceAll(normalized, " ", "-")
+	switch normalized {
+	case "", VerificationModeAll:
+		return VerificationModeAll, nil
+	case VerificationModeOff, VerificationModeRecovered, VerificationModeSelective:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("unknown verification mode %q; supported: %s, %s, %s, %s",
+			mode, VerificationModeOff, VerificationModeRecovered, VerificationModeSelective, VerificationModeAll)
+	}
+}
+
+func shouldRunVerificationLayer(layer, verificationMode string) bool {
+	if layer == LayerVerification {
+		return true
+	}
+	return layer == "" && verificationMode != VerificationModeOff
 }
 
 // runLayers executes the requested compilation layers.
@@ -204,7 +259,7 @@ func runLayers(
 	}
 
 	// Verification layer verifies generated factual records when enabled.
-	if opts.Layer == LayerVerification || (opts.Layer == "" && p.Config.Compile.Verification) {
+	if shouldRunVerificationLayer(opts.Layer, opts.VerificationMode) {
 		reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "layer-start", Total: len(chapters), Message: "Verification: starting"})
 		if opts.VerificationProvider == nil {
 			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, 0, 0, errors.New(

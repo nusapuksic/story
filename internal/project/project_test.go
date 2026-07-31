@@ -26,6 +26,9 @@ func TestInitCreatesLayout(t *testing.T) {
 	if p.Config.Title != "My Novel" {
 		t.Errorf("title = %q", p.Config.Title)
 	}
+	if p.Config.Compile.VerificationMode != "all" {
+		t.Errorf("verification_mode = %q, want all", p.Config.Compile.VerificationMode)
+	}
 	for _, d := range []string{
 		"story.toml",
 		"source/original", "source/import-records",
