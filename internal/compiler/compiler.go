@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -379,7 +380,7 @@ func compileScenes(
 	}
 
 	total := 0
-	err = RunOrderedWork(ctx, items, OrderedExecutorOptions{WorkerLimit: 1}, func(ctx context.Context, item OrderedWorkItem[sceneWorkInput]) (sceneWorkOutput, error) {
+	err = RunOrderedWork(ctx, items, OrderedExecutorOptions{WorkerLimit: sceneDetectionWorkerLimit(cfg, opts)}, func(ctx context.Context, item OrderedWorkItem[sceneWorkInput]) (sceneWorkOutput, error) {
 		input := item.Input
 		scenes, err := detectScenes(ctx, p, input.Chapter, input.Paragraphs, nil, input.BreakOrdinals,
 			opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
@@ -449,6 +450,14 @@ func compileScenes(
 	return total, nil
 }
 
+func sceneDetectionWorkerLimit(cfg sceneDetectConfig, opts Options) int {
+	if strings.EqualFold(strings.TrimSpace(cfg.Mode), "explicit") || opts.ExtractionProvider == nil {
+		if n := runtime.NumCPU(); n > 0 {
+			return n
+		}
+	}
+	return 1
+}
 func sceneRowFromRecord(sc SceneRecord) store.SceneRow {
 	return store.SceneRow{
 		ID:             sc.ID,

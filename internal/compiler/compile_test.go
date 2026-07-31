@@ -895,6 +895,8 @@ func TestCompileSummariesSendsChaptersOneAtATime(t *testing.T) {
 	if result.SummariesBuilt != 3 {
 		t.Fatalf("SummariesBuilt = %d, want 3 (two chapters + book)", result.SummariesBuilt)
 	}
+	assertRunPendingFiles(t, p, result.RunID, compiler.LayerSummaries, 3)
+	assertRunCommitLogSequences(t, p, result.RunID, compiler.LayerSummaries, []int{0, 1, 2})
 	if len(fake.requests) != 3 {
 		t.Fatalf("Generate calls = %d, want 3", len(fake.requests))
 	}
