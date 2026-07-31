@@ -79,6 +79,12 @@ func newRunStagingStore(run *Run) (*RunStagingStore, error) {
 	}
 	return store, nil
 }
+func optionalRunStagingStore(run *Run) (*RunStagingStore, error) {
+	if run == nil {
+		return nil, nil
+	}
+	return newRunStagingStore(run)
+}
 
 func (s *RunStagingStore) StageJSON(layer string, meta StagedResultMeta, payload any) (StagedResultRef, error) {
 	if s == nil || s.run == nil {

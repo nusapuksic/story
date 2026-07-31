@@ -46,6 +46,10 @@ func compileVerification(
 	cfg sceneDetectConfig,
 	run *Run,
 ) (int, error) {
+	staging, err := optionalRunStagingStore(run)
+	if err != nil {
+		return 0, err
+	}
 	scenesFile, err := openAppendJSONL(p.Path(filepath.Join(project.ModelDir, "scenes.jsonl")))
 	if err != nil {
 		return 0, err
@@ -54,6 +58,7 @@ func compileVerification(
 
 	mode := verificationModeForLayer(opts)
 	total := 0
+	sequence := 0
 	for chapterIndex, ch := range chapters {
 		scenes, err := st.ScenesByChapter(ch.ID)
 		if err != nil {
@@ -66,6 +71,7 @@ func compileVerification(
 		reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "chapter-start", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Verification %s (%d/%d): checking %d scene(s)", ch.ID, chapterIndex+1, len(chapters), len(scenes))})
 
 		cardsSeen := 0
+		items := make([]OrderedWorkItem[verificationWorkInput], 0, len(scenes))
 		for sceneIndex, sc := range scenes {
 			card, err := st.InspectSceneCard(sc.ID)
 			if errors.Is(err, store.ErrNotFound) {
@@ -90,44 +96,89 @@ func compileVerification(
 			if err != nil {
 				return total, err
 			}
-			reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-start", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Verification %s %d/%d: verifying scene card", sc.ID, sceneIndex+1, len(scenes))})
-			verification, err := verifySceneCard(ctx, p, cardRecord, evidenceParagraphs,
-				opts.VerificationProvider, opts.VerificationModel, cfg, run)
-			if err != nil {
-				return total, fmt.Errorf("verify scene card %s: %w", card.SceneID, err)
-			}
-
-			updated := cardRecord
-			updated.Verification = &verification
-			updated.Status = verificationStatus(verification.Supported, p.Config.Compile.AutoAcceptVerified)
-			rawBytes, _ := json.Marshal(updated)
-			row := store.SceneCardRow{
-				SceneID:         updated.SceneID,
-				Title:           updated.Title,
-				Summary:         updated.Summary,
-				Evidence:        updated.Evidence,
-				GenerationRun:   updated.Generation.RunID,
-				GenerationModel: updated.Generation.Model,
-				PromptVersion:   updated.Generation.PromptVersion,
-				Status:          updated.Status,
-				RawJSON:         string(rawBytes),
-			}
-			if err := st.InsertSceneCard(row); err != nil {
-				return total, err
-			}
-			if err := appendJSONL(scenesFile, updated); err != nil {
-				return total, err
-			}
-			total++
-			reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-complete", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Verification %s %d/%d: completed (%s)", sc.ID, sceneIndex+1, len(scenes), updated.Status)})
+			items = append(items, OrderedWorkItem[verificationWorkInput]{
+				Sequence: sequence,
+				TaskID:   sc.ID,
+				Input: verificationWorkInput{
+					ChapterID:          ch.ID,
+					ChapterIndex:       chapterIndex,
+					ChapterTotal:       len(chapters),
+					SceneIndex:         sceneIndex,
+					SceneTotal:         len(scenes),
+					Scene:              sc,
+					Card:               cardRecord,
+					EvidenceParagraphs: evidenceParagraphs,
+				},
+			})
+			sequence++
 		}
 		if opts.Layer == LayerVerification && cardsSeen == 0 {
 			return total, fmt.Errorf("no scene cards found for chapter %s; run 'story compile --layer scene-cards' first", ch.ID)
+		}
+
+		err = RunOrderedWork(ctx, items, OrderedExecutorOptions{WorkerLimit: 1}, func(ctx context.Context, item OrderedWorkItem[verificationWorkInput]) (verificationWorkOutput, error) {
+			input := item.Input
+			verification, err := verifySceneCard(ctx, p, input.Card, input.EvidenceParagraphs,
+				opts.VerificationProvider, opts.VerificationModel, cfg, run)
+			if err != nil {
+				return verificationWorkOutput{}, fmt.Errorf("verify scene card %s: %w", input.Card.SceneID, err)
+			}
+			updated := input.Card
+			updated.Verification = &verification
+			updated.Status = verificationStatus(verification.Supported, p.Config.Compile.AutoAcceptVerified)
+			output := verificationWorkOutput{
+				Input:        input,
+				Verification: verification,
+				Updated:      updated,
+			}
+			if staging != nil {
+				ref, err := stageVerificationWorkResult(staging, item.Sequence, output)
+				if err != nil {
+					return verificationWorkOutput{}, err
+				}
+				output.Staged = ref
+			}
+			return output, nil
+		}, func(ctx context.Context, result OrderedWorkResult[verificationWorkOutput]) error {
+			output := result.Output
+			input := output.Input
+			reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-start", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Verification %s %d/%d: verifying scene card", input.Scene.ID, input.SceneIndex+1, input.SceneTotal)})
+			if err := st.InsertSceneCard(sceneCardRowFromRecord(output.Updated)); err != nil {
+				return err
+			}
+			if err := appendJSONL(scenesFile, output.Updated); err != nil {
+				return err
+			}
+			if staging != nil {
+				if err := staging.RecordCommit(output.Staged); err != nil {
+					return err
+				}
+			}
+			total++
+			reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-complete", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Verification %s %d/%d: completed (%s)", input.Scene.ID, input.SceneIndex+1, input.SceneTotal, output.Updated.Status)})
+			return nil
+		})
+		if err != nil {
+			return total, err
 		}
 	}
 	return total, nil
 }
 
+func stageVerificationWorkResult(staging *RunStagingStore, sequence int, output verificationWorkOutput) (StagedResultRef, error) {
+	if staging == nil {
+		return StagedResultRef{}, nil
+	}
+	return staging.StageJSON(LayerVerification, StagedResultMeta{
+		Sequence:      sequence,
+		TaskID:        output.Input.Scene.ID,
+		TargetID:      output.Input.Scene.ID,
+		SchemaVersion: 1,
+	}, stagedVerificationPayload{
+		Card:         output.Updated,
+		Verification: output.Verification,
+	})
+}
 func verifySceneCard(
 	ctx context.Context,
 	p *project.Project,

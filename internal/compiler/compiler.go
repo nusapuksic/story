@@ -443,6 +443,10 @@ func compileSceneCards(
 	if err != nil {
 		return 0, nil, err
 	}
+	staging, err := optionalRunStagingStore(run)
+	if err != nil {
+		return 0, nil, err
+	}
 
 	scenesFile, err := openAppendJSONL(p.Path(filepath.Join(project.ModelDir, "scenes.jsonl")))
 	if err != nil {
@@ -452,6 +456,7 @@ func compileSceneCards(
 
 	total := 0
 	recoveries := []SceneCardRecoveryEvent{}
+	sequence := 0
 	for chapterIndex, ch := range chapters {
 		scenes, err := st.ScenesByChapter(ch.ID)
 		if err != nil {
@@ -471,12 +476,15 @@ func compileSceneCards(
 			paraByID[pp.ID] = pp
 		}
 
+		items := make([]OrderedWorkItem[sceneCardWorkInput], 0, len(scenes))
 		for sceneIndex, sc := range scenes {
 			if !opts.Force {
 				if _, err := st.InspectSceneCard(sc.ID); err == nil {
 					// Already extracted.
 					reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-skip", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: already exists", sc.ID, sceneIndex+1, len(scenes))})
 					continue
+				} else if !errors.Is(err, store.ErrNotFound) {
+					return total, recoveries, err
 				}
 			}
 
@@ -485,64 +493,132 @@ func compileSceneCards(
 				return total, recoveries, fmt.Errorf("collect scene-card context for %s: no paragraphs found from %q to %q", sc.ID, sc.ParagraphStart, sc.ParagraphEnd)
 			}
 			skipRecoveryOnFailure, promptTokens := sceneCardSkipsRecoveryOnInitialFailure(sc, paragraphs, sceneParagraphs, cfg)
-			if skipRecoveryOnFailure {
-				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-start", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: full-chapter oversized prompt (~%d tokens); trying once without retry/fallback", sc.ID, sceneIndex+1, len(scenes), promptTokens)})
-			} else {
-				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-start", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: extracting from %d paragraph(s)", sc.ID, sceneIndex+1, len(scenes), len(sceneParagraphs))})
+			input := sceneCardWorkInput{
+				ChapterID:             ch.ID,
+				ChapterIndex:          chapterIndex,
+				ChapterTotal:          len(chapters),
+				SceneIndex:            sceneIndex,
+				SceneTotal:            len(scenes),
+				Scene:                 sc,
+				Paragraphs:            sceneParagraphs,
+				SkipRecoveryOnFailure: skipRecoveryOnFailure,
+				PromptTokens:          promptTokens,
 			}
-			card, err := extractSceneCard(ctx, p, sc, sceneParagraphs,
-				opts.ExtractionProvider, opts.ExtractionModel, cfg, run, policy, skipRecoveryOnFailure, opts.Progress)
+			items = append(items, OrderedWorkItem[sceneCardWorkInput]{
+				Sequence: sequence,
+				TaskID:   sc.ID,
+				Input:    input,
+			})
+			sequence++
+		}
+
+		err = RunOrderedWork(ctx, items, OrderedExecutorOptions{WorkerLimit: 1}, func(ctx context.Context, item OrderedWorkItem[sceneCardWorkInput]) (sceneCardWorkOutput, error) {
+			input := item.Input
+			events := make([]ProgressEvent, 0, 2)
+			card, err := extractSceneCard(ctx, p, input.Scene, input.Paragraphs,
+				opts.ExtractionProvider, opts.ExtractionModel, cfg, run, policy, input.SkipRecoveryOnFailure, func(event ProgressEvent) {
+					events = append(events, event)
+				})
 			if err != nil {
-				return total, recoveries, fmt.Errorf("extract scene card for %s: %w", sc.ID, err)
+				return sceneCardWorkOutput{}, fmt.Errorf("extract scene card for %s: %w", input.Scene.ID, err)
 			}
-			if card.Status == SceneCardStatusSkipped {
-				if err := appendJSONL(scenesFile, card); err != nil {
-					return total, recoveries, err
-				}
-				if err := st.DeleteSceneCard(sc.ID); err != nil {
-					return total, recoveries, err
-				}
-				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-skip", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: skipped after initial failure for oversized full-chapter scene", sc.ID, sceneIndex+1, len(scenes))})
-				continue
+			output := sceneCardWorkOutput{
+				Input:    input,
+				Card:     card,
+				Progress: events,
 			}
-
-			row := store.SceneCardRow{
-				SceneID:         card.SceneID,
-				Title:           card.Title,
-				Summary:         card.Summary,
-				Evidence:        card.Evidence,
-				GenerationRun:   card.Generation.RunID,
-				GenerationModel: card.Generation.Model,
-				PromptVersion:   card.Generation.PromptVersion,
-				Status:          card.Status,
-			}
-			rawBytes, _ := json.Marshal(card)
-			row.RawJSON = string(rawBytes)
-
-			if err := st.InsertSceneCard(row); err != nil {
-				return total, recoveries, err
-			}
-			if err := appendJSONL(scenesFile, card); err != nil {
-				return total, recoveries, err
-			}
-			if card.Recovery != nil {
-				recoveries = append(recoveries, SceneCardRecoveryEvent{
+			if card.Recovery != nil && card.Status != SceneCardStatusSkipped {
+				recovery := SceneCardRecoveryEvent{
 					SceneID:   card.SceneID,
-					ChapterID: sc.ChapterID,
+					ChapterID: input.Scene.ChapterID,
 					Action:    card.Recovery.Action,
 					Attempts:  card.Recovery.Attempts,
 					Reason:    card.Recovery.Reason,
-				})
-				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-complete", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: completed with %s recovery", sc.ID, sceneIndex+1, len(scenes), card.Recovery.Action)})
+				}
+				output.Recovery = &recovery
+			}
+			if staging != nil {
+				ref, err := stageSceneCardWorkResult(staging, item.Sequence, output)
+				if err != nil {
+					return sceneCardWorkOutput{}, err
+				}
+				output.Staged = ref
+			}
+			return output, nil
+		}, func(ctx context.Context, result OrderedWorkResult[sceneCardWorkOutput]) error {
+			output := result.Output
+			input := output.Input
+			reportSceneCardWorkStart(opts, input)
+			for _, event := range output.Progress {
+				reportProgress(opts, event)
+			}
+			if output.Card.Status == SceneCardStatusSkipped {
+				if err := appendJSONL(scenesFile, output.Card); err != nil {
+					return err
+				}
+				if err := st.DeleteSceneCard(input.Scene.ID); err != nil {
+					return err
+				}
+				if staging != nil {
+					if err := staging.RecordCommit(output.Staged); err != nil {
+						return err
+					}
+				}
+				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-skip", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Scene card %s %d/%d: skipped after initial failure for oversized full-chapter scene", input.Scene.ID, input.SceneIndex+1, input.SceneTotal)})
+				return nil
+			}
+
+			row := sceneCardRowFromRecord(*output.Card)
+			if err := st.InsertSceneCard(row); err != nil {
+				return err
+			}
+			if err := appendJSONL(scenesFile, output.Card); err != nil {
+				return err
+			}
+			if staging != nil {
+				if err := staging.RecordCommit(output.Staged); err != nil {
+					return err
+				}
+			}
+			if output.Recovery != nil {
+				recoveries = append(recoveries, *output.Recovery)
+				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-complete", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Scene card %s %d/%d: completed with %s recovery", input.Scene.ID, input.SceneIndex+1, input.SceneTotal, output.Recovery.Action)})
 			} else {
-				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-complete", ChapterID: ch.ID, SceneID: sc.ID, Current: sceneIndex + 1, Total: len(scenes), Message: fmt.Sprintf("Scene card %s %d/%d: completed", sc.ID, sceneIndex+1, len(scenes))})
+				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-complete", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Scene card %s %d/%d: completed", input.Scene.ID, input.SceneIndex+1, input.SceneTotal)})
 			}
 			total++
+			return nil
+		})
+		if err != nil {
+			return total, recoveries, err
 		}
 	}
 	return total, recoveries, nil
 }
 
+func reportSceneCardWorkStart(opts Options, input sceneCardWorkInput) {
+	if input.SkipRecoveryOnFailure {
+		reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-start", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Scene card %s %d/%d: full-chapter oversized prompt (~%d tokens); trying once without retry/fallback", input.Scene.ID, input.SceneIndex+1, input.SceneTotal, input.PromptTokens)})
+		return
+	}
+	reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-start", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Scene card %s %d/%d: extracting from %d paragraph(s)", input.Scene.ID, input.SceneIndex+1, input.SceneTotal, len(input.Paragraphs))})
+}
+
+func stageSceneCardWorkResult(staging *RunStagingStore, sequence int, output sceneCardWorkOutput) (StagedResultRef, error) {
+	if staging == nil {
+		return StagedResultRef{}, nil
+	}
+	return staging.StageJSON(LayerSceneCards, StagedResultMeta{
+		Sequence:      sequence,
+		TaskID:        output.Input.Scene.ID,
+		TargetID:      output.Input.Scene.ID,
+		SchemaVersion: 1,
+	}, stagedSceneCardPayload{
+		Card:     output.Card,
+		Recovery: output.Recovery,
+		Skipped:  output.Card != nil && output.Card.Status == SceneCardStatusSkipped,
+	})
+}
 func sceneCardSkipsRecoveryOnInitialFailure(scene store.SceneRow, chapterParagraphs, sceneParagraphs []store.ParagraphRow, cfg sceneDetectConfig) (bool, int) {
 	promptTokens := approxTokens(buildSceneCardPrompt(scene, sceneParagraphs))
 	if !sceneSpansFullChapter(scene, chapterParagraphs) {

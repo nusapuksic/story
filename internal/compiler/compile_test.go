@@ -190,6 +190,8 @@ func TestCompileSceneCardsWithFakeProvider(t *testing.T) {
 	if result.CardsBuilt != 2 {
 		t.Errorf("CardsBuilt = %d, want 2", result.CardsBuilt)
 	}
+	assertRunPendingFiles(t, p, result.RunID, compiler.LayerSceneCards, 2)
+	assertRunCommitLogSequences(t, p, result.RunID, compiler.LayerSceneCards, []int{0, 1})
 }
 
 func TestCompileSceneCardsKeepsSuccessfulFullChapterScene(t *testing.T) {
@@ -351,6 +353,65 @@ func progressEventsContain(events []compiler.ProgressEvent, layer, stage, text s
 		}
 	}
 	return false
+}
+
+func assertRunPendingFiles(t *testing.T, p *project.Project, runID, layer string, want int) {
+	t.Helper()
+	dir := p.Path(filepath.Join(project.RunsDir, runID, "pending", layer))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read pending %s: %v", layer, err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		count++
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatalf("read pending file %s: %v", entry.Name(), err)
+		}
+		if !strings.Contains(string(data), `"payload"`) || !strings.Contains(string(data), `"content_hash"`) {
+			t.Fatalf("pending file %s missing payload/content_hash:\n%s", entry.Name(), data)
+		}
+	}
+	if count != want {
+		t.Fatalf("pending %s files = %d, want %d", layer, count, want)
+	}
+}
+
+func assertRunCommitLogSequences(t *testing.T, p *project.Project, runID, layer string, want []int) {
+	t.Helper()
+	data, err := os.ReadFile(p.Path(filepath.Join(project.RunsDir, runID, "commit-log.jsonl")))
+	if err != nil {
+		t.Fatalf("read commit-log.jsonl: %v", err)
+	}
+	var got []int
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Sequence int    `json:"sequence"`
+			Layer    string `json:"layer"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("parse commit log line %q: %v", line, err)
+		}
+		if entry.Layer == layer {
+			got = append(got, entry.Sequence)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("commit log %s sequences = %v, want %v", layer, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("commit log %s sequences = %v, want %v", layer, got, want)
+		}
+	}
 }
 
 func TestCompileSceneCardsRecoversInvalidEvidence(t *testing.T) {
@@ -1450,6 +1511,8 @@ func TestCompileVerificationWithFakeProvider(t *testing.T) {
 	if result.VerificationsBuilt != 2 {
 		t.Fatalf("VerificationsBuilt = %d, want 2", result.VerificationsBuilt)
 	}
+	assertRunPendingFiles(t, p, result.RunID, compiler.LayerVerification, 2)
+	assertRunCommitLogSequences(t, p, result.RunID, compiler.LayerVerification, []int{0, 1})
 
 	cards, err := st.AllSceneCards()
 	if err != nil {

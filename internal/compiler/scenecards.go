@@ -469,6 +469,20 @@ func recordSceneCardTask(run *Run, taskID, sceneID, taskType, status, promptVers
 func recordSceneCardFallbackTask(run *Run, sceneID, promptVersion, reason string) {
 	recordSceneCardTask(run, ids.NewTaskID(), sceneID, "scene-extraction-fallback", TaskStatusCompleted, promptVersion, reason)
 }
+func sceneCardRowFromRecord(card SceneCardRecord) store.SceneCardRow {
+	rawBytes, _ := json.Marshal(card)
+	return store.SceneCardRow{
+		SceneID:         card.SceneID,
+		Title:           card.Title,
+		Summary:         card.Summary,
+		Evidence:        card.Evidence,
+		GenerationRun:   card.Generation.RunID,
+		GenerationModel: card.Generation.Model,
+		PromptVersion:   card.Generation.PromptVersion,
+		Status:          card.Status,
+		RawJSON:         string(rawBytes),
+	}
+}
 
 func recordSceneCardSkippedTask(run *Run, sceneID, promptVersion, reason string) {
 	recordSceneCardTask(run, ids.NewTaskID(), sceneID, "scene-extraction-skipped", TaskStatusSkipped, promptVersion, reason)
