@@ -48,6 +48,22 @@ type stagedSceneCardPayload struct {
 	Skipped  bool                    `json:"skipped,omitempty"`
 }
 
+type summaryWorkInput struct {
+	Chapter      store.ChapterRow
+	ChapterIndex int
+	ChapterTotal int
+	Paragraphs   []store.ParagraphRow
+}
+
+type summaryWorkOutput struct {
+	Input  summaryWorkInput
+	Record *SummaryRecord
+	Staged StagedResultRef
+}
+
+type stagedSummaryPayload struct {
+	Record *SummaryRecord `json:"record"`
+}
 type verificationWorkInput struct {
 	ChapterID          string
 	ChapterIndex       int

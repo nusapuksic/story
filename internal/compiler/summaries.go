@@ -75,6 +75,10 @@ func compileSummaries(
 	if err != nil {
 		return 0, err
 	}
+	staging, err := optionalRunStagingStore(run)
+	if err != nil {
+		return 0, err
+	}
 
 	summariesFile, err := openAppendJSONL(summariesPath)
 	if err != nil {
@@ -82,8 +86,7 @@ func compileSummaries(
 	}
 	defer summariesFile.Close()
 
-	total := 0
-	chapterSummariesBuilt := 0
+	items := make([]OrderedWorkItem[summaryWorkInput], 0, len(chapters))
 	for chapterIndex, ch := range chapters {
 		if !opts.Force {
 			if existing, ok := idx.Chapters[ch.ID]; ok && strings.TrimSpace(existing.Summary) != "" {
@@ -94,26 +97,63 @@ func compileSummaries(
 
 		paragraphs, err := st.ParagraphsByChapter(ch.ID)
 		if err != nil {
-			return total, err
+			return 0, err
 		}
 		if len(paragraphs) == 0 {
 			reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Summary %s (%d/%d): no paragraphs", ch.ID, chapterIndex+1, len(chapters))})
 			continue
 		}
 
-		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-start", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Summary %s (%d/%d): extracting from %d paragraph(s)", ch.ID, chapterIndex+1, len(chapters), len(paragraphs))})
-		rec, err := extractChapterSummary(ctx, p, ch, paragraphs,
+		items = append(items, OrderedWorkItem[summaryWorkInput]{
+			Sequence: len(items),
+			TaskID:   ch.ID,
+			Input: summaryWorkInput{
+				Chapter:      ch,
+				ChapterIndex: chapterIndex,
+				ChapterTotal: len(chapters),
+				Paragraphs:   paragraphs,
+			},
+		})
+	}
+
+	total := 0
+	chapterSummariesBuilt := 0
+	err = RunOrderedWork(ctx, items, OrderedExecutorOptions{WorkerLimit: 1}, func(ctx context.Context, item OrderedWorkItem[summaryWorkInput]) (summaryWorkOutput, error) {
+		input := item.Input
+		rec, err := extractChapterSummary(ctx, p, input.Chapter, input.Paragraphs,
 			opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 		if err != nil {
-			return total, fmt.Errorf("extract chapter summary for %s: %w", ch.ID, err)
+			return summaryWorkOutput{}, fmt.Errorf("extract chapter summary for %s: %w", input.Chapter.ID, err)
 		}
-		if err := appendJSONL(summariesFile, rec); err != nil {
-			return total, err
+		output := summaryWorkOutput{Input: input, Record: rec}
+		if staging != nil {
+			ref, err := stageSummaryRecord(staging, item.Sequence, input.Chapter.ID, input.Chapter.ID, rec)
+			if err != nil {
+				return summaryWorkOutput{}, err
+			}
+			output.Staged = ref
 		}
-		idx.Chapters[ch.ID] = *rec
+		return output, nil
+	}, func(ctx context.Context, result OrderedWorkResult[summaryWorkOutput]) error {
+		output := result.Output
+		input := output.Input
+		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-start", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Summary %s (%d/%d): extracting from %d paragraph(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(input.Paragraphs))})
+		if err := appendJSONL(summariesFile, output.Record); err != nil {
+			return err
+		}
+		idx.Chapters[input.Chapter.ID] = *output.Record
+		if staging != nil {
+			if err := staging.RecordCommit(output.Staged); err != nil {
+				return err
+			}
+		}
 		chapterSummariesBuilt++
 		total++
-		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-complete", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Summary %s (%d/%d): completed", ch.ID, chapterIndex+1, len(chapters))})
+		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-complete", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Summary %s (%d/%d): completed", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal)})
+		return nil
+	})
+	if err != nil {
+		return total, err
 	}
 
 	if opts.ChapterID != "" {
@@ -134,12 +174,36 @@ func compileSummaries(
 	if err != nil {
 		return total, fmt.Errorf("extract book summary: %w", err)
 	}
+	var bookRef StagedResultRef
+	if staging != nil {
+		bookRef, err = stageSummaryRecord(staging, len(items), "book-summary", "book", book)
+		if err != nil {
+			return total, err
+		}
+	}
 	if err := appendJSONL(summariesFile, book); err != nil {
 		return total, err
+	}
+	if staging != nil {
+		if err := staging.RecordCommit(bookRef); err != nil {
+			return total, err
+		}
 	}
 	total++
 	reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-complete", Message: "Book summary: completed"})
 	return total, nil
+}
+
+func stageSummaryRecord(staging *RunStagingStore, sequence int, taskID, targetID string, record *SummaryRecord) (StagedResultRef, error) {
+	if staging == nil {
+		return StagedResultRef{}, nil
+	}
+	return staging.StageJSON(LayerSummaries, StagedResultMeta{
+		Sequence:      sequence,
+		TaskID:        taskID,
+		TargetID:      targetID,
+		SchemaVersion: 1,
+	}, stagedSummaryPayload{Record: record})
 }
 
 const maxChapterSynthesisEvidencePerWindow = 3
