@@ -416,6 +416,30 @@ func assertRunCommitLogSequences(t *testing.T, p *project.Project, runID, layer 
 	}
 }
 
+func assertRunPendingPayloadOmits(t *testing.T, p *project.Project, runID, layer string, forbidden ...string) {
+	t.Helper()
+	dir := p.Path(filepath.Join(project.RunsDir, runID, "pending", layer))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read pending %s: %v", layer, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatalf("read pending file %s: %v", entry.Name(), err)
+		}
+		content := string(data)
+		for _, value := range forbidden {
+			if strings.Contains(content, value) {
+				t.Fatalf("pending file %s contains forbidden %s:\n%s", entry.Name(), value, data)
+			}
+		}
+	}
+}
+
 func TestCompileSceneCardsRecoversInvalidEvidence(t *testing.T) {
 	p, st := buildTestProject(t)
 
@@ -1238,6 +1262,9 @@ func TestCompileEntitiesWithFakeProvider(t *testing.T) {
 	if result.EntitiesBuilt != 1 {
 		t.Fatalf("EntitiesBuilt = %d, want 1", result.EntitiesBuilt)
 	}
+	assertRunPendingFiles(t, p, result.RunID, compiler.LayerEntities, 1)
+	assertRunCommitLogSequences(t, p, result.RunID, compiler.LayerEntities, []int{0})
+	assertRunPendingPayloadOmits(t, p, result.RunID, compiler.LayerEntities, `"entity_id"`, `"record_type"`)
 	entities, mentions, err := st.EntityCounts()
 	if err != nil {
 		t.Fatalf("EntityCounts: %v", err)

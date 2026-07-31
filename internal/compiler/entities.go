@@ -75,6 +75,10 @@ func compileEntities(
 	cfg sceneDetectConfig,
 	run *Run,
 ) (int, error) {
+	staging, err := optionalRunStagingStore(run)
+	if err != nil {
+		return 0, err
+	}
 	entitiesFile, err := openAppendJSONL(p.Path(filepath.Join(project.ModelDir, "entities.jsonl")))
 	if err != nil {
 		return 0, err
@@ -92,16 +96,12 @@ func compileEntities(
 		return 0, fmt.Errorf("read summaries for entity context: %w", err)
 	}
 
-	total := 0
+	items := make([]OrderedWorkItem[entityWorkInput], 0, len(chapters))
 	for chapterIndex, ch := range chapters {
-		if opts.Force {
-			if err := st.DeleteEntityMentionsForChapter(ch.ID); err != nil {
-				return total, err
-			}
-		} else {
+		if !opts.Force {
 			n, err := st.EntityMentionCountByChapter(ch.ID)
 			if err != nil {
-				return total, err
+				return 0, err
 			}
 			if n > 0 {
 				reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Entities %s (%d/%d): already exists", ch.ID, chapterIndex+1, len(chapters))})
@@ -111,7 +111,7 @@ func compileEntities(
 
 		paragraphs, err := st.ParagraphsByChapter(ch.ID)
 		if err != nil {
-			return total, err
+			return 0, err
 		}
 		if len(paragraphs) == 0 {
 			reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Entities %s (%d/%d): no paragraphs", ch.ID, chapterIndex+1, len(chapters))})
@@ -120,64 +120,156 @@ func compileEntities(
 
 		promptContext, err := entityExtractionContextForChapter(st, ch, summaryContext)
 		if err != nil {
-			return total, err
+			return 0, err
 		}
 
-		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-start", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Entities %s (%d/%d): extracting from %d paragraph(s)", ch.ID, chapterIndex+1, len(chapters), len(paragraphs))})
-		entities, mentions, err := extractEntitiesForChapter(ctx, p, ch, paragraphs, promptContext,
+		items = append(items, OrderedWorkItem[entityWorkInput]{
+			Sequence: len(items),
+			TaskID:   ch.ID,
+			Input: entityWorkInput{
+				Chapter:       ch,
+				ChapterIndex:  chapterIndex,
+				ChapterTotal:  len(chapters),
+				Paragraphs:    paragraphs,
+				PromptContext: promptContext,
+				Force:         opts.Force,
+			},
+		})
+	}
+
+	total := 0
+	err = RunOrderedWork(ctx, items, OrderedExecutorOptions{WorkerLimit: 1}, func(ctx context.Context, item OrderedWorkItem[entityWorkInput]) (entityWorkOutput, error) {
+		input := item.Input
+		candidates, err := extractEntitiesForChapter(ctx, p, input.Chapter, input.Paragraphs, input.PromptContext,
 			opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 		if err != nil {
-			return total, err
+			return entityWorkOutput{}, err
 		}
-
-		for _, entity := range entities {
-			rawBytes, _ := json.Marshal(entity)
-			row := store.EntityRow{
-				ID:              entity.ID,
-				Type:            entity.Type,
-				CanonicalName:   entity.CanonicalName,
-				Aliases:         entity.Aliases,
-				Evidence:        entity.Evidence,
-				GenerationRun:   entity.Generation.RunID,
-				GenerationModel: entity.Generation.Model,
-				PromptVersion:   entity.Generation.PromptVersion,
-				Status:          entity.Status,
-				RawJSON:         string(rawBytes),
+		output := entityWorkOutput{Input: input, Candidates: candidates}
+		if staging != nil {
+			ref, err := stageEntityWorkResult(staging, item.Sequence, output)
+			if err != nil {
+				return entityWorkOutput{}, err
 			}
-			if err := st.InsertEntity(row); err != nil {
-				return total, err
+			output.Staged = ref
+		}
+		return output, nil
+	}, func(ctx context.Context, result OrderedWorkResult[entityWorkOutput]) error {
+		output := result.Output
+		input := output.Input
+		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-start", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Entities %s (%d/%d): extracting from %d paragraph(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(input.Paragraphs))})
+		if input.Force {
+			if err := st.DeleteEntityMentionsForChapter(input.Chapter.ID); err != nil {
+				return err
+			}
+		}
+		entities, mentions := finalizeEntityCandidates(output.Candidates)
+		for _, entity := range entities {
+			if err := st.InsertEntity(entityRowFromRecord(entity)); err != nil {
+				return err
 			}
 			if err := appendJSONL(entitiesFile, entity); err != nil {
-				return total, err
+				return err
 			}
 			total++
 		}
 		for _, mention := range mentions {
-			rawBytes, _ := json.Marshal(mention)
-			row := store.MentionRow{
-				EntityID:        mention.EntityID,
-				ChapterID:       mention.ChapterID,
-				ParagraphID:     mention.ParagraphID,
-				SurfaceText:     mention.SurfaceText,
-				Confidence:      mention.Confidence,
-				GenerationRun:   mention.Generation.RunID,
-				GenerationModel: mention.Generation.Model,
-				PromptVersion:   mention.Generation.PromptVersion,
-				Status:          mention.Status,
-				RawJSON:         string(rawBytes),
-			}
-			if err := st.InsertMention(row); err != nil {
-				return total, err
+			if err := st.InsertMention(mentionRowFromRecord(mention)); err != nil {
+				return err
 			}
 			if err := appendJSONL(mentionsFile, mention); err != nil {
-				return total, err
+				return err
 			}
 		}
-		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-complete", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Entities %s (%d/%d): completed (%d entities, %d mentions)", ch.ID, chapterIndex+1, len(chapters), len(entities), len(mentions))})
+		if staging != nil {
+			if err := staging.RecordCommit(output.Staged); err != nil {
+				return err
+			}
+		}
+		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-complete", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Entities %s (%d/%d): completed (%d entities, %d mentions)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(entities), len(mentions))})
+		return nil
+	})
+	if err != nil {
+		return total, err
 	}
 	return total, nil
 }
 
+func stageEntityWorkResult(staging *RunStagingStore, sequence int, output entityWorkOutput) (StagedResultRef, error) {
+	if staging == nil {
+		return StagedResultRef{}, nil
+	}
+	return staging.StageJSON(LayerEntities, StagedResultMeta{
+		Sequence:      sequence,
+		TaskID:        output.Input.Chapter.ID,
+		TargetID:      output.Input.Chapter.ID,
+		SchemaVersion: 1,
+	}, stagedEntityPayload{Candidates: output.Candidates})
+}
+
+func finalizeEntityCandidates(candidates []entityRecordCandidate) ([]EntityRecord, []MentionRecord) {
+	entities := make([]EntityRecord, 0, len(candidates))
+	var mentions []MentionRecord
+	for _, candidate := range candidates {
+		entityID := ids.NewEntityID()
+		entity := EntityRecord{
+			RecordType:    "entity",
+			ID:            entityID,
+			Type:          candidate.Type,
+			CanonicalName: candidate.CanonicalName,
+			Aliases:       candidate.Aliases,
+			Evidence:      candidate.Evidence,
+			Generation:    candidate.Generation,
+			Status:        candidate.Status,
+		}
+		entities = append(entities, entity)
+		for _, mentionCandidate := range candidate.Mentions {
+			mentions = append(mentions, MentionRecord{
+				RecordType:  "mention",
+				EntityID:    entityID,
+				ChapterID:   mentionCandidate.ChapterID,
+				ParagraphID: mentionCandidate.ParagraphID,
+				SurfaceText: mentionCandidate.SurfaceText,
+				Confidence:  mentionCandidate.Confidence,
+				Generation:  mentionCandidate.Generation,
+				Status:      mentionCandidate.Status,
+			})
+		}
+	}
+	return entities, mentions
+}
+
+func entityRowFromRecord(entity EntityRecord) store.EntityRow {
+	rawBytes, _ := json.Marshal(entity)
+	return store.EntityRow{
+		ID:              entity.ID,
+		Type:            entity.Type,
+		CanonicalName:   entity.CanonicalName,
+		Aliases:         entity.Aliases,
+		Evidence:        entity.Evidence,
+		GenerationRun:   entity.Generation.RunID,
+		GenerationModel: entity.Generation.Model,
+		PromptVersion:   entity.Generation.PromptVersion,
+		Status:          entity.Status,
+		RawJSON:         string(rawBytes),
+	}
+}
+
+func mentionRowFromRecord(mention MentionRecord) store.MentionRow {
+	rawBytes, _ := json.Marshal(mention)
+	return store.MentionRow{
+		EntityID:        mention.EntityID,
+		ChapterID:       mention.ChapterID,
+		ParagraphID:     mention.ParagraphID,
+		SurfaceText:     mention.SurfaceText,
+		Confidence:      mention.Confidence,
+		GenerationRun:   mention.Generation.RunID,
+		GenerationModel: mention.Generation.Model,
+		PromptVersion:   mention.Generation.PromptVersion,
+		Status:          mention.Status,
+		RawJSON:         string(rawBytes),
+	}
+}
 func extractEntitiesForChapter(
 	ctx context.Context,
 	p *project.Project,
@@ -188,9 +280,9 @@ func extractEntitiesForChapter(
 	model string,
 	cfg sceneDetectConfig,
 	run *Run,
-) ([]EntityRecord, []MentionRecord, error) {
+) ([]entityRecordCandidate, error) {
 	if prov == nil {
-		return nil, nil, fmt.Errorf("no LLM provider: cannot extract entities for %s", ch.ID)
+		return nil, fmt.Errorf("no LLM provider: cannot extract entities for %s", ch.ID)
 	}
 	loadedPrompt := loadCompilerPrompt(p, storyprompts.EntityResolution)
 	prompt := buildEntityPrompt(ch, paragraphs, promptContext)
@@ -208,10 +300,10 @@ func extractEntitiesForChapter(
 	resp, timing, err := generateWithAudit(ctx, run, taskID, prov, req)
 	if err != nil {
 		recordEntityTask(run, taskID, ch.ID, TaskStatusFailed, loadedPrompt.Version, err.Error(), timing)
-		return nil, nil, fmt.Errorf("entity extraction LLM call for %s: %w", ch.ID, err)
+		return nil, fmt.Errorf("entity extraction LLM call for %s: %w", ch.ID, err)
 	}
 
-	entities, mentions, parseErr := parseEntityResponse(resp.Content, ch.ID, paragraphs, runID(run), model, loadedPrompt.Version)
+	candidates, parseErr := parseEntityResponse(resp.Content, ch.ID, paragraphs, runID(run), model, loadedPrompt.Version)
 	status := TaskStatusCompleted
 	errMsg := ""
 	if parseErr != nil {
@@ -219,7 +311,7 @@ func extractEntitiesForChapter(
 		errMsg = parseErr.Error()
 	}
 	recordEntityTask(run, taskID, ch.ID, status, loadedPrompt.Version, errMsg, timing)
-	return entities, mentions, parseErr
+	return candidates, parseErr
 }
 
 type entityExtractionContext struct {
@@ -361,27 +453,27 @@ func buildEntityPrompt(ch store.ChapterRow, paragraphs []store.ParagraphRow, pro
 	return sb.String()
 }
 
-func parseEntityResponse(content, chapterID string, paragraphs []store.ParagraphRow, runID, model, promptVersion string) ([]EntityRecord, []MentionRecord, error) {
+func parseEntityResponse(content, chapterID string, paragraphs []store.ParagraphRow, runID, model, promptVersion string) ([]entityRecordCandidate, error) {
 	content = stripJSONFences(content)
 	var raw rawEntityResponse
 	strictEvidence := true
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
 		if !isTruncatedJSONError(err) {
-			return nil, nil, fmt.Errorf("parse entity response for %s: %w", chapterID, err)
+			return nil, fmt.Errorf("parse entity response for %s: %w", chapterID, err)
 		}
 		raw = salvageTruncatedEntityResponse(content)
 		strictEvidence = false
 	}
-	return entityRecordsFromRaw(raw, chapterID, paragraphs, runID, model, promptVersion, strictEvidence)
+	return entityCandidatesFromRaw(raw, chapterID, paragraphs, runID, model, promptVersion, strictEvidence)
 }
 
-func entityRecordsFromRaw(
+func entityCandidatesFromRaw(
 	raw rawEntityResponse,
 	chapterID string,
 	paragraphs []store.ParagraphRow,
 	runID, model, promptVersion string,
 	strictEvidence bool,
-) ([]EntityRecord, []MentionRecord, error) {
+) ([]entityRecordCandidate, error) {
 	paragraphByID := make(map[string]store.ParagraphRow, len(paragraphs))
 	for _, pp := range paragraphs {
 		paragraphByID[pp.ID] = pp
@@ -393,23 +485,21 @@ func entityRecordsFromRaw(
 		PromptVersion: promptVersion,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
-	var entities []EntityRecord
-	var mentions []MentionRecord
+	var candidates []entityRecordCandidate
 	for _, cand := range raw.Entities {
 		name := strings.TrimSpace(string(cand.CanonicalName))
 		if name == "" {
 			continue
 		}
-		entityID := ids.NewEntityID()
 		evidence := make([]string, 0, len(cand.Mentions))
 		seenEvidence := make(map[string]bool)
-		var entityMentions []MentionRecord
+		var mentions []mentionRecordCandidate
 		for _, rawMention := range cand.Mentions {
 			pid := strings.TrimSpace(string(rawMention.ParagraphID))
 			pp, ok := paragraphByID[pid]
 			if !ok {
 				if strictEvidence {
-					return nil, nil, fmt.Errorf("entity %q cites unknown paragraph ID %q", name, pid)
+					return nil, fmt.Errorf("entity %q cites unknown paragraph ID %q", name, pid)
 				}
 				continue
 			}
@@ -424,9 +514,7 @@ func entityRecordsFromRaw(
 			if confidence > 1 {
 				confidence = 1
 			}
-			entityMentions = append(entityMentions, MentionRecord{
-				RecordType:  "mention",
-				EntityID:    entityID,
+			mentions = append(mentions, mentionRecordCandidate{
 				ChapterID:   pp.ChapterID,
 				ParagraphID: pid,
 				SurfaceText: surface,
@@ -439,24 +527,21 @@ func entityRecordsFromRaw(
 				evidence = append(evidence, pid)
 			}
 		}
-		if len(entityMentions) == 0 {
+		if len(mentions) == 0 {
 			continue
 		}
-		entities = append(entities, EntityRecord{
-			RecordType:    "entity",
-			ID:            entityID,
+		candidates = append(candidates, entityRecordCandidate{
 			Type:          normalizeEntityType(string(cand.Type)),
 			CanonicalName: name,
 			Aliases:       dedupeStrings([]string(cand.Aliases)),
 			Evidence:      evidence,
+			Mentions:      mentions,
 			Generation:    generation,
 			Status:        "generated",
 		})
-		mentions = append(mentions, entityMentions...)
 	}
-	return entities, mentions, nil
+	return candidates, nil
 }
-
 func salvageTruncatedEntityResponse(content string) rawEntityResponse {
 	arrayStart, ok := entityArrayStart(content)
 	if !ok {

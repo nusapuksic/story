@@ -48,6 +48,43 @@ type stagedSceneCardPayload struct {
 	Skipped  bool                    `json:"skipped,omitempty"`
 }
 
+type entityWorkInput struct {
+	Chapter       store.ChapterRow
+	ChapterIndex  int
+	ChapterTotal  int
+	Paragraphs    []store.ParagraphRow
+	PromptContext entityExtractionContext
+	Force         bool
+}
+
+type entityWorkOutput struct {
+	Input      entityWorkInput
+	Candidates []entityRecordCandidate
+	Staged     StagedResultRef
+}
+
+type stagedEntityPayload struct {
+	Candidates []entityRecordCandidate `json:"candidates"`
+}
+
+type entityRecordCandidate struct {
+	Type          string                   `json:"type"`
+	CanonicalName string                   `json:"canonical_name"`
+	Aliases       []string                 `json:"aliases,omitempty"`
+	Evidence      []string                 `json:"evidence"`
+	Mentions      []mentionRecordCandidate `json:"mentions"`
+	Generation    EntityGeneration         `json:"generation"`
+	Status        string                   `json:"status"`
+}
+
+type mentionRecordCandidate struct {
+	ChapterID   string           `json:"chapter_id"`
+	ParagraphID string           `json:"paragraph_id"`
+	SurfaceText string           `json:"surface_text"`
+	Confidence  float64          `json:"confidence"`
+	Generation  EntityGeneration `json:"generation"`
+	Status      string           `json:"status"`
+}
 type summaryWorkInput struct {
 	Chapter      store.ChapterRow
 	ChapterIndex int
