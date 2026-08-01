@@ -26,9 +26,10 @@ import (
 
 // RunStatus values for compilation runs.
 const (
-	RunStatusRunning   = "running"
-	RunStatusCompleted = "completed"
-	RunStatusFailed    = "failed"
+	RunStatusRunning     = "running"
+	RunStatusCompleted   = "completed"
+	RunStatusFailed      = "failed"
+	RunStatusInterrupted = "interrupted"
 )
 
 // TaskStatus values for individual compilation tasks.
@@ -45,11 +46,16 @@ type RunRecord struct {
 	RunID     string `json:"run_id"`
 	RunType   string `json:"run_type"`
 	StartedAt string `json:"started_at"`
-	// FinishedAt is set when the run completes or fails.
+	// FinishedAt is set when the run reaches a terminal state.
 	FinishedAt string `json:"finished_at,omitempty"`
 	Status     string `json:"status"`
 	Layer      string `json:"layer,omitempty"`
 	ChapterID  string `json:"chapter_id,omitempty"`
+}
+
+type runLogRecord struct {
+	RunRecord
+	Error string `json:"error,omitempty"`
 }
 
 // TaskRecord is one entry appended to .story/runs/<run-id>/tasks.jsonl.
@@ -82,8 +88,9 @@ type ResponseAudit struct {
 
 // Run manages the lifecycle of one compilation run.
 type Run struct {
-	Record RunRecord
-	dir    string
+	Record  RunRecord
+	dir     string
+	logsDir string
 
 	tasksMu sync.Mutex
 	stateMu sync.Mutex
@@ -161,8 +168,9 @@ func newRun(p *project.Project, runType, layer, chapterID string) (*Run, error) 
 		ChapterID: chapterID,
 	}
 	r := &Run{
-		Record: rec,
-		dir:    dir,
+		Record:  rec,
+		dir:     dir,
+		logsDir: p.Path(project.LogsDir),
 		metrics: runMetrics{
 			TaskTypeCounts: make(map[string]int),
 		},
@@ -175,36 +183,80 @@ func newRun(p *project.Project, runType, layer, chapterID string) (*Run, error) 
 
 // complete marks the run as completed and updates run.json.
 func (r *Run) complete() error {
-	r.stateMu.Lock()
-	defer r.stateMu.Unlock()
-	r.Record.Status = RunStatusCompleted
-	r.Record.FinishedAt = formatAuditTime(time.Now().UTC())
-	return r.saveLocked()
+	return r.finish(RunStatusCompleted, nil)
 }
 
-// fail marks the run as failed, records the error, and updates run.json.
+// fail marks the run as failed or interrupted, records the error, and updates run.json.
 func (r *Run) fail(runErr error) error {
+	status := RunStatusFailed
+	if errors.Is(runErr, context.Canceled) {
+		status = RunStatusInterrupted
+	}
+	finishErr := r.finish(status, runErr)
+	errorLogErr := r.recordError(runErr)
+	if finishErr != nil || errorLogErr != nil {
+		return errors.Join(runErr, finishErr, errorLogErr)
+	}
+	return runErr
+}
+
+func (r *Run) finish(status string, runErr error) error {
 	r.stateMu.Lock()
-	r.Record.Status = RunStatusFailed
+	r.Record.Status = status
 	r.Record.FinishedAt = formatAuditTime(time.Now().UTC())
+	record := r.Record
 	saveErr := r.saveLocked()
 	r.stateMu.Unlock()
 	if saveErr != nil {
-		return errors.Join(runErr, saveErr)
+		return saveErr
+	}
+	return r.appendRunLog(record, runErr)
+}
+
+func (r *Run) recordError(runErr error) error {
+	if runErr == nil {
+		return nil
 	}
 	errPath := filepath.Join(r.dir, "errors.jsonl")
 	f, err := os.OpenFile(errPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return errors.Join(runErr, err)
+		return err
 	}
 	defer f.Close()
 	if err := json.NewEncoder(f).Encode(map[string]string{
 		"time":  formatAuditTime(time.Now().UTC()),
 		"error": runErr.Error(),
 	}); err != nil {
-		return errors.Join(runErr, err)
+		return err
 	}
-	return runErr
+	return nil
+}
+
+func (r *Run) appendRunLog(record RunRecord, runErr error) error {
+	if strings.TrimSpace(r.logsDir) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(r.logsDir, 0o755); err != nil {
+		return fmt.Errorf("write run log: %w", err)
+	}
+	entry := runLogRecord{RunRecord: record}
+	if runErr != nil {
+		entry.Error = runErr.Error()
+	}
+	path := filepath.Join(r.logsDir, "runs.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("write run log: %w", err)
+	}
+	encodeErr := json.NewEncoder(f).Encode(entry)
+	closeErr := f.Close()
+	if encodeErr != nil {
+		return fmt.Errorf("write run log: %w", encodeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("write run log: %w", closeErr)
+	}
+	return nil
 }
 
 // recordTask appends a task record to tasks.jsonl.

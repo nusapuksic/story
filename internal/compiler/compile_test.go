@@ -3,6 +3,7 @@ package compiler_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,75 @@ func TestCompileScenesExplicitOnly(t *testing.T) {
 	}
 	if len(runs) == 0 {
 		t.Error("no run directory created")
+	}
+}
+
+func TestCompileWritesRunLog(t *testing.T) {
+	p, st := buildTestProject(t)
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerScenes})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	entry := latestRunLogEntry(t, p)
+	if entry.RunID != result.RunID {
+		t.Fatalf("log run_id = %q, want %q", entry.RunID, result.RunID)
+	}
+	if entry.RunType != "compile" {
+		t.Fatalf("log run_type = %q, want compile", entry.RunType)
+	}
+	if entry.Status != compiler.RunStatusCompleted {
+		t.Fatalf("log status = %q, want completed", entry.Status)
+	}
+	if entry.Layer != compiler.LayerScenes {
+		t.Fatalf("log layer = %q, want scenes", entry.Layer)
+	}
+	if entry.FinishedAt == "" {
+		t.Fatal("log finished_at is empty")
+	}
+	if entry.Error != "" {
+		t.Fatalf("log error = %q, want empty", entry.Error)
+	}
+}
+
+func TestCompileCanceledMarksRunInterrupted(t *testing.T) {
+	p, st := buildTestProject(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := compiler.Compile(ctx, p, st, compiler.Options{Layer: compiler.LayerScenes})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Compile error = %v, want context.Canceled", err)
+	}
+	if result.RunID == "" {
+		t.Fatal("canceled compile did not return a run id")
+	}
+
+	runData, err := os.ReadFile(p.Path(filepath.Join(project.RunsDir, result.RunID, "run.json")))
+	if err != nil {
+		t.Fatalf("read run.json: %v", err)
+	}
+	var runRecord compiler.RunRecord
+	if err := json.Unmarshal(runData, &runRecord); err != nil {
+		t.Fatalf("parse run.json: %v", err)
+	}
+	if runRecord.Status != compiler.RunStatusInterrupted {
+		t.Fatalf("run status = %q, want interrupted", runRecord.Status)
+	}
+	if runRecord.FinishedAt == "" {
+		t.Fatal("interrupted run missing finished_at")
+	}
+
+	entry := latestRunLogEntry(t, p)
+	if entry.RunID != result.RunID {
+		t.Fatalf("log run_id = %q, want %q", entry.RunID, result.RunID)
+	}
+	if entry.Status != compiler.RunStatusInterrupted {
+		t.Fatalf("log status = %q, want interrupted", entry.Status)
+	}
+	if !strings.Contains(entry.Error, context.Canceled.Error()) {
+		t.Fatalf("log error = %q, want context canceled", entry.Error)
 	}
 }
 
@@ -363,6 +433,34 @@ func progressEventsContain(events []compiler.ProgressEvent, layer, stage, text s
 		}
 	}
 	return false
+}
+
+type runLogEntry struct {
+	RunID      string `json:"run_id"`
+	RunType    string `json:"run_type"`
+	StartedAt  string `json:"started_at"`
+	FinishedAt string `json:"finished_at"`
+	Status     string `json:"status"`
+	Layer      string `json:"layer"`
+	ChapterID  string `json:"chapter_id"`
+	Error      string `json:"error"`
+}
+
+func latestRunLogEntry(t *testing.T, p *project.Project) runLogEntry {
+	t.Helper()
+	data, err := os.ReadFile(p.Path(filepath.Join(project.LogsDir, "runs.jsonl")))
+	if err != nil {
+		t.Fatalf("read run log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		t.Fatal("run log is empty")
+	}
+	var entry runLogEntry
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &entry); err != nil {
+		t.Fatalf("parse run log: %v", err)
+	}
+	return entry
 }
 
 func assertRunPendingFiles(t *testing.T, p *project.Project, runID, layer string, want int) {

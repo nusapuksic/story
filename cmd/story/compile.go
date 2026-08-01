@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,7 +39,7 @@ Without --layer, all implemented layers are run in order: scenes, scene-cards, v
 Scene-card extraction retries invalid model output once, retries timeouts with compact context, and then writes a deterministic fallback card. Use --strict-extraction for developer/debug runs that should fail immediately.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCompile(layer, chapterID, force, strictExtraction)
+			return runCompile(cmd.Context(), layer, chapterID, force, strictExtraction)
 		},
 	}
 	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes, scene-cards, verification, summaries, or entities")
@@ -50,7 +51,7 @@ Scene-card extraction retries invalid model output once, retries timeouts with c
 }
 
 // runCompile executes the compile pipeline.
-func runCompile(layer, chapterID string, force, strictExtraction bool) error {
+func runCompile(ctx context.Context, layer, chapterID string, force, strictExtraction bool) error {
 	p, err := openProject()
 	if err != nil {
 		return err
@@ -126,7 +127,7 @@ func runCompile(layer, chapterID string, force, strictExtraction bool) error {
 			layer, chapterID, force, strictExtraction, verificationMode)
 	}
 
-	result, err := compiler.Compile(nil, p, st, opts)
+	result, err := compiler.Compile(ctx, p, st, opts)
 	if err != nil {
 		return err
 	}
