@@ -23,6 +23,9 @@ type Options struct {
 	MaxParagraphs int
 	// MaxSceneCards is the maximum number of scene card results (default 10).
 	MaxSceneCards int
+	// SceneCardStatusPolicy controls which scene-card statuses can be returned.
+	// Empty defaults to store.SceneCardStatusTrustedOnly.
+	SceneCardStatusPolicy store.SceneCardStatusPolicy
 }
 
 // Search retrieves paragraphs and scene cards that match query.  Both FTS
@@ -35,13 +38,16 @@ func Search(st *store.Store, query string, opts Options) (Result, error) {
 	if opts.MaxSceneCards <= 0 {
 		opts.MaxSceneCards = 10
 	}
+	if opts.SceneCardStatusPolicy == "" {
+		opts.SceneCardStatusPolicy = store.SceneCardStatusTrustedOnly
+	}
 
 	paras, err := st.SearchParagraphs(query, opts.ChapterID, opts.MaxParagraphs)
 	if err != nil {
 		return Result{}, err
 	}
 
-	cards, err := st.SearchSceneCards(query, opts.MaxSceneCards)
+	cards, err := st.SearchSceneCardsByStatusPolicy(query, opts.SceneCardStatusPolicy, opts.MaxSceneCards)
 	if err != nil {
 		return Result{}, err
 	}

@@ -355,6 +355,7 @@ func compileScenes(
 		return 0, err
 	}
 	defer scenesFile.Close()
+	committer := compileArtifactCommitter{st: st, staging: staging, scenesFile: scenesFile}
 
 	items := make([]OrderedWorkItem[sceneWorkInput], 0, len(chapters))
 	for chapterIndex, ch := range chapters {
@@ -427,30 +428,10 @@ func compileScenes(
 		input := output.Input
 		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-running", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Scenes %s (%d/%d): detecting boundaries across %d paragraph(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(input.Paragraphs))})
 
-		// --force and uncommitted partial snapshots both start from a clean chapter.
-		if err := st.DeleteScenesForChapter(input.Chapter.ID); err != nil {
+		if err := committer.CommitScenes(output); err != nil {
 			return err
 		}
-		for _, sc := range output.Scenes {
-			if err := st.InsertScene(sceneRowFromRecord(sc)); err != nil {
-				return err
-			}
-			if err := appendJSONL(scenesFile, sc); err != nil {
-				return err
-			}
-			total++
-		}
-		if err := appendJSONL(scenesFile, output.Snapshot); err != nil {
-			return fmt.Errorf("write chapter_snapshot for %s: %w", input.Chapter.ID, err)
-		}
-		if err := st.MarkChapterSnapshotCommitted(input.Chapter.ID, output.Snapshot.CommittedAt); err != nil {
-			return err
-		}
-		if staging != nil {
-			if err := staging.RecordCommit(output.Staged); err != nil {
-				return err
-			}
-		}
+		total += len(output.Scenes)
 		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "item-complete", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Scenes %s (%d/%d): built %d scene(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(output.Scenes))})
 		if shouldSuggestSingleSceneChapterSplit(output.Scenes, input.Paragraphs) {
 			reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "suggestion", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: singleSceneChapterSplitSuggestion(input.Chapter.ID, input.Paragraphs)})
@@ -523,6 +504,7 @@ func compileSceneCards(
 		return 0, nil, err
 	}
 	defer scenesFile.Close()
+	committer := compileArtifactCommitter{st: st, staging: staging, scenesFile: scenesFile}
 
 	total := 0
 	recoveries := []SceneCardRecoveryEvent{}
@@ -623,32 +605,15 @@ func compileSceneCards(
 				reportProgress(opts, event)
 			}
 			if output.Card.Status == SceneCardStatusSkipped {
-				if err := appendJSONL(scenesFile, output.Card); err != nil {
+				if err := committer.CommitSceneCard(output); err != nil {
 					return err
-				}
-				if err := st.DeleteSceneCard(input.Scene.ID); err != nil {
-					return err
-				}
-				if staging != nil {
-					if err := staging.RecordCommit(output.Staged); err != nil {
-						return err
-					}
 				}
 				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-skip", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Scene card %s %d/%d: skipped after initial failure for oversized full-chapter scene", input.Scene.ID, input.SceneIndex+1, input.SceneTotal)})
 				return nil
 			}
 
-			row := sceneCardRowFromRecord(*output.Card)
-			if err := st.InsertSceneCard(row); err != nil {
+			if err := committer.CommitSceneCard(output); err != nil {
 				return err
-			}
-			if err := appendJSONL(scenesFile, output.Card); err != nil {
-				return err
-			}
-			if staging != nil {
-				if err := staging.RecordCommit(output.Staged); err != nil {
-					return err
-				}
 			}
 			if output.Recovery != nil {
 				recoveries = append(recoveries, *output.Recovery)
@@ -769,7 +734,10 @@ func openAppendJSONL(path string) (*os.File, error) {
 func appendJSONL(w *os.File, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
-	return enc.Encode(v)
+	if err := enc.Encode(v); err != nil {
+		return err
+	}
+	return w.Sync()
 }
 
 // ReadScenesJSONL reads all scene and scene card records from model/scenes.jsonl.

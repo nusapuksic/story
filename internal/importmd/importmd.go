@@ -145,29 +145,7 @@ func Run(p *project.Project, sourcePath string, opts Options) (*Result, error) {
 		}
 	}
 
-	// Replace the canonical manuscript.
-	chaptersDir := p.Path(project.ChaptersDir)
-	if opts.Replace {
-		if err := os.RemoveAll(chaptersDir); err != nil {
-			return nil, fmt.Errorf("replace manuscript: %w", err)
-		}
-		if err := p.ResetModelFiles(); err != nil {
-			return nil, fmt.Errorf("replace manuscript: %w", err)
-		}
-	}
-	if err := os.MkdirAll(chaptersDir, 0o755); err != nil {
-		return nil, fmt.Errorf("write manuscript: %w", err)
-	}
-	toc := manuscript.TOC{Version: 1}
-	for _, ch := range prep.Chapters {
-		if err := manuscript.WriteChapter(p.Path(project.ManuscriptDir), ch); err != nil {
-			return nil, err
-		}
-		toc.Chapters = append(toc.Chapters, manuscript.TOCEntry{
-			ID: ch.ID, Order: ch.Order, Title: ch.Title, File: ch.File, SourceKey: ch.SourceKey,
-		})
-	}
-	if err := manuscript.SaveTOC(p.Path(project.TOCPath), toc); err != nil {
+	if err := commitCanonicalManuscript(p, runID, prep.Chapters, opts.Replace); err != nil {
 		return nil, err
 	}
 

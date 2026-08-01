@@ -234,6 +234,64 @@ func TestDeleteScenesForChapterAlsoClearsSnapshot(t *testing.T) {
 	}
 }
 
+func TestForeignKeysRejectOrphanScene(t *testing.T) {
+	s := openTestStore(t)
+
+	err := s.InsertScene(store.SceneRow{
+		ID:             "sc-orphan",
+		ChapterID:      "ch-missing",
+		ParagraphStart: "p-missing-start",
+		ParagraphEnd:   "p-missing-end",
+		Ordinal:        1,
+		BoundarySource: "explicit",
+		Status:         "generated",
+	})
+	if err == nil {
+		t.Fatal("InsertScene succeeded for orphan scene, want foreign-key error")
+	}
+}
+
+func TestForeignKeysRejectOrphanSceneCard(t *testing.T) {
+	s := openTestStore(t)
+
+	err := s.InsertSceneCard(store.SceneCardRow{
+		SceneID:         "sc-missing",
+		Title:           "Missing scene",
+		Summary:         "This card has no scene.",
+		Evidence:        []string{"p-missing"},
+		GenerationRun:   "compile-test",
+		GenerationModel: "test-model",
+		PromptVersion:   "scene-extraction-v1",
+		Status:          "generated",
+		RawJSON:         `{"scene_id":"sc-missing"}`,
+	})
+	if err == nil {
+		t.Fatal("InsertSceneCard succeeded for orphan scene card, want foreign-key error")
+	}
+}
+
+func TestForeignKeysRejectOrphanMention(t *testing.T) {
+	s := openTestStore(t)
+	insertChapter(t, s, "ch-0001", 1, "Chapter One")
+	insertParagraph(t, s, "p-001", "ch-0001", 1)
+
+	err := s.InsertMention(store.MentionRow{
+		EntityID:        "entity-missing",
+		ChapterID:       "ch-0001",
+		ParagraphID:     "p-001",
+		SurfaceText:     "Mara",
+		Confidence:      1,
+		GenerationRun:   "compile-test",
+		GenerationModel: "test-model",
+		PromptVersion:   "entity-resolution-v1",
+		Status:          "generated",
+		RawJSON:         `{"entity_id":"entity-missing"}`,
+	})
+	if err == nil {
+		t.Fatal("InsertMention succeeded for orphan mention, want foreign-key error")
+	}
+}
+
 // helpers
 
 func insertChapter(t *testing.T, s *store.Store, id string, ordinal int, title string) {

@@ -71,7 +71,7 @@ func TestSearchSceneCards(t *testing.T) {
 		GenerationRun:   "compile-test",
 		GenerationModel: "test-model",
 		PromptVersion:   "v1",
-		Status:          "generated",
+		Status:          "verified",
 		RawJSON:         "{}",
 	}); err != nil {
 		t.Fatalf("insert scene card: %v", err)
@@ -89,6 +89,56 @@ func TestSearchSceneCards(t *testing.T) {
 	}
 }
 
+func TestSearchSceneCardsStatusPolicy(t *testing.T) {
+	st := openTestStore(t)
+
+	if err := st.InsertChapterForTest("ch-0001", 1, "The Road"); err != nil {
+		t.Fatalf("insert chapter: %v", err)
+	}
+	if err := st.InsertParagraphWithTextForTest("p-0001", "ch-0001", 1, "sample text"); err != nil {
+		t.Fatalf("insert paragraph: %v", err)
+	}
+	if err := st.InsertScene(store.SceneRow{
+		ID:             "sc-generated",
+		ChapterID:      "ch-0001",
+		ParagraphStart: "p-0001",
+		ParagraphEnd:   "p-0001",
+		Ordinal:        1,
+		BoundarySource: "explicit",
+		Status:         "generated",
+	}); err != nil {
+		t.Fatalf("insert scene: %v", err)
+	}
+	if err := st.InsertSceneCard(store.SceneCardRow{
+		SceneID:         "sc-generated",
+		Title:           "Generated letter clue",
+		Summary:         "The generated card mentions a hidden letter.",
+		Evidence:        []string{"p-0001"},
+		GenerationRun:   "compile-test",
+		GenerationModel: "test-model",
+		PromptVersion:   "v1",
+		Status:          "generated",
+		RawJSON:         "{}",
+	}); err != nil {
+		t.Fatalf("insert scene card: %v", err)
+	}
+
+	trusted, err := retrieval.Search(st, "letter", retrieval.Options{})
+	if err != nil {
+		t.Fatalf("Search trusted-only: %v", err)
+	}
+	if len(trusted.SceneCards) != 0 {
+		t.Fatalf("trusted-only search returned generated scene cards: %#v", trusted.SceneCards)
+	}
+
+	withGenerated, err := retrieval.Search(st, "letter", retrieval.Options{SceneCardStatusPolicy: store.SceneCardStatusIncludeGenerated})
+	if err != nil {
+		t.Fatalf("Search include-generated: %v", err)
+	}
+	if len(withGenerated.SceneCards) != 1 || withGenerated.SceneCards[0].SceneID != "sc-generated" {
+		t.Fatalf("include-generated scene cards = %#v, want sc-generated", withGenerated.SceneCards)
+	}
+}
 func TestSearchEmptyQuery(t *testing.T) {
 	st := openTestStore(t)
 	result, err := retrieval.Search(st, "", retrieval.Options{})

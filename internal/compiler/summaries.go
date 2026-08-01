@@ -85,6 +85,7 @@ func compileSummaries(
 		return 0, err
 	}
 	defer summariesFile.Close()
+	committer := compileArtifactCommitter{staging: staging, summariesFile: summariesFile}
 
 	items := make([]OrderedWorkItem[summaryWorkInput], 0, len(chapters))
 	for chapterIndex, ch := range chapters {
@@ -138,15 +139,10 @@ func compileSummaries(
 		output := result.Output
 		input := output.Input
 		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-start", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Summary %s (%d/%d): extracting from %d paragraph(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(input.Paragraphs))})
-		if err := appendJSONL(summariesFile, output.Record); err != nil {
+		if err := committer.CommitSummary(output); err != nil {
 			return err
 		}
 		idx.Chapters[input.Chapter.ID] = *output.Record
-		if staging != nil {
-			if err := staging.RecordCommit(output.Staged); err != nil {
-				return err
-			}
-		}
 		chapterSummariesBuilt++
 		total++
 		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-complete", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Summary %s (%d/%d): completed", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal)})
@@ -181,13 +177,8 @@ func compileSummaries(
 			return total, err
 		}
 	}
-	if err := appendJSONL(summariesFile, book); err != nil {
+	if err := committer.CommitBookSummary(bookRef, book); err != nil {
 		return total, err
-	}
-	if staging != nil {
-		if err := staging.RecordCommit(bookRef); err != nil {
-			return total, err
-		}
 	}
 	total++
 	reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-complete", Message: "Book summary: completed"})

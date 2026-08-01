@@ -55,6 +55,7 @@ func compileVerification(
 		return 0, err
 	}
 	defer scenesFile.Close()
+	committer := compileArtifactCommitter{st: st, staging: staging, scenesFile: scenesFile}
 
 	mode := verificationModeForLayer(opts)
 	total := 0
@@ -143,16 +144,8 @@ func compileVerification(
 			output := result.Output
 			input := output.Input
 			reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-start", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Verification %s %d/%d: verifying scene card", input.Scene.ID, input.SceneIndex+1, input.SceneTotal)})
-			if err := st.InsertSceneCard(sceneCardRowFromRecord(output.Updated)); err != nil {
+			if err := committer.CommitVerification(output); err != nil {
 				return err
-			}
-			if err := appendJSONL(scenesFile, output.Updated); err != nil {
-				return err
-			}
-			if staging != nil {
-				if err := staging.RecordCommit(output.Staged); err != nil {
-					return err
-				}
 			}
 			total++
 			reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "item-complete", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Verification %s %d/%d: completed (%s)", input.Scene.ID, input.SceneIndex+1, input.SceneTotal, output.Updated.Status)})

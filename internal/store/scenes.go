@@ -347,6 +347,16 @@ func (s *Store) AllSceneCards() ([]SceneCardRow, error) {
 	return scanSceneCardRows(rows)
 }
 
+// AllSceneCardsByStatusPolicy returns all scene cards eligible under policy in
+// manuscript order.
+func (s *Store) AllSceneCardsByStatusPolicy(policy SceneCardStatusPolicy) ([]SceneCardRow, error) {
+	cards, err := s.AllSceneCards()
+	if err != nil {
+		return nil, err
+	}
+	return filterSceneCardsByStatusPolicy(cards, policy), nil
+}
+
 // ParagraphsInRange returns all paragraphs whose ordinal falls between startOrd
 // and endOrd (inclusive), for a specific chapter.
 func (s *Store) ParagraphsInRange(chapterID string, startOrd, endOrd int) ([]ParagraphRow, error) {

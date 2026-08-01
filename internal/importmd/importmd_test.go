@@ -374,9 +374,16 @@ func TestReplaceClearsStaleDerivedModelFiles(t *testing.T) {
 		}
 	}
 
+	extraPath := p.Path(filepath.Join(project.ModelDir, "notes.jsonl"))
+	extraContent := []byte("keep this user-side model note\n")
+	if err := os.WriteFile(extraPath, extraContent, 0o644); err != nil {
+		t.Fatalf("write extra model file: %v", err)
+	}
+
 	if _, err := Run(p, "testdata/ordered", Options{Replace: true}); err != nil {
 		t.Fatalf("replace import with stale model files: %v", err)
 	}
+
 	for _, name := range modelFiles {
 		data, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, name)))
 		if err != nil {
@@ -385,6 +392,81 @@ func TestReplaceClearsStaleDerivedModelFiles(t *testing.T) {
 		if len(data) != 0 {
 			t.Errorf("%s was not cleared: %q", name, data)
 		}
+	}
+	if data, err := os.ReadFile(extraPath); err != nil {
+		t.Fatalf("read extra model file: %v", err)
+	} else if string(data) != string(extraContent) {
+		t.Errorf("extra model file changed: %q", data)
+	}
+}
+
+func TestCommitCanonicalManuscriptValidationFailurePreservesLiveFiles(t *testing.T) {
+	p := newTestProject(t)
+	if _, err := Run(p, "testdata/ordered", Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	tocPath := p.Path(project.TOCPath)
+	chapterPath := p.Path(filepath.Join(project.ChaptersDir, "ch-0001.md"))
+	modelPath := p.Path(filepath.Join(project.ModelDir, "scenes.jsonl"))
+	originalTOC := readFileString(t, tocPath)
+	originalChapter := readFileString(t, chapterPath)
+	originalModel := "keep me\n"
+	if err := os.WriteFile(modelPath, []byte(originalModel), 0o644); err != nil {
+		t.Fatalf("write model sentinel: %v", err)
+	}
+
+	badChapters := []*manuscript.Chapter{{
+		ID:        "ch-0001",
+		Order:     1,
+		Title:     "Invalid",
+		File:      "chapters/ch-0001.md",
+		SourceKey: "bad.md",
+		Blocks: []manuscript.Block{{
+			Type: manuscript.BlockParagraph,
+			Text: "This paragraph has no identifier.",
+		}},
+	}}
+	err := commitCanonicalManuscript(p, "import-test-validation", badChapters, true)
+	if err == nil {
+		t.Fatal("expected staged validation failure")
+	}
+	if !strings.Contains(err.Error(), "paragraph identifier") {
+		t.Fatalf("error = %v, want paragraph identifier validation", err)
+	}
+	if got := readFileString(t, tocPath); got != originalTOC {
+		t.Error("toc changed after failed staged commit")
+	}
+	if got := readFileString(t, chapterPath); got != originalChapter {
+		t.Error("chapter changed after failed staged commit")
+	}
+	if got := readFileString(t, modelPath); got != originalModel {
+		t.Errorf("model changed after failed staged commit: %q", got)
+	}
+	tmpPath := p.Path(filepath.Join(project.StoryDir, "tmp", "import-test-validation", "manuscript-commit"))
+	if _, err := os.Stat(tmpPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("temporary commit directory remains: %v", err)
+	}
+}
+
+func TestCommitCanonicalManuscriptRejectsNonCanonicalChapterPath(t *testing.T) {
+	p := newTestProject(t)
+	badChapters := []*manuscript.Chapter{{
+		ID:        "ch-0001",
+		Order:     1,
+		Title:     "Invalid",
+		File:      "../outside.md",
+		SourceKey: "bad.md",
+	}}
+	err := commitCanonicalManuscript(p, "import-test-path", badChapters, false)
+	if err == nil {
+		t.Fatal("expected invalid chapter path failure")
+	}
+	if !strings.Contains(err.Error(), "invalid chapter file path") {
+		t.Fatalf("error = %v, want invalid chapter path", err)
+	}
+	if _, err := os.Stat(p.Path(project.TOCPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("toc changed after invalid staged commit: %v", err)
 	}
 }
 
@@ -475,6 +557,15 @@ func TestIndexedParagraphMetadata(t *testing.T) {
 	if _, err := s.InspectParagraph("p-DOESNOTEXIST"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
 	}
+}
+
+func readFileString(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 // paragraphIDs returns all paragraph IDs from the canonical manuscript in

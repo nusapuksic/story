@@ -69,10 +69,13 @@ type Options struct {
 	Mode string
 	// ChapterID restricts evidence to a specific chapter.
 	ChapterID string
-	// IncludeGenerated allows scene cards with status "generated" to be used
-	// as evidence context.  By default only verified/accepted cards are used;
-	// since v0.1 review is not yet implemented, this defaults to true.
+	// IncludeGenerated opts into scene cards with status "generated".
+	// By default only verified/accepted scene cards are used as context.
+	// SceneCardStatusPolicy wins when set.
 	IncludeGenerated bool
+	// SceneCardStatusPolicy controls which scene-card statuses are available as
+	// generated context. Empty derives from IncludeGenerated.
+	SceneCardStatusPolicy store.SceneCardStatusPolicy
 	// MaxEvidence is the maximum number of paragraphs to include in the
 	// evidence packet (default 20).
 	MaxEvidence int
@@ -109,12 +112,14 @@ func Ask(
 	if opts.MaxEvidence <= 0 {
 		opts.MaxEvidence = 20
 	}
+	cardPolicy := sceneCardStatusPolicy(opts)
 
 	// Step 1: Retrieve relevant scene cards and paragraphs via FTS.
 	ret, err := retrieval.Search(st, question, retrieval.Options{
-		ChapterID:     opts.ChapterID,
-		MaxParagraphs: opts.MaxEvidence,
-		MaxSceneCards: 10,
+		ChapterID:             opts.ChapterID,
+		MaxParagraphs:         opts.MaxEvidence,
+		MaxSceneCards:         10,
+		SceneCardStatusPolicy: cardPolicy,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: %w", err)
@@ -123,7 +128,7 @@ func Ask(
 	// Step 1b: FTS fallback – if the keyword search found nothing, gather all
 	// scene cards so the model can still answer from structural context.
 	if len(ret.Paragraphs) == 0 && len(ret.SceneCards) == 0 {
-		cards, err := st.AllSceneCards()
+		cards, err := st.AllSceneCardsByStatusPolicy(cardPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("fallback scene card retrieval: %w", err)
 		}
@@ -256,6 +261,16 @@ func Ask(
 		QueryRunID:    queryRunID,
 		PromptVersion: loadedPrompt.Version,
 	}, nil
+}
+
+func sceneCardStatusPolicy(opts Options) store.SceneCardStatusPolicy {
+	if opts.SceneCardStatusPolicy != "" {
+		return opts.SceneCardStatusPolicy
+	}
+	if opts.IncludeGenerated {
+		return store.SceneCardStatusIncludeGenerated
+	}
+	return store.SceneCardStatusTrustedOnly
 }
 
 func summaryEvidenceParagraphs(st *store.Store, summaries []SummaryContext, chapterID string) []store.ParagraphRow {

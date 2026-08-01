@@ -244,6 +244,72 @@ func TestAskWithMarkdownCodeFence(t *testing.T) {
 	}
 }
 
+func seedSceneCardForAsk(t *testing.T, st *store.Store, status string) string {
+	t.Helper()
+	if err := st.InsertChapterForTest("ch-0001", 1, "The Road"); err != nil {
+		t.Fatalf("insert chapter: %v", err)
+	}
+	const pid = "p-SCENECARD0001"
+	if err := st.InsertParagraphWithTextForTest(pid, "ch-0001", 1,
+		"Mara folds the letter and waits by the cold stove."); err != nil {
+		t.Fatalf("insert paragraph: %v", err)
+	}
+	if err := st.InsertScene(store.SceneRow{
+		ID:             "sc-card-policy",
+		ChapterID:      "ch-0001",
+		ParagraphStart: pid,
+		ParagraphEnd:   pid,
+		Ordinal:        1,
+		BoundarySource: "explicit",
+		Status:         "generated",
+	}); err != nil {
+		t.Fatalf("insert scene: %v", err)
+	}
+	if err := st.InsertSceneCard(store.SceneCardRow{
+		SceneID:         "sc-card-policy",
+		Title:           "Generated secret context",
+		Summary:         "Generated context says the letter changes hands.",
+		Evidence:        []string{pid},
+		GenerationRun:   "compile-test",
+		GenerationModel: "test-model",
+		PromptVersion:   "scene-extraction-v1",
+		Status:          status,
+		RawJSON:         "{}",
+	}); err != nil {
+		t.Fatalf("insert scene card: %v", err)
+	}
+	return pid
+}
+
+func TestAskExcludesGeneratedSceneCardsByDefault(t *testing.T) {
+	st := openTestStore(t)
+	seedSceneCardForAsk(t, st, "generated")
+	fake := &fakeProvider{response: `{"answer":"Only manuscript text is available.","evidence":[],"uncertainties":[]}`}
+
+	_, err := query.Ask(context.Background(), st, fake, "fake-model", "letter changes hands", query.Options{})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	prompt := fake.requests[0].Messages[1].Content
+	if strings.Contains(prompt, "Generated secret context") || strings.Contains(prompt, "Generated context says") || strings.Contains(prompt, "## Scene context") {
+		t.Fatalf("prompt included generated scene-card context by default: %s", prompt)
+	}
+}
+
+func TestAskIncludeGeneratedAllowsGeneratedSceneCards(t *testing.T) {
+	st := openTestStore(t)
+	seedSceneCardForAsk(t, st, "generated")
+	fake := &fakeProvider{response: `{"answer":"The generated card is available.","evidence":[],"uncertainties":[]}`}
+
+	_, err := query.Ask(context.Background(), st, fake, "fake-model", "letter changes hands", query.Options{IncludeGenerated: true})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	prompt := fake.requests[0].Messages[1].Content
+	if !strings.Contains(prompt, "Generated secret context") || !strings.Contains(prompt, "## Scene context") {
+		t.Fatalf("prompt missing generated scene-card context with IncludeGenerated: %s", prompt)
+	}
+}
 func isInsufficientEvidence(err error) bool {
 	return err != nil && err.Error() == query.ErrInsufficientEvidence.Error()
 }

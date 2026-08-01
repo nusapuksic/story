@@ -90,6 +90,7 @@ func compileEntities(
 		return 0, err
 	}
 	defer mentionsFile.Close()
+	committer := compileArtifactCommitter{st: st, staging: staging, entitiesFile: entitiesFile, mentionsFile: mentionsFile}
 
 	summaryContext, err := readSummaryIndex(p.Path(filepath.Join(project.ModelDir, "summaries.jsonl")))
 	if err != nil {
@@ -158,34 +159,11 @@ func compileEntities(
 		output := result.Output
 		input := output.Input
 		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-start", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Entities %s (%d/%d): extracting from %d paragraph(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(input.Paragraphs))})
-		if input.Force {
-			if err := st.DeleteEntityMentionsForChapter(input.Chapter.ID); err != nil {
-				return err
-			}
-		}
 		entities, mentions := finalizeEntityCandidates(output.Candidates)
-		for _, entity := range entities {
-			if err := st.InsertEntity(entityRowFromRecord(entity)); err != nil {
-				return err
-			}
-			if err := appendJSONL(entitiesFile, entity); err != nil {
-				return err
-			}
-			total++
+		if err := committer.CommitEntities(output, entities, mentions); err != nil {
+			return err
 		}
-		for _, mention := range mentions {
-			if err := st.InsertMention(mentionRowFromRecord(mention)); err != nil {
-				return err
-			}
-			if err := appendJSONL(mentionsFile, mention); err != nil {
-				return err
-			}
-		}
-		if staging != nil {
-			if err := staging.RecordCommit(output.Staged); err != nil {
-				return err
-			}
-		}
+		total += len(entities)
 		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-complete", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Entities %s (%d/%d): completed (%d entities, %d mentions)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(entities), len(mentions))})
 		return nil
 	})

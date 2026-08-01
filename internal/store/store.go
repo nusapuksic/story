@@ -148,6 +148,20 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open index %s: %w", path, err)
 	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable foreign keys for index %s: %w", path, err)
+	}
+	var foreignKeys int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("verify foreign keys for index %s: %w", path, err)
+	}
+	if foreignKeys != 1 {
+		db.Close()
+		return nil, fmt.Errorf("enable foreign keys for index %s: pragma remained disabled", path)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("initialize index %s: %w", path, err)
