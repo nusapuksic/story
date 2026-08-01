@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -68,6 +69,18 @@ type mentionJSONLRecord struct {
 	Status string `json:"status"`
 }
 
+// entitySnapshotJSONLRecord is the explicit commit marker appended to
+// model/entities.jsonl after all entity records for a chapter and their
+// corresponding mention records in model/mentions.jsonl have been written.
+// Only chapters with this marker are treated as fully snapshotted.
+type entitySnapshotJSONLRecord struct {
+	RecordType   string `json:"record_type"` // "entity_snapshot"
+	ChapterID    string `json:"chapter_id"`
+	EntityCount  *int   `json:"entity_count"`
+	MentionCount *int   `json:"mention_count"`
+	CommittedAt  string `json:"committed_at"`
+}
+
 type entityCandidate struct {
 	record entityJSONLRecord
 	line   int
@@ -78,6 +91,16 @@ type mentionCandidate struct {
 	record mentionJSONLRecord
 	line   int
 	raw    string
+}
+
+type entitySnapshotCandidate struct {
+	record entitySnapshotJSONLRecord
+	line   int
+}
+
+type entityPendingBatch struct {
+	runID    string
+	entities map[string]entityCandidate
 }
 
 // InsertEntity inserts or replaces one entity row.
@@ -120,18 +143,55 @@ func (s *Store) InsertMention(r MentionRow) error {
 	return nil
 }
 
-// DeleteEntityMentionsForChapter removes indexed entity mentions for a chapter
-// and then drops entities that no longer have any mentions.
-func (s *Store) DeleteEntityMentionsForChapter(chapterID string) error {
-	_, err := s.db.Exec(`DELETE FROM mentions WHERE chapter_id = ?`, chapterID)
+// DeleteEntityMentionsForChapter removes indexed entity mentions for a chapter,
+// clears the chapter entity snapshot, and then drops entities that no longer
+// have any mentions.
+func (s *Store) DeleteEntityMentionsForChapter(chapterID string) (retErr error) {
+	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("delete entity mentions for chapter %s: %w", chapterID, err)
 	}
-	_, err = s.db.Exec(`DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM mentions)`)
-	if err != nil {
+	defer func() {
+		if retErr != nil {
+			tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`DELETE FROM mentions WHERE chapter_id = ?`, chapterID); err != nil {
+		return fmt.Errorf("delete entity mentions for chapter %s: %w", chapterID, err)
+	}
+	if _, err := tx.Exec(`DELETE FROM chapter_entity_snapshots WHERE chapter_id = ?`, chapterID); err != nil {
+		return fmt.Errorf("delete chapter entity snapshot %s: %w", chapterID, err)
+	}
+	if _, err := tx.Exec(`DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM mentions)`); err != nil {
 		return fmt.Errorf("delete orphan entities after chapter %s: %w", chapterID, err)
 	}
+	return tx.Commit()
+}
+
+// MarkEntitySnapshotCommitted records that entity extraction for chapterID was
+// completely committed to canonical JSONL.
+func (s *Store) MarkEntitySnapshotCommitted(chapterID string, entityCount, mentionCount int, committedAt string) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO chapter_entity_snapshots (chapter_id, entity_count, mention_count, committed_at)
+		 VALUES (?, ?, ?, ?)`,
+		chapterID, entityCount, mentionCount, committedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("mark entity snapshot %s: %w", chapterID, err)
+	}
 	return nil
+}
+
+// IsEntitySnapshotCommitted reports whether entity extraction has been fully
+// committed for chapterID.
+func (s *Store) IsEntitySnapshotCommitted(chapterID string) (bool, error) {
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM chapter_entity_snapshots WHERE chapter_id = ?`, chapterID,
+	).Scan(&n); err != nil {
+		return false, fmt.Errorf("check entity snapshot %s: %w", chapterID, err)
+	}
+	return n > 0, nil
 }
 
 // EntityMentionCountByChapter returns the number of indexed mentions in a chapter.
@@ -154,58 +214,32 @@ func (s *Store) EntityCounts() (entities, mentions int, err error) {
 	return entities, mentions, nil
 }
 
-// IndexEntitiesJSONL replays model/entities.jsonl and model/mentions.jsonl into the index.
+// IndexEntitiesJSONL replays committed model/entities.jsonl snapshots and
+// their model/mentions.jsonl records into the index.
 func (s *Store) IndexEntitiesJSONL(entitiesPath, mentionsPath string) (retErr error) {
-	paragraphs := make(map[string]string)
-	rows, err := s.db.Query(`SELECT id, chapter_id FROM paragraphs`)
+	chapterIDs, paragraphs, err := s.entityReplayRefs()
 	if err != nil {
-		return fmt.Errorf("index entities jsonl: %w", err)
-	}
-	for rows.Next() {
-		var id, chapterID string
-		if err := rows.Scan(&id, &chapterID); err != nil {
-			rows.Close()
-			return fmt.Errorf("index entities jsonl: %w", err)
-		}
-		paragraphs[id] = chapterID
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("index entities jsonl: %w", err)
+		return err
 	}
 
-	entities, err := readEntityJSONL(entitiesPath)
+	entities, entityChapterByID, allEntityIDs, snapshots, err := readCommittedEntityJSONL(entitiesPath, chapterIDs, paragraphs)
 	if err != nil {
 		return err
 	}
-	mentions, err := readMentionJSONL(mentionsPath)
+	mentions, mentionCountsByChapter, err := readCommittedMentionJSONL(mentionsPath, paragraphs, entityChapterByID, allEntityIDs)
 	if err != nil {
 		return err
 	}
-	for id, cand := range entities {
-		if strings.TrimSpace(id) == "" {
-			return fmt.Errorf("index entities jsonl: %s:%d: entity missing id", entitiesPath, cand.line)
+	for chapterID, snap := range snapshots {
+		want := 0
+		if snap.record.MentionCount != nil {
+			want = *snap.record.MentionCount
 		}
-		for _, pid := range cand.record.Evidence {
-			if _, ok := paragraphs[pid]; !ok {
-				return fmt.Errorf("index entities jsonl: %s:%d: entity %s references missing evidence paragraph %q", entitiesPath, cand.line, id, pid)
-			}
-		}
-	}
-	for key, cand := range mentions {
-		_ = key
-		if _, ok := entities[cand.record.EntityID]; !ok {
-			return fmt.Errorf("index mentions jsonl: %s:%d: mention references missing entity %q", mentionsPath, cand.line, cand.record.EntityID)
-		}
-		chapterID, ok := paragraphs[cand.record.ParagraphID]
-		if !ok {
-			return fmt.Errorf("index mentions jsonl: %s:%d: mention references missing paragraph %q", mentionsPath, cand.line, cand.record.ParagraphID)
-		}
-		if cand.record.ChapterID == "" {
-			cand.record.ChapterID = chapterID
-			mentions[key] = cand
-		} else if cand.record.ChapterID != chapterID {
-			return fmt.Errorf("index mentions jsonl: %s:%d: mention chapter %s does not match paragraph chapter %s", mentionsPath, cand.line, cand.record.ChapterID, chapterID)
+		if got := mentionCountsByChapter[chapterID]; got != want {
+			return fmt.Errorf(
+				"index entities jsonl: %s:%d: entity_snapshot mention_count mismatch for %s: declared %d, committed %d",
+				entitiesPath, snap.line, chapterID, want, got,
+			)
 		}
 	}
 
@@ -218,12 +252,15 @@ func (s *Store) IndexEntitiesJSONL(entitiesPath, mentionsPath string) (retErr er
 			tx.Rollback()
 		}
 	}()
-	for _, stmt := range []string{`DELETE FROM mentions`, `DELETE FROM entities`} {
+	for _, stmt := range []string{`DELETE FROM mentions`, `DELETE FROM entities`, `DELETE FROM chapter_entity_snapshots`} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("index entities jsonl: %w", err)
 		}
 	}
-	for _, cand := range entities {
+
+	entityIDs := sortedEntityIDs(entities)
+	for _, id := range entityIDs {
+		cand := entities[id]
 		rec := cand.record
 		aliasesJSON, _ := json.Marshal(rec.Aliases)
 		evidenceJSON, _ := json.Marshal(rec.Evidence)
@@ -239,7 +276,10 @@ func (s *Store) IndexEntitiesJSONL(entitiesPath, mentionsPath string) (retErr er
 			return fmt.Errorf("index entities jsonl: insert entity %s: %w", rec.ID, err)
 		}
 	}
-	for _, cand := range mentions {
+
+	mentionKeys := sortedMentionKeys(mentions)
+	for _, key := range mentionKeys {
+		cand := mentions[key]
 		rec := cand.record
 		if _, err := tx.Exec(
 			`INSERT INTO mentions
@@ -253,11 +293,78 @@ func (s *Store) IndexEntitiesJSONL(entitiesPath, mentionsPath string) (retErr er
 			return fmt.Errorf("index mentions jsonl: insert mention %s/%s: %w", rec.EntityID, rec.ParagraphID, err)
 		}
 	}
+
+	chapterSnapshotIDs := sortedEntitySnapshotChapters(snapshots)
+	for _, chapterID := range chapterSnapshotIDs {
+		snap := snapshots[chapterID].record
+		entityCount := 0
+		if snap.EntityCount != nil {
+			entityCount = *snap.EntityCount
+		}
+		mentionCount := 0
+		if snap.MentionCount != nil {
+			mentionCount = *snap.MentionCount
+		}
+		if _, err := tx.Exec(
+			`INSERT OR REPLACE INTO chapter_entity_snapshots (chapter_id, entity_count, mention_count, committed_at)
+			 VALUES (?, ?, ?, ?)`,
+			chapterID, entityCount, mentionCount, snap.CommittedAt,
+		); err != nil {
+			return fmt.Errorf("index entities jsonl: update entity snapshot %s: %w", chapterID, err)
+		}
+	}
 	return tx.Commit()
 }
 
-func readEntityJSONL(path string) (map[string]entityCandidate, error) {
-	out := make(map[string]entityCandidate)
+func (s *Store) entityReplayRefs() (map[string]bool, map[string]string, error) {
+	chapterIDs := make(map[string]bool)
+	chapterRows, err := s.db.Query(`SELECT id FROM chapters`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("index entities jsonl: %w", err)
+	}
+	for chapterRows.Next() {
+		var id string
+		if err := chapterRows.Scan(&id); err != nil {
+			chapterRows.Close()
+			return nil, nil, fmt.Errorf("index entities jsonl: %w", err)
+		}
+		chapterIDs[id] = true
+	}
+	chapterRows.Close()
+	if err := chapterRows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("index entities jsonl: %w", err)
+	}
+
+	paragraphs := make(map[string]string)
+	rows, err := s.db.Query(`SELECT id, chapter_id FROM paragraphs`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("index entities jsonl: %w", err)
+	}
+	for rows.Next() {
+		var id, chapterID string
+		if err := rows.Scan(&id, &chapterID); err != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("index entities jsonl: %w", err)
+		}
+		paragraphs[id] = chapterID
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("index entities jsonl: %w", err)
+	}
+	return chapterIDs, paragraphs, nil
+}
+
+func readCommittedEntityJSONL(
+	path string,
+	chapterIDs map[string]bool,
+	paragraphs map[string]string,
+) (map[string]entityCandidate, map[string]string, map[string]bool, map[string]entitySnapshotCandidate, error) {
+	pendingByChapter := make(map[string]entityPendingBatch)
+	committedByChapter := make(map[string]map[string]entityCandidate)
+	snapshots := make(map[string]entitySnapshotCandidate)
+	allEntityIDs := make(map[string]bool)
+
 	if err := scanJSONL(path, func(lineNo int, line []byte) error {
 		var typed struct {
 			RecordType string `json:"record_type"`
@@ -265,22 +372,119 @@ func readEntityJSONL(path string) (map[string]entityCandidate, error) {
 		if err := json.Unmarshal(line, &typed); err != nil {
 			return fmt.Errorf("index entities jsonl: %s:%d: malformed json: %w", path, lineNo, err)
 		}
-		if typed.RecordType != "entity" {
-			return nil
+		switch typed.RecordType {
+		case "entity":
+			var rec entityJSONLRecord
+			if err := json.Unmarshal(line, &rec); err != nil {
+				return fmt.Errorf("index entities jsonl: %s:%d: malformed entity record: %w", path, lineNo, err)
+			}
+			if strings.TrimSpace(rec.ID) == "" {
+				return fmt.Errorf("index entities jsonl: %s:%d: entity missing id", path, lineNo)
+			}
+			allEntityIDs[rec.ID] = true
+			chapterID, err := entityRecordChapter(path, lineNo, rec, paragraphs)
+			if err != nil {
+				return err
+			}
+			runID := strings.TrimSpace(rec.Generation.RunID)
+			batch := pendingByChapter[chapterID]
+			if batch.entities == nil || batch.runID != runID {
+				batch = entityPendingBatch{runID: runID, entities: make(map[string]entityCandidate)}
+			}
+			batch.entities[rec.ID] = entityCandidate{record: rec, line: lineNo, raw: string(line)}
+			pendingByChapter[chapterID] = batch
+		case "entity_snapshot":
+			var snap entitySnapshotJSONLRecord
+			if err := json.Unmarshal(line, &snap); err != nil {
+				return fmt.Errorf("index entities jsonl: %s:%d: malformed entity_snapshot record: %w", path, lineNo, err)
+			}
+			if strings.TrimSpace(snap.ChapterID) == "" {
+				return fmt.Errorf("index entities jsonl: %s:%d: entity_snapshot missing chapter_id", path, lineNo)
+			}
+			if !chapterIDs[snap.ChapterID] {
+				return fmt.Errorf("index entities jsonl: %s:%d: entity_snapshot references missing chapter %q", path, lineNo, snap.ChapterID)
+			}
+			if snap.EntityCount == nil {
+				return fmt.Errorf("index entities jsonl: %s:%d: entity_snapshot missing entity_count", path, lineNo)
+			}
+			if snap.MentionCount == nil {
+				return fmt.Errorf("index entities jsonl: %s:%d: entity_snapshot missing mention_count", path, lineNo)
+			}
+			if *snap.EntityCount < 0 {
+				return fmt.Errorf("index entities jsonl: %s:%d: entity_snapshot has invalid entity_count %d", path, lineNo, *snap.EntityCount)
+			}
+			if *snap.MentionCount < 0 {
+				return fmt.Errorf("index entities jsonl: %s:%d: entity_snapshot has invalid mention_count %d", path, lineNo, *snap.MentionCount)
+			}
+			pending := pendingByChapter[snap.ChapterID]
+			pendingCount := 0
+			if pending.entities != nil {
+				pendingCount = len(pending.entities)
+			}
+			if pendingCount != *snap.EntityCount {
+				return fmt.Errorf(
+					"index entities jsonl: %s:%d: entity_snapshot entity_count mismatch for %s: declared %d, pending %d",
+					path, lineNo, snap.ChapterID, *snap.EntityCount, pendingCount,
+				)
+			}
+			committed := make(map[string]entityCandidate, pendingCount)
+			for id, cand := range pending.entities {
+				committed[id] = cand
+			}
+			committedByChapter[snap.ChapterID] = committed
+			snapshots[snap.ChapterID] = entitySnapshotCandidate{record: snap, line: lineNo}
+			delete(pendingByChapter, snap.ChapterID)
+		default:
+			// Ignore unsupported record types for forward compatibility.
 		}
-		var rec entityJSONLRecord
-		if err := json.Unmarshal(line, &rec); err != nil {
-			return fmt.Errorf("index entities jsonl: %s:%d: malformed entity record: %w", path, lineNo, err)
-		}
-		out[rec.ID] = entityCandidate{record: rec, line: lineNo, raw: string(line)}
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, nil, nil, nil, err
 	}
-	return out, nil
+
+	committedEntities := make(map[string]entityCandidate)
+	entityChapterByID := make(map[string]string)
+	for chapterID, entities := range committedByChapter {
+		for id, cand := range entities {
+			if _, exists := committedEntities[id]; exists {
+				return nil, nil, nil, nil, fmt.Errorf("index entities jsonl: duplicate committed entity id %q", id)
+			}
+			committedEntities[id] = cand
+			entityChapterByID[id] = chapterID
+		}
+	}
+	return committedEntities, entityChapterByID, allEntityIDs, snapshots, nil
 }
 
-func readMentionJSONL(path string) (map[string]mentionCandidate, error) {
+func entityRecordChapter(path string, lineNo int, rec entityJSONLRecord, paragraphs map[string]string) (string, error) {
+	if len(rec.Evidence) == 0 {
+		return "", fmt.Errorf("index entities jsonl: %s:%d: entity %s has no evidence", path, lineNo, rec.ID)
+	}
+	chapterID := ""
+	for _, pid := range rec.Evidence {
+		pid = strings.TrimSpace(pid)
+		if pid == "" {
+			return "", fmt.Errorf("index entities jsonl: %s:%d: entity %s has blank evidence paragraph", path, lineNo, rec.ID)
+		}
+		ch, ok := paragraphs[pid]
+		if !ok {
+			return "", fmt.Errorf("index entities jsonl: %s:%d: entity %s references missing evidence paragraph %q", path, lineNo, rec.ID, pid)
+		}
+		if chapterID == "" {
+			chapterID = ch
+		} else if chapterID != ch {
+			return "", fmt.Errorf("index entities jsonl: %s:%d: entity %s evidence spans chapters %s and %s", path, lineNo, rec.ID, chapterID, ch)
+		}
+	}
+	return chapterID, nil
+}
+
+func readCommittedMentionJSONL(
+	path string,
+	paragraphs map[string]string,
+	entityChapterByID map[string]string,
+	allEntityIDs map[string]bool,
+) (map[string]mentionCandidate, map[string]int, error) {
 	out := make(map[string]mentionCandidate)
 	if err := scanJSONL(path, func(lineNo int, line []byte) error {
 		var typed struct {
@@ -296,13 +500,65 @@ func readMentionJSONL(path string) (map[string]mentionCandidate, error) {
 		if err := json.Unmarshal(line, &rec); err != nil {
 			return fmt.Errorf("index mentions jsonl: %s:%d: malformed mention record: %w", path, lineNo, err)
 		}
+		entityID := strings.TrimSpace(rec.EntityID)
+		entityChapter, committed := entityChapterByID[entityID]
+		if !committed {
+			if allEntityIDs[entityID] {
+				return nil
+			}
+			return fmt.Errorf("index mentions jsonl: %s:%d: mention references missing entity %q", path, lineNo, rec.EntityID)
+		}
+		chapterID, ok := paragraphs[rec.ParagraphID]
+		if !ok {
+			return fmt.Errorf("index mentions jsonl: %s:%d: mention references missing paragraph %q", path, lineNo, rec.ParagraphID)
+		}
+		if rec.ChapterID == "" {
+			rec.ChapterID = chapterID
+		} else if rec.ChapterID != chapterID {
+			return fmt.Errorf("index mentions jsonl: %s:%d: mention chapter %s does not match paragraph chapter %s", path, lineNo, rec.ChapterID, chapterID)
+		}
+		if entityChapter != chapterID {
+			return fmt.Errorf("index mentions jsonl: %s:%d: mention chapter %s does not match entity chapter %s", path, lineNo, chapterID, entityChapter)
+		}
 		key := rec.EntityID + "\x00" + rec.ParagraphID + "\x00" + rec.SurfaceText
 		out[key] = mentionCandidate{record: rec, line: lineNo, raw: string(line)}
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return out, nil
+
+	counts := make(map[string]int)
+	for _, cand := range out {
+		counts[cand.record.ChapterID]++
+	}
+	return out, counts, nil
+}
+
+func sortedEntityIDs(values map[string]entityCandidate) []string {
+	ids := make([]string, 0, len(values))
+	for id := range values {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func sortedMentionKeys(values map[string]mentionCandidate) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedEntitySnapshotChapters(values map[string]entitySnapshotCandidate) []string {
+	chapters := make([]string, 0, len(values))
+	for chapterID := range values {
+		chapters = append(chapters, chapterID)
+	}
+	sort.Strings(chapters)
+	return chapters
 }
 
 func scanJSONL(path string, fn func(lineNo int, line []byte) error) error {

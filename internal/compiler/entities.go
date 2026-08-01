@@ -48,6 +48,18 @@ type EntityGeneration struct {
 	GeneratedAt   string `json:"generated_at"`
 }
 
+// EntitySnapshotRecord marks that all entity and mention records for a chapter
+// have been fully written to model/entities.jsonl and model/mentions.jsonl.
+// It is appended after the mentions file has been flushed so IndexEntitiesJSONL
+// can identify a committed cross-file batch.
+type EntitySnapshotRecord struct {
+	RecordType   string `json:"record_type"` // "entity_snapshot"
+	ChapterID    string `json:"chapter_id"`
+	EntityCount  int    `json:"entity_count"`
+	MentionCount int    `json:"mention_count"`
+	CommittedAt  string `json:"committed_at"` // RFC3339
+}
+
 type rawEntityResponse struct {
 	Entities []rawEntityCandidate `json:"entities"`
 }
@@ -100,12 +112,12 @@ func compileEntities(
 	items := make([]OrderedWorkItem[entityWorkInput], 0, len(chapters))
 	for chapterIndex, ch := range chapters {
 		if !opts.Force {
-			n, err := st.EntityMentionCountByChapter(ch.ID)
+			committed, err := st.IsEntitySnapshotCommitted(ch.ID)
 			if err != nil {
 				return 0, err
 			}
-			if n > 0 {
-				reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Entities %s (%d/%d): already exists", ch.ID, chapterIndex+1, len(chapters))})
+			if committed {
+				reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Entities %s (%d/%d): already current", ch.ID, chapterIndex+1, len(chapters))})
 				continue
 			}
 		}
@@ -160,6 +172,7 @@ func compileEntities(
 		input := output.Input
 		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-start", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Entities %s (%d/%d): extracting from %d paragraph(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(input.Paragraphs))})
 		entities, mentions := finalizeEntityCandidates(output.Candidates)
+		output.Snapshot = entitySnapshotForRecords(input.Chapter.ID, entities, mentions)
 		if err := committer.CommitEntities(output, entities, mentions); err != nil {
 			return err
 		}
@@ -231,6 +244,25 @@ func entityRowFromRecord(entity EntityRecord) store.EntityRow {
 		Status:          entity.Status,
 		RawJSON:         string(rawBytes),
 	}
+}
+
+func entitySnapshotForRecords(chapterID string, entities []EntityRecord, mentions []MentionRecord) EntitySnapshotRecord {
+	return EntitySnapshotRecord{
+		RecordType:   "entity_snapshot",
+		ChapterID:    chapterID,
+		EntityCount:  len(entities),
+		MentionCount: uniqueMentionRecordCount(mentions),
+		CommittedAt:  time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+func uniqueMentionRecordCount(mentions []MentionRecord) int {
+	seen := make(map[string]bool, len(mentions))
+	for _, mention := range mentions {
+		key := mention.EntityID + "\x00" + mention.ParagraphID + "\x00" + mention.SurfaceText
+		seen[key] = true
+	}
+	return len(seen)
 }
 
 func mentionRowFromRecord(mention MentionRecord) store.MentionRow {

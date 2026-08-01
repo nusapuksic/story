@@ -109,6 +109,12 @@ CREATE TABLE IF NOT EXISTS mentions (
 	PRIMARY KEY (entity_id, paragraph_id, surface_text)
 );
 CREATE INDEX IF NOT EXISTS mentions_chapter ON mentions(chapter_id);
+CREATE TABLE IF NOT EXISTS chapter_entity_snapshots (
+	chapter_id    TEXT PRIMARY KEY REFERENCES chapters(id),
+	entity_count  INTEGER NOT NULL,
+	mention_count INTEGER NOT NULL,
+	committed_at  TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS model_runs (
 	run_id      TEXT PRIMARY KEY,
 	run_type    TEXT NOT NULL,

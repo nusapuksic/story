@@ -134,10 +134,11 @@ func (c compileArtifactCommitter) CommitEntities(output entityWorkOutput, entiti
 			return err
 		}
 	}
-	if output.Input.Force {
-		if err := c.st.DeleteEntityMentionsForChapter(output.Input.Chapter.ID); err != nil {
-			return err
-		}
+	if err := appendJSONL(c.entitiesFile, output.Snapshot); err != nil {
+		return fmt.Errorf("write entity_snapshot for %s: %w", output.Input.Chapter.ID, err)
+	}
+	if err := c.st.DeleteEntityMentionsForChapter(output.Input.Chapter.ID); err != nil {
+		return err
 	}
 	for _, entity := range entities {
 		if err := c.st.InsertEntity(entityRowFromRecord(entity)); err != nil {
@@ -148,6 +149,9 @@ func (c compileArtifactCommitter) CommitEntities(output entityWorkOutput, entiti
 		if err := c.st.InsertMention(mentionRowFromRecord(mention)); err != nil {
 			return err
 		}
+	}
+	if err := c.st.MarkEntitySnapshotCommitted(output.Input.Chapter.ID, output.Snapshot.EntityCount, output.Snapshot.MentionCount, output.Snapshot.CommittedAt); err != nil {
+		return err
 	}
 	return c.recordCommit(output.Staged)
 }

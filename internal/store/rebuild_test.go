@@ -123,6 +123,101 @@ func TestRebuildFailsOnMalformedScenesJSONL(t *testing.T) {
 	}
 }
 
+func TestRebuildRestoresEntitiesAndMentionsFromSnapshot(t *testing.T) {
+	p, p1, _, _ := newProjectWithChapter(t)
+	writeEntitiesJSONL(t, p, []any{
+		entityJSONLTestRecord("entity-1", "Mara", p1),
+		map[string]any{
+			"record_type":   "entity_snapshot",
+			"chapter_id":    "ch-0001",
+			"entity_count":  1,
+			"mention_count": 1,
+			"committed_at":  "2024-01-01T00:00:00Z",
+		},
+	})
+	writeMentionsJSONL(t, p, []any{mentionJSONLTestRecord("entity-1", "ch-0001", p1, "Mara")})
+
+	if err := store.Rebuild(p); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	st := openProjectStore(t, p)
+	entities, mentions, err := st.EntityCounts()
+	if err != nil {
+		t.Fatalf("EntityCounts: %v", err)
+	}
+	if entities != 1 || mentions != 1 {
+		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, mentions)
+	}
+	committed, err := st.IsEntitySnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsEntitySnapshotCommitted: %v", err)
+	}
+	if !committed {
+		t.Fatal("entity snapshot should be marked committed")
+	}
+}
+
+func TestRebuildDiscardsEntitiesWithoutSnapshot(t *testing.T) {
+	p, p1, _, _ := newProjectWithChapter(t)
+	writeEntitiesJSONL(t, p, []any{entityJSONLTestRecord("entity-partial", "Mara", p1)})
+	writeMentionsJSONL(t, p, []any{mentionJSONLTestRecord("entity-partial", "ch-0001", p1, "Mara")})
+
+	if err := store.Rebuild(p); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	st := openProjectStore(t, p)
+	entities, mentions, err := st.EntityCounts()
+	if err != nil {
+		t.Fatalf("EntityCounts: %v", err)
+	}
+	if entities != 0 || mentions != 0 {
+		t.Fatalf("uncommitted entity batch was indexed: (%d, %d)", entities, mentions)
+	}
+	committed, err := st.IsEntitySnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsEntitySnapshotCommitted: %v", err)
+	}
+	if committed {
+		t.Fatal("entity snapshot should not be committed without marker")
+	}
+}
+
+func TestRebuildFailsOnEntitySnapshotEntityCountMismatch(t *testing.T) {
+	p, _, _, _ := newProjectWithChapter(t)
+	writeEntitiesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":   "entity_snapshot",
+			"chapter_id":    "ch-0001",
+			"entity_count":  1,
+			"mention_count": 0,
+			"committed_at":  "2024-01-01T00:00:00Z",
+		},
+	})
+
+	err := store.Rebuild(p)
+	if err == nil || !strings.Contains(err.Error(), "entity_count mismatch") {
+		t.Fatalf("Rebuild error = %v, want entity_count mismatch", err)
+	}
+}
+
+func TestRebuildFailsOnEntitySnapshotMentionCountMismatch(t *testing.T) {
+	p, p1, _, _ := newProjectWithChapter(t)
+	writeEntitiesJSONL(t, p, []any{
+		entityJSONLTestRecord("entity-1", "Mara", p1),
+		map[string]any{
+			"record_type":   "entity_snapshot",
+			"chapter_id":    "ch-0001",
+			"entity_count":  1,
+			"mention_count": 1,
+			"committed_at":  "2024-01-01T00:00:00Z",
+		},
+	})
+
+	err := store.Rebuild(p)
+	if err == nil || !strings.Contains(err.Error(), "mention_count mismatch") {
+		t.Fatalf("Rebuild error = %v, want mention_count mismatch", err)
+	}
+}
 func TestRebuildFailsOnMissingSceneParagraph(t *testing.T) {
 	p, _, _, _ := newProjectWithChapter(t)
 	writeScenesJSONL(t, p, []any{
@@ -741,6 +836,68 @@ func newProjectWithEmptyChapter(t *testing.T) *project.Project {
 	return p
 }
 
+func writeEntitiesJSONL(t *testing.T, p *project.Project, records []any) {
+	t.Helper()
+	writeJSONLLines(t, p.Path(filepath.Join(project.ModelDir, "entities.jsonl")), records, "entity")
+}
+
+func writeMentionsJSONL(t *testing.T, p *project.Project, records []any) {
+	t.Helper()
+	writeJSONLLines(t, p.Path(filepath.Join(project.ModelDir, "mentions.jsonl")), records, "mention")
+}
+
+func writeJSONLLines(t *testing.T, path string, records []any, label string) {
+	t.Helper()
+	var lines []string
+	for _, rec := range records {
+		b, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal %s record: %v", label, err)
+		}
+		lines = append(lines, string(b))
+	}
+	content := ""
+	for _, ln := range lines {
+		content += ln + "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s jsonl: %v", label, err)
+	}
+}
+
+func entityJSONLTestRecord(id, name, evidenceID string) map[string]any {
+	return map[string]any{
+		"record_type":    "entity",
+		"id":             id,
+		"type":           "character",
+		"canonical_name": name,
+		"aliases":        []string{name},
+		"evidence":       []string{evidenceID},
+		"generation": map[string]any{
+			"run_id":         "compile-entities-test",
+			"model":          "test-model",
+			"prompt_version": "entity-resolution-v1",
+		},
+		"status": "generated",
+	}
+}
+
+func mentionJSONLTestRecord(entityID, chapterID, paragraphID, surface string) map[string]any {
+	return map[string]any{
+		"record_type":  "mention",
+		"entity_id":    entityID,
+		"chapter_id":   chapterID,
+		"paragraph_id": paragraphID,
+		"surface_text": surface,
+		"confidence":   0.95,
+		"generation": map[string]any{
+			"run_id":         "compile-entities-test",
+			"model":          "test-model",
+			"prompt_version": "entity-resolution-v1",
+		},
+		"status": "generated",
+	}
+}
 func writeScenesJSONL(t *testing.T, p *project.Project, records []any) {
 	t.Helper()
 	var lines []string

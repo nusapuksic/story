@@ -1281,6 +1281,14 @@ func TestCompileEntitiesWithFakeProvider(t *testing.T) {
 		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, mentions)
 	}
 
+	entitiesData, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, "entities.jsonl")))
+	if err != nil {
+		t.Fatalf("read entities.jsonl: %v", err)
+	}
+	if !strings.Contains(string(entitiesData), `"record_type":"entity_snapshot"`) {
+		t.Fatalf("entities.jsonl missing entity snapshot record: %s", entitiesData)
+	}
+
 	data, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, "mentions.jsonl")))
 	if err != nil {
 		t.Fatalf("read mentions.jsonl: %v", err)
@@ -1340,6 +1348,45 @@ func TestCompileEntitiesEmptyTruncatedJSONDoesNotFail(t *testing.T) {
 	}
 	if result.EntitiesBuilt != 0 {
 		t.Fatalf("EntitiesBuilt = %d, want 0", result.EntitiesBuilt)
+	}
+}
+
+func TestCompileEntitiesEmptyResultWritesCommittedSnapshot(t *testing.T) {
+	p, st := buildTestProject(t)
+	fake := &fakeProvider{response: `{"entities":[]}`}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities: %v", err)
+	}
+	if result.EntitiesBuilt != 0 {
+		t.Fatalf("EntitiesBuilt = %d, want 0", result.EntitiesBuilt)
+	}
+	committed, err := st.IsEntitySnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsEntitySnapshotCommitted: %v", err)
+	}
+	if !committed {
+		t.Fatal("empty entity result should still commit a chapter snapshot")
+	}
+
+	result, err = compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("second compile entities: %v", err)
+	}
+	if result.EntitiesBuilt != 0 {
+		t.Fatalf("second EntitiesBuilt = %d, want 0", result.EntitiesBuilt)
+	}
+	if len(fake.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1 after committed empty snapshot", len(fake.requests))
 	}
 }
 

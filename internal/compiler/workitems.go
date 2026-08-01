@@ -60,6 +60,7 @@ type entityWorkInput struct {
 type entityWorkOutput struct {
 	Input      entityWorkInput
 	Candidates []entityRecordCandidate
+	Snapshot   EntitySnapshotRecord
 	Staged     StagedResultRef
 }
 
