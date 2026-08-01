@@ -733,18 +733,26 @@ func TestCompileAllRunsSummariesBeforeEntities(t *testing.T) {
 	p.Config.Compile.Verification = false
 	p.Config.Compile.VerificationMode = compiler.VerificationModeOff
 
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerScenes})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
 	paragraphs, err := st.ParagraphsByChapter("ch-0001")
 	if err != nil {
 		t.Fatalf("ParagraphsByChapter: %v", err)
 	}
-	if len(paragraphs) == 0 {
-		t.Fatal("expected chapter paragraphs")
+	scenes, err := st.ScenesByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ScenesByChapter: %v", err)
+	}
+	if len(paragraphs) == 0 || len(scenes) == 0 {
+		t.Fatal("expected chapter paragraphs and scenes")
 	}
 
-	cardJSON := `{"title":"Scene","summary":"Scene summary.","evidence":[]}`
+	cardJSON := `{"title":"Scene","summary":"Scene summary.","entities":["Mara"],"participants":["Mara"],"evidence":[]}`
 	chapterSummaryJSON := `{"summary":"Chapter summary.","evidence":["` + paragraphs[0].ID + `"]}`
 	bookSummaryJSON := `{"summary":"Book summary.","evidence":["ch-0001"]}`
-	entitiesJSON := `{"entities":[{"canonical_name":"Mara","type":"character","mentions":[{"paragraph_id":"` + paragraphs[0].ID + `","surface_text":"Mara","confidence":0.95}]}]}`
+	entitiesJSON := `{"entities":[{"canonical_name":"Mara","type":"character","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara"],"confidence":0.95}]}]}`
 	fake := &fakeProvider{responses: []string{
 		cardJSON,
 		cardJSON,
@@ -773,7 +781,7 @@ func TestCompileAllRunsSummariesBeforeEntities(t *testing.T) {
 		"Extract a structured scene card",
 		"Summarize this chapter",
 		"Produce a whole-book orientation summary",
-		"Extract candidate entities",
+		"Consolidate candidate entities",
 	}
 	for i, want := range wantPrompts {
 		prompt := fake.requests[i].Messages[1].Content
@@ -1346,17 +1354,48 @@ func TestCompileSummariesRequiresProvider(t *testing.T) {
 	}
 }
 
-func TestCompileEntitiesWithFakeProvider(t *testing.T) {
-	p, st := buildTestProject(t)
+func seedEntityReverseIndex(t *testing.T, p *project.Project, st *store.Store) []store.SceneRow {
+	t.Helper()
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerScenes})
+	if err != nil {
+		t.Fatalf("compile scenes for entity seed: %v", err)
+	}
 	paragraphs, err := st.ParagraphsByChapter("ch-0001")
 	if err != nil {
 		t.Fatalf("ParagraphsByChapter: %v", err)
 	}
-	if len(paragraphs) == 0 {
-		t.Fatal("expected chapter paragraphs")
+	scenes, err := st.ScenesByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ScenesByChapter: %v", err)
 	}
+	if len(paragraphs) == 0 || len(scenes) == 0 {
+		t.Fatal("expected paragraphs and scenes for entity seed")
+	}
+	rawCard := `{"record_type":"scene_card","scene_id":"` + scenes[0].ID + `","title":"Bell warning","summary":"Mara meets Old Petar near the lake.","entities":["Mara","Maraa"],"pov":["Mara"],"participants":["Mara","Old Petar"],"locations":["Lake edge"],"evidence":["` + paragraphs[0].ID + `"],"generation":{},"status":"generated"}`
+	if err := st.InsertSceneCard(store.SceneCardRow{
+		SceneID:         scenes[0].ID,
+		Title:           "Bell warning",
+		Summary:         "Mara meets Old Petar near the lake.",
+		Evidence:        []string{paragraphs[0].ID},
+		GenerationRun:   "compile-test",
+		GenerationModel: "test-model",
+		PromptVersion:   "scene-extraction-v1",
+		Status:          "generated",
+		RawJSON:         rawCard,
+	}); err != nil {
+		t.Fatalf("InsertSceneCard: %v", err)
+	}
+	if err := st.RebuildReverseIndex(); err != nil {
+		t.Fatalf("RebuildReverseIndex: %v", err)
+	}
+	return scenes
+}
 
-	fake := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","aliases":["she"],"mentions":[{"paragraph_id":"` + paragraphs[0].ID + `","surface_text":"Mara","confidence":0.95}]}]}`}
+func TestCompileEntitiesWithFakeProvider(t *testing.T) {
+	p, st := buildTestProject(t)
+	scenes := seedEntityReverseIndex(t, p, st)
+
+	fake := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","aliases":["Maraa"],"occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara","Maraa"],"confidence":0.95,"flags":[{"type":"possible_typo","value":"Maraa","suggested":"Mara","confidence":0.8}]}],"flags":[{"type":"possible_typo","value":"Maraa","suggested":"Mara","confidence":0.8}]}]}`}
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
 		Layer:              compiler.LayerEntities,
 		ExtractionProvider: fake,
@@ -1371,12 +1410,12 @@ func TestCompileEntitiesWithFakeProvider(t *testing.T) {
 	assertRunPendingFiles(t, p, result.RunID, compiler.LayerEntities, 1)
 	assertRunCommitLogSequences(t, p, result.RunID, compiler.LayerEntities, []int{0})
 	assertRunPendingPayloadOmits(t, p, result.RunID, compiler.LayerEntities, `"entity_id"`, `"record_type"`)
-	entities, mentions, err := st.EntityCounts()
+	entities, occurrences, err := st.EntityCounts()
 	if err != nil {
 		t.Fatalf("EntityCounts: %v", err)
 	}
-	if entities != 1 || mentions != 1 {
-		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, mentions)
+	if entities != 1 || occurrences != 1 {
+		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, occurrences)
 	}
 
 	entitiesData, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, "entities.jsonl")))
@@ -1387,28 +1426,25 @@ func TestCompileEntitiesWithFakeProvider(t *testing.T) {
 		t.Fatalf("entities.jsonl missing entity snapshot record: %s", entitiesData)
 	}
 
-	data, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, "mentions.jsonl")))
+	data, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, "occurrences.jsonl")))
 	if err != nil {
-		t.Fatalf("read mentions.jsonl: %v", err)
+		t.Fatalf("read occurrences.jsonl: %v", err)
 	}
-	if !strings.Contains(string(data), `"record_type":"mention"`) {
-		t.Fatalf("mentions.jsonl missing mention record: %s", data)
+	if !strings.Contains(string(data), `"record_type":"occurrence"`) {
+		t.Fatalf("occurrences.jsonl missing occurrence record: %s", data)
+	}
+	if !strings.Contains(string(data), `"surface_texts":["Mara","Maraa"]`) {
+		t.Fatalf("occurrences.jsonl missing consolidated surfaces: %s", data)
 	}
 }
 
 func TestCompileEntitiesSalvagesTruncatedJSON(t *testing.T) {
 	p, st := buildTestProject(t)
-	paragraphs, err := st.ParagraphsByChapter("ch-0001")
-	if err != nil {
-		t.Fatalf("ParagraphsByChapter: %v", err)
-	}
-	if len(paragraphs) == 0 {
-		t.Fatal("expected chapter paragraphs")
-	}
+	scenes := seedEntityReverseIndex(t, p, st)
 
 	truncated := `{"entities":[` +
-		`{"canonical_name":"Mara","type":"character","aliases":["she"],"mentions":[{"paragraph_id":"` + paragraphs[0].ID + `","surface_text":"Mara","confidence":0.95}]},` +
-		`{"canonical_name":"Petar","type":"character","mentions":[{"paragraph_id":"` + paragraphs[0].ID + `","surface_text":"Petar"}`
+		`{"canonical_name":"Mara","type":"character","aliases":["Maraa"],"occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara"],"confidence":0.95}]},` +
+		`{"canonical_name":"Petar","type":"character","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Old Petar"]}`
 	fake := &fakeProvider{response: truncated}
 
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -1423,17 +1459,18 @@ func TestCompileEntitiesSalvagesTruncatedJSON(t *testing.T) {
 		t.Fatalf("EntitiesBuilt = %d, want 1 salvaged entity", result.EntitiesBuilt)
 	}
 
-	entities, mentions, err := st.EntityCounts()
+	entities, occurrences, err := st.EntityCounts()
 	if err != nil {
 		t.Fatalf("EntityCounts: %v", err)
 	}
-	if entities != 1 || mentions != 1 {
-		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, mentions)
+	if entities != 1 || occurrences != 1 {
+		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, occurrences)
 	}
 }
 
 func TestCompileEntitiesEmptyTruncatedJSONDoesNotFail(t *testing.T) {
 	p, st := buildTestProject(t)
+	seedEntityReverseIndex(t, p, st)
 	fake := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara"`}
 
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -1451,6 +1488,7 @@ func TestCompileEntitiesEmptyTruncatedJSONDoesNotFail(t *testing.T) {
 
 func TestCompileEntitiesEmptyResultWritesCommittedSnapshot(t *testing.T) {
 	p, st := buildTestProject(t)
+	seedEntityReverseIndex(t, p, st)
 	fake := &fakeProvider{response: `{"entities":[]}`}
 
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -1490,6 +1528,7 @@ func TestCompileEntitiesEmptyResultWritesCommittedSnapshot(t *testing.T) {
 
 func TestCompileWritesResponseAudit(t *testing.T) {
 	p, st := buildTestProject(t)
+	seedEntityReverseIndex(t, p, st)
 	fake := &fakeProvider{
 		response:     "",
 		finishReason: "length",
@@ -1590,7 +1629,7 @@ func TestCompileWritesResponseAudit(t *testing.T) {
 	}
 }
 
-func TestCompileEntitiesIncludesExistingExtractionContext(t *testing.T) {
+func TestCompileEntitiesUsesReverseIndexContext(t *testing.T) {
 	p, st := buildTestProject(t)
 	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerScenes})
 	if err != nil {
@@ -1615,7 +1654,7 @@ func TestCompileEntitiesIncludesExistingExtractionContext(t *testing.T) {
 		t.Fatalf("write summaries: %v", err)
 	}
 
-	rawCard := `{"record_type":"scene_card","scene_id":"` + scenes[0].ID + `","title":"Bell warning","summary":"Mara meets Old Petar near the lake.","pov":["Mara"],"participants":["Mara","Old Petar"],"locations":["Lake edge"],"unresolved":["Why the bell must stay silent"],"evidence":["` + paragraphs[0].ID + `"],"generation":{},"status":"verified"}`
+	rawCard := `{"record_type":"scene_card","scene_id":"` + scenes[0].ID + `","title":"Bell warning","summary":"Mara meets Old Petar near the lake.","entities":["Maraa"],"pov":["Mara"],"participants":["Mara","Old Petar"],"locations":["Lake edge"],"unresolved":["Why the bell must stay silent"],"evidence":["` + paragraphs[0].ID + `"],"generation":{},"status":"verified"}`
 	if err := st.InsertSceneCard(store.SceneCardRow{
 		SceneID: scenes[0].ID,
 		Title:   "Bell warning",
@@ -1629,7 +1668,11 @@ func TestCompileEntitiesIncludesExistingExtractionContext(t *testing.T) {
 		t.Fatalf("InsertSceneCard: %v", err)
 	}
 
-	fake := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","mentions":[{"paragraph_id":"` + paragraphs[0].ID + `","surface_text":"Mara","confidence":0.95}]}]}`}
+	if err := st.RebuildReverseIndex(); err != nil {
+		t.Fatalf("RebuildReverseIndex: %v", err)
+	}
+
+	fake := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","aliases":["Maraa"],"occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara","Maraa"],"confidence":0.95,"flags":[{"type":"possible_typo","value":"Maraa","suggested":"Mara","confidence":0.8}]}]}]}`}
 	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
 		Layer:              compiler.LayerEntities,
 		ExtractionProvider: fake,
@@ -1644,18 +1687,27 @@ func TestCompileEntitiesIncludesExistingExtractionContext(t *testing.T) {
 
 	prompt := fake.requests[0].Messages[1].Content
 	for _, want := range []string{
-		"Existing extraction context (orientation only; do not cite this section):",
-		"Book summary: A lakeside mystery turns on bells and memory.",
-		"Chapter summary: Mara receives the bell warning.",
-		"Themes: warnings",
-		"Scene cards:",
-		"Bell warning - Mara meets Old Petar near the lake.",
-		"Participants: Mara, Old Petar.",
-		"Locations: Lake edge.",
-		"Authoritative manuscript paragraph excerpts:",
+		"Consolidate candidate entities from scene-card reverse-index results",
+		"Reverse-index candidates:",
+		"- scene " + scenes[0].ID,
+		"entities: Maraa",
+		"locations: Lake edge",
+		"participants: Mara; Old Petar",
+		"pov: Mara",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("entity prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, unwanted := range []string{
+		"Existing extraction context",
+		"Book summary:",
+		"Chapter summary:",
+		"Authoritative manuscript paragraph excerpts:",
+		paragraphs[0].Text,
+	} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("entity prompt unexpectedly contains %q:\n%s", unwanted, prompt)
 		}
 	}
 }

@@ -49,12 +49,11 @@ type stagedSceneCardPayload struct {
 }
 
 type entityWorkInput struct {
-	Chapter       store.ChapterRow
-	ChapterIndex  int
-	ChapterTotal  int
-	Paragraphs    []store.ParagraphRow
-	PromptContext entityExtractionContext
-	Force         bool
+	Chapter      store.ChapterRow
+	ChapterIndex int
+	ChapterTotal int
+	Refs         []store.ReverseIndexRef
+	Force        bool
 }
 
 type entityWorkOutput struct {
@@ -69,23 +68,27 @@ type stagedEntityPayload struct {
 }
 
 type entityRecordCandidate struct {
-	Type          string                   `json:"type"`
-	CanonicalName string                   `json:"canonical_name"`
-	Aliases       []string                 `json:"aliases,omitempty"`
-	Evidence      []string                 `json:"evidence"`
-	Mentions      []mentionRecordCandidate `json:"mentions"`
-	Generation    EntityGeneration         `json:"generation"`
-	Status        string                   `json:"status"`
+	Type          string                      `json:"type"`
+	CanonicalName string                      `json:"canonical_name"`
+	Aliases       []string                    `json:"aliases,omitempty"`
+	Evidence      []string                    `json:"evidence"`
+	Occurrences   []occurrenceRecordCandidate `json:"occurrences"`
+	Flags         []EntityFlag                `json:"flags,omitempty"`
+	Generation    EntityGeneration            `json:"generation"`
+	Status        string                      `json:"status"`
 }
 
-type mentionRecordCandidate struct {
-	ChapterID   string           `json:"chapter_id"`
-	ParagraphID string           `json:"paragraph_id"`
-	SurfaceText string           `json:"surface_text"`
-	Confidence  float64          `json:"confidence"`
-	Generation  EntityGeneration `json:"generation"`
-	Status      string           `json:"status"`
+type occurrenceRecordCandidate struct {
+	ChapterID    string           `json:"chapter_id"`
+	SceneID      string           `json:"scene_id"`
+	SurfaceTexts []string         `json:"surface_texts"`
+	SourceFields []string         `json:"source_fields"`
+	Confidence   float64          `json:"confidence"`
+	Flags        []EntityFlag     `json:"flags,omitempty"`
+	Generation   EntityGeneration `json:"generation"`
+	Status       string           `json:"status"`
 }
+
 type summaryWorkInput struct {
 	Chapter      store.ChapterRow
 	ChapterIndex int

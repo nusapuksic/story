@@ -8,12 +8,12 @@ import (
 )
 
 type compileArtifactCommitter struct {
-	st            *store.Store
-	staging       *RunStagingStore
-	scenesFile    *os.File
-	summariesFile *os.File
-	entitiesFile  *os.File
-	mentionsFile  *os.File
+	st              *store.Store
+	staging         *RunStagingStore
+	scenesFile      *os.File
+	summariesFile   *os.File
+	entitiesFile    *os.File
+	occurrencesFile *os.File
 }
 
 func (c compileArtifactCommitter) CommitScenes(output sceneWorkOutput) error {
@@ -114,30 +114,30 @@ func (c compileArtifactCommitter) CommitBookSummary(ref StagedResultRef, record 
 	return c.recordCommit(ref)
 }
 
-func (c compileArtifactCommitter) CommitEntities(output entityWorkOutput, entities []EntityRecord, mentions []MentionRecord) error {
+func (c compileArtifactCommitter) CommitEntities(output entityWorkOutput, entities []EntityRecord, occurrences []OccurrenceRecord) error {
 	if c.st == nil {
 		return fmt.Errorf("commit entities: store is nil")
 	}
 	if c.entitiesFile == nil {
 		return fmt.Errorf("commit entities: entities file is nil")
 	}
-	if c.mentionsFile == nil {
-		return fmt.Errorf("commit entities: mentions file is nil")
+	if c.occurrencesFile == nil {
+		return fmt.Errorf("commit entities: occurrences file is nil")
 	}
 	for _, entity := range entities {
 		if err := appendJSONL(c.entitiesFile, entity); err != nil {
 			return err
 		}
 	}
-	for _, mention := range mentions {
-		if err := appendJSONL(c.mentionsFile, mention); err != nil {
+	for _, occurrence := range occurrences {
+		if err := appendJSONL(c.occurrencesFile, occurrence); err != nil {
 			return err
 		}
 	}
 	if err := appendJSONL(c.entitiesFile, output.Snapshot); err != nil {
 		return fmt.Errorf("write entity_snapshot for %s: %w", output.Input.Chapter.ID, err)
 	}
-	if err := c.st.DeleteEntityMentionsForChapter(output.Input.Chapter.ID); err != nil {
+	if err := c.st.DeleteEntityOccurrencesForChapter(output.Input.Chapter.ID); err != nil {
 		return err
 	}
 	for _, entity := range entities {
@@ -145,12 +145,12 @@ func (c compileArtifactCommitter) CommitEntities(output entityWorkOutput, entiti
 			return err
 		}
 	}
-	for _, mention := range mentions {
-		if err := c.st.InsertMention(mentionRowFromRecord(mention)); err != nil {
+	for _, occurrence := range occurrences {
+		if err := c.st.InsertOccurrence(occurrenceRowFromRecord(occurrence)); err != nil {
 			return err
 		}
 	}
-	if err := c.st.MarkEntitySnapshotCommitted(output.Input.Chapter.ID, output.Snapshot.EntityCount, output.Snapshot.MentionCount, output.Snapshot.CommittedAt); err != nil {
+	if err := c.st.MarkEntitySnapshotCommitted(output.Input.Chapter.ID, output.Snapshot.EntityCount, output.Snapshot.OccurrenceCount, output.Snapshot.CommittedAt); err != nil {
 		return err
 	}
 	return c.recordCommit(output.Staged)

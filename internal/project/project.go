@@ -64,7 +64,7 @@ var canonicalDirs = []string{
 var modelFiles = []string{
 	"scenes.jsonl",
 	"entities.jsonl",
-	"mentions.jsonl",
+	"occurrences.jsonl",
 	"claims.jsonl",
 	"events.jsonl",
 	"character-states.jsonl",

@@ -354,7 +354,7 @@ func TestReplaceClearsStaleDerivedModelFiles(t *testing.T) {
 	modelFiles := []string{
 		"scenes.jsonl",
 		"entities.jsonl",
-		"mentions.jsonl",
+		"occurrences.jsonl",
 		"claims.jsonl",
 		"events.jsonl",
 		"character-states.jsonl",

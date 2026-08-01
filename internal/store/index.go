@@ -106,7 +106,7 @@ func Rebuild(p *project.Project) (retErr error) {
 		}
 		if err := s.IndexEntitiesJSONL(
 			p.Path(filepath.Join(project.ModelDir, "entities.jsonl")),
-			p.Path(filepath.Join(project.ModelDir, "mentions.jsonl")),
+			p.Path(filepath.Join(project.ModelDir, "occurrences.jsonl")),
 		); err != nil {
 			return err
 		}

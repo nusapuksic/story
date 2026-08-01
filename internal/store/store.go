@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS scene_cards (
 );
 CREATE TABLE IF NOT EXISTS entities (
 	id               TEXT PRIMARY KEY,
+	chapter_id       TEXT NOT NULL REFERENCES chapters(id),
 	type             TEXT NOT NULL,
 	canonical_name   TEXT NOT NULL,
 	aliases_json     TEXT NOT NULL,
@@ -95,25 +96,27 @@ CREATE TABLE IF NOT EXISTS entities (
 	status           TEXT NOT NULL,
 	raw_json         TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS mentions (
-	entity_id        TEXT NOT NULL REFERENCES entities(id),
-	chapter_id       TEXT NOT NULL REFERENCES chapters(id),
-	paragraph_id     TEXT NOT NULL REFERENCES paragraphs(id),
-	surface_text     TEXT NOT NULL,
-	confidence       REAL NOT NULL,
-	generation_run   TEXT NOT NULL,
-	generation_model TEXT NOT NULL,
-	prompt_version   TEXT NOT NULL,
-	status           TEXT NOT NULL,
-	raw_json         TEXT NOT NULL,
-	PRIMARY KEY (entity_id, paragraph_id, surface_text)
+CREATE TABLE IF NOT EXISTS occurrences (
+	entity_id          TEXT NOT NULL REFERENCES entities(id),
+	chapter_id         TEXT NOT NULL REFERENCES chapters(id),
+	scene_id           TEXT NOT NULL REFERENCES scenes(id),
+	surface_texts_json TEXT NOT NULL,
+	source_fields_json TEXT NOT NULL,
+	confidence         REAL NOT NULL,
+	generation_run     TEXT NOT NULL,
+	generation_model   TEXT NOT NULL,
+	prompt_version     TEXT NOT NULL,
+	status             TEXT NOT NULL,
+	raw_json           TEXT NOT NULL,
+	PRIMARY KEY (entity_id, scene_id)
 );
-CREATE INDEX IF NOT EXISTS mentions_chapter ON mentions(chapter_id);
+CREATE INDEX IF NOT EXISTS occurrences_chapter ON occurrences(chapter_id);
+CREATE INDEX IF NOT EXISTS occurrences_scene ON occurrences(scene_id);
 CREATE TABLE IF NOT EXISTS chapter_entity_snapshots (
-	chapter_id    TEXT PRIMARY KEY REFERENCES chapters(id),
-	entity_count  INTEGER NOT NULL,
-	mention_count INTEGER NOT NULL,
-	committed_at  TEXT NOT NULL
+	chapter_id       TEXT PRIMARY KEY REFERENCES chapters(id),
+	entity_count     INTEGER NOT NULL,
+	occurrence_count INTEGER NOT NULL,
+	committed_at     TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS model_runs (
 	run_id      TEXT PRIMARY KEY,

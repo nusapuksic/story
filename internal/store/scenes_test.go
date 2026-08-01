@@ -270,25 +270,37 @@ func TestForeignKeysRejectOrphanSceneCard(t *testing.T) {
 	}
 }
 
-func TestForeignKeysRejectOrphanMention(t *testing.T) {
+func TestForeignKeysRejectOrphanOccurrence(t *testing.T) {
 	s := openTestStore(t)
 	insertChapter(t, s, "ch-0001", 1, "Chapter One")
 	insertParagraph(t, s, "p-001", "ch-0001", 1)
+	if err := s.InsertScene(store.SceneRow{
+		ID:             "sc-001",
+		ChapterID:      "ch-0001",
+		ParagraphStart: "p-001",
+		ParagraphEnd:   "p-001",
+		Ordinal:        1,
+		BoundarySource: "explicit",
+		Status:         "generated",
+	}); err != nil {
+		t.Fatalf("InsertScene: %v", err)
+	}
 
-	err := s.InsertMention(store.MentionRow{
+	err := s.InsertOccurrence(store.OccurrenceRow{
 		EntityID:        "entity-missing",
 		ChapterID:       "ch-0001",
-		ParagraphID:     "p-001",
-		SurfaceText:     "Mara",
+		SceneID:         "sc-001",
+		SurfaceTexts:    []string{"Mara"},
+		SourceFields:    []string{"participants"},
 		Confidence:      1,
 		GenerationRun:   "compile-test",
 		GenerationModel: "test-model",
-		PromptVersion:   "entity-resolution-v1",
+		PromptVersion:   "entity-resolution-v2",
 		Status:          "generated",
 		RawJSON:         `{"entity_id":"entity-missing"}`,
 	})
 	if err == nil {
-		t.Fatal("InsertMention succeeded for orphan mention, want foreign-key error")
+		t.Fatal("InsertOccurrence succeeded for orphan entity, want foreign-key error")
 	}
 }
 

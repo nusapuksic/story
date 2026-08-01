@@ -237,6 +237,41 @@ func splitReverseIndexTermKey(key string) (string, string) {
 	return key, ""
 }
 
+// ReverseIndexRefsForChapter returns reverse-index refs for one chapter and a
+// set of term types, ordered by scene position and then literal value.
+func (s *Store) ReverseIndexRefsForChapter(chapterID string, termTypes []string) ([]ReverseIndexRef, error) {
+	termTypes = cleanStringList(termTypes)
+	if len(termTypes) == 0 {
+		return nil, nil
+	}
+	query := `SELECT r.term_type, r.term, r.scene_id, r.chapter_id, r.source_field, r.weight, r.raw_value
+		 FROM reverse_index_refs r
+		 JOIN scenes sn ON sn.id = r.scene_id
+		 JOIN chapters c ON c.id = sn.chapter_id
+		 WHERE r.chapter_id = ? AND r.term_type IN (` + placeholders(len(termTypes)) + `)
+		 ORDER BY c.ordinal, sn.ordinal, r.term_type, r.term, r.source_field, r.raw_value`
+	args := []any{chapterID}
+	args = append(args, stringsToAny(termTypes)...)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("reverse index refs for chapter %s: %w", chapterID, err)
+	}
+	defer rows.Close()
+
+	var out []ReverseIndexRef
+	for rows.Next() {
+		var ref ReverseIndexRef
+		if err := rows.Scan(&ref.TermType, &ref.Term, &ref.SceneID, &ref.ChapterID, &ref.SourceField, &ref.Weight, &ref.RawValue); err != nil {
+			return nil, fmt.Errorf("reverse index refs for chapter %s: %w", chapterID, err)
+		}
+		out = append(out, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reverse index refs for chapter %s: %w", chapterID, err)
+	}
+	return out, nil
+}
+
 // ReverseIndexTerms returns literal reverse-index terms for a type and optional prefix.
 func (s *Store) ReverseIndexTerms(termType, prefix string, limit int) ([]ReverseIndexTerm, error) {
 	if limit <= 0 {

@@ -138,7 +138,7 @@ my-novel/
   model/
     scenes.jsonl
     entities.jsonl
-    mentions.jsonl
+    occurrences.jsonl
     claims.jsonl
     events.jsonl
     character-states.jsonl
@@ -707,7 +707,9 @@ Each scene receives a compact structured record:
   "status": "generated"
 }
 
-Layer 4: Entities and mentions
+Layer 4: Entities and occurrences
+
+Entity consolidation uses deterministic reverse-index refs from scene-card `entities`, `participants`, `pov`, and `locations` fields. The LLM does not re-extract entities from full chapter prose in this layer; it compresses and cleans up already-extracted scene-card signals into consolidated aliases, scene-scoped occurrences, and optional review flags such as likely typos.
 
 Entity types:
 
@@ -723,23 +725,48 @@ unknown
 Entity record:
 
 {
+  "record_type": "entity",
   "id": "entity-mara",
+  "chapter_id": "ch-0001",
   "type": "character",
   "canonical_name": "Mara",
-  "aliases": ["Mara Venn", "the archivist"],
-  "status": "accepted"
+  "aliases": ["Maraa"],
+  "evidence": ["sc-..."],
+  "occurrences": [
+    {
+      "chapter_id": "ch-0001",
+      "scene_id": "sc-...",
+      "surface_texts": ["Mara", "Maraa"],
+      "source_fields": ["entities", "participants"],
+      "confidence": 0.91,
+      "flags": [
+        {
+          "type": "possible_typo",
+          "value": "Maraa",
+          "suggested": "Mara",
+          "confidence": 0.8
+        }
+      ]
+    }
+  ],
+  "flags": [],
+  "status": "generated"
 }
 
-Mention record:
+Occurrence record:
 
 {
+  "record_type": "occurrence",
   "entity_id": "entity-mara",
-  "paragraph_id": "p-...",
-  "surface_text": "the archivist",
-  "confidence": 0.91
+  "chapter_id": "ch-0001",
+  "scene_id": "sc-...",
+  "surface_texts": ["Mara", "Maraa"],
+  "source_fields": ["entities", "participants"],
+  "confidence": 0.91,
+  "status": "generated"
 }
 
-Entity resolution must preserve ambiguity. Two possible aliases are not merged solely because the model considers the merge plausible. Existing summaries and scene cards may be supplied as orientation for likely names, aliases, and scene roles, but entity mentions still cite manuscript paragraph excerpts only.
+Entity resolution must preserve ambiguity. Two possible aliases are not merged solely because the model considers the merge plausible. Occurrences must use only supplied reverse-index scene IDs and surface texts; uncertain variants should be flagged instead of silently corrected.
 
 Layer 5: Narrative records
 
@@ -822,7 +849,7 @@ construct chapter synthesis
     ↓
 construct whole-book orientation summary
     ↓
-extract entities and mentions
+consolidate entities and scene-scoped occurrences from reverse-index signals
     ↓
 resolve aliases conservatively
     ↓
@@ -1227,7 +1254,7 @@ blocks
 paragraphs
 scenes
 entities
-mentions
+occurrences
 records
 evidence
 record_edges

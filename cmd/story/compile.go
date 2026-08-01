@@ -32,7 +32,7 @@ Supported layers:
   scene-cards   Extract structured scene cards using the configured LLM
   verification  Verify generated scene cards against cited manuscript evidence
   summaries     Generate chapter and book summaries using the configured LLM
-  entities      Extract candidate entities and paragraph-level mentions
+  entities      Consolidate entities and scene-scoped occurrences from scene-card signals
 
 Without --layer, all implemented layers are run in order: scenes, scene-cards, verification when enabled, summaries, entities.
 
@@ -350,7 +350,7 @@ func newCompileStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entities, mentions, err := st.EntityCounts()
+			entities, occurrences, err := st.EntityCounts()
 			if err != nil {
 				return err
 			}
@@ -374,7 +374,7 @@ func newCompileStatusCmd() *cobra.Command {
 					"scene_card_fallbacks":             fallbacks,
 					"scene_card_recovery_events":       recoveryEvents,
 					"entities":                         entities,
-					"mentions":                         mentions,
+					"occurrences":                      occurrences,
 				})
 			}
 			info("Chapters:              %d", chapters)
@@ -387,7 +387,7 @@ func newCompileStatusCmd() *cobra.Command {
 			info("Scene card fallbacks:  %d", fallbacks)
 			printSceneCardRecoveryHints(recoveryEvents)
 			info("Entities:              %d", entities)
-			info("Mentions:              %d", mentions)
+			info("Occurrences:           %d", occurrences)
 			return nil
 		},
 	}

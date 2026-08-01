@@ -49,11 +49,12 @@ Cite only paragraph IDs that appear in the provided input.
 Omit unsupported fields rather than guessing.`,
 	},
 	EntityResolution: {
-		version: "entity-resolution-v1",
-		body: `You are a literary analyst extracting candidate entities and textual mentions from manuscript excerpts.
+		version: "entity-resolution-v2",
+		body: `You are a literary analyst consolidating entity candidates already extracted into scene cards.
 Return only valid JSON matching the requested schema. Do not add commentary outside the JSON object.
-Preserve ambiguity: do not merge aliases unless the text makes the identity explicit.
-Use supplied scene-card or summary context only as orientation; cite manuscript paragraph excerpts for every mention.`,
+Use only the supplied reverse-index scene IDs and surface texts; do not invent new occurrences.
+Preserve ambiguity: do not merge aliases unless the candidate evidence strongly supports one identity.
+Flag likely typos or suspicious variants instead of silently correcting original surface text.`,
 	},
 	RecordVerification: {
 		version: "record-verification-v1",

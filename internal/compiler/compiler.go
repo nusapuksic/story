@@ -298,11 +298,6 @@ func runLayers(
 	// Entities layer.
 	if opts.Layer == "" || opts.Layer == LayerEntities {
 		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "layer-start", Total: len(chapters), Message: "Entities: starting"})
-		if opts.ExtractionProvider == nil {
-			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, 0, verificationsBuilt, summariesBuilt, errors.New(
-				"no LLM provider configured: entities require an extraction provider; " +
-					"configure [llm] in story.toml")
-		}
 		n, err := compileEntities(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
 			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, 0, verificationsBuilt, summariesBuilt, err

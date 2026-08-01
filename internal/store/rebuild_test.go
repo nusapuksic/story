@@ -123,30 +123,31 @@ func TestRebuildFailsOnMalformedScenesJSONL(t *testing.T) {
 	}
 }
 
-func TestRebuildRestoresEntitiesAndMentionsFromSnapshot(t *testing.T) {
-	p, p1, _, _ := newProjectWithChapter(t)
+func TestRebuildRestoresEntitiesAndOccurrencesFromSnapshot(t *testing.T) {
+	p, p1, _, p3 := newProjectWithChapter(t)
+	sceneID := writeEntitySceneJSONL(t, p, p1, p3)
 	writeEntitiesJSONL(t, p, []any{
-		entityJSONLTestRecord("entity-1", "Mara", p1),
+		entityJSONLTestRecord("entity-1", "Mara", "ch-0001", sceneID),
 		map[string]any{
-			"record_type":   "entity_snapshot",
-			"chapter_id":    "ch-0001",
-			"entity_count":  1,
-			"mention_count": 1,
-			"committed_at":  "2024-01-01T00:00:00Z",
+			"record_type":      "entity_snapshot",
+			"chapter_id":       "ch-0001",
+			"entity_count":     1,
+			"occurrence_count": 1,
+			"committed_at":     "2024-01-01T00:00:00Z",
 		},
 	})
-	writeMentionsJSONL(t, p, []any{mentionJSONLTestRecord("entity-1", "ch-0001", p1, "Mara")})
+	writeOccurrencesJSONL(t, p, []any{occurrenceJSONLTestRecord("entity-1", "ch-0001", sceneID, "Mara")})
 
 	if err := store.Rebuild(p); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	st := openProjectStore(t, p)
-	entities, mentions, err := st.EntityCounts()
+	entities, occurrences, err := st.EntityCounts()
 	if err != nil {
 		t.Fatalf("EntityCounts: %v", err)
 	}
-	if entities != 1 || mentions != 1 {
-		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, mentions)
+	if entities != 1 || occurrences != 1 {
+		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, occurrences)
 	}
 	committed, err := st.IsEntitySnapshotCommitted("ch-0001")
 	if err != nil {
@@ -158,20 +159,21 @@ func TestRebuildRestoresEntitiesAndMentionsFromSnapshot(t *testing.T) {
 }
 
 func TestRebuildDiscardsEntitiesWithoutSnapshot(t *testing.T) {
-	p, p1, _, _ := newProjectWithChapter(t)
-	writeEntitiesJSONL(t, p, []any{entityJSONLTestRecord("entity-partial", "Mara", p1)})
-	writeMentionsJSONL(t, p, []any{mentionJSONLTestRecord("entity-partial", "ch-0001", p1, "Mara")})
+	p, p1, _, p3 := newProjectWithChapter(t)
+	sceneID := writeEntitySceneJSONL(t, p, p1, p3)
+	writeEntitiesJSONL(t, p, []any{entityJSONLTestRecord("entity-partial", "Mara", "ch-0001", sceneID)})
+	writeOccurrencesJSONL(t, p, []any{occurrenceJSONLTestRecord("entity-partial", "ch-0001", sceneID, "Mara")})
 
 	if err := store.Rebuild(p); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
 	st := openProjectStore(t, p)
-	entities, mentions, err := st.EntityCounts()
+	entities, occurrences, err := st.EntityCounts()
 	if err != nil {
 		t.Fatalf("EntityCounts: %v", err)
 	}
-	if entities != 0 || mentions != 0 {
-		t.Fatalf("uncommitted entity batch was indexed: (%d, %d)", entities, mentions)
+	if entities != 0 || occurrences != 0 {
+		t.Fatalf("uncommitted entity batch was indexed: (%d, %d)", entities, occurrences)
 	}
 	committed, err := st.IsEntitySnapshotCommitted("ch-0001")
 	if err != nil {
@@ -186,11 +188,11 @@ func TestRebuildFailsOnEntitySnapshotEntityCountMismatch(t *testing.T) {
 	p, _, _, _ := newProjectWithChapter(t)
 	writeEntitiesJSONL(t, p, []any{
 		map[string]any{
-			"record_type":   "entity_snapshot",
-			"chapter_id":    "ch-0001",
-			"entity_count":  1,
-			"mention_count": 0,
-			"committed_at":  "2024-01-01T00:00:00Z",
+			"record_type":      "entity_snapshot",
+			"chapter_id":       "ch-0001",
+			"entity_count":     1,
+			"occurrence_count": 0,
+			"committed_at":     "2024-01-01T00:00:00Z",
 		},
 	})
 
@@ -200,22 +202,23 @@ func TestRebuildFailsOnEntitySnapshotEntityCountMismatch(t *testing.T) {
 	}
 }
 
-func TestRebuildFailsOnEntitySnapshotMentionCountMismatch(t *testing.T) {
-	p, p1, _, _ := newProjectWithChapter(t)
+func TestRebuildFailsOnEntitySnapshotOccurrenceCountMismatch(t *testing.T) {
+	p, p1, _, p3 := newProjectWithChapter(t)
+	sceneID := writeEntitySceneJSONL(t, p, p1, p3)
 	writeEntitiesJSONL(t, p, []any{
-		entityJSONLTestRecord("entity-1", "Mara", p1),
+		entityJSONLTestRecord("entity-1", "Mara", "ch-0001", sceneID),
 		map[string]any{
-			"record_type":   "entity_snapshot",
-			"chapter_id":    "ch-0001",
-			"entity_count":  1,
-			"mention_count": 1,
-			"committed_at":  "2024-01-01T00:00:00Z",
+			"record_type":      "entity_snapshot",
+			"chapter_id":       "ch-0001",
+			"entity_count":     1,
+			"occurrence_count": 1,
+			"committed_at":     "2024-01-01T00:00:00Z",
 		},
 	})
 
 	err := store.Rebuild(p)
-	if err == nil || !strings.Contains(err.Error(), "mention_count mismatch") {
-		t.Fatalf("Rebuild error = %v, want mention_count mismatch", err)
+	if err == nil || !strings.Contains(err.Error(), "occurrence_count mismatch") {
+		t.Fatalf("Rebuild error = %v, want occurrence_count mismatch", err)
 	}
 }
 func TestRebuildFailsOnMissingSceneParagraph(t *testing.T) {
@@ -841,9 +844,33 @@ func writeEntitiesJSONL(t *testing.T, p *project.Project, records []any) {
 	writeJSONLLines(t, p.Path(filepath.Join(project.ModelDir, "entities.jsonl")), records, "entity")
 }
 
-func writeMentionsJSONL(t *testing.T, p *project.Project, records []any) {
+func writeOccurrencesJSONL(t *testing.T, p *project.Project, records []any) {
 	t.Helper()
-	writeJSONLLines(t, p.Path(filepath.Join(project.ModelDir, "mentions.jsonl")), records, "mention")
+	writeJSONLLines(t, p.Path(filepath.Join(project.ModelDir, "occurrences.jsonl")), records, "occurrence")
+}
+
+func writeEntitySceneJSONL(t *testing.T, p *project.Project, paragraphStartID, paragraphEndID string) string {
+	t.Helper()
+	sceneID := "sc-entity"
+	writeScenesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":     "scene",
+			"id":              sceneID,
+			"chapter_id":      "ch-0001",
+			"paragraph_start": paragraphStartID,
+			"paragraph_end":   paragraphEndID,
+			"ordinal":         1,
+			"boundary_source": "explicit",
+			"status":          "generated",
+		},
+		map[string]any{
+			"record_type":  "chapter_snapshot",
+			"chapter_id":   "ch-0001",
+			"scene_count":  1,
+			"committed_at": "2024-01-01T00:00:00Z",
+		},
+	})
+	return sceneID
 }
 
 func writeJSONLLines(t *testing.T, path string, records []any, label string) {
@@ -865,35 +892,37 @@ func writeJSONLLines(t *testing.T, path string, records []any, label string) {
 	}
 }
 
-func entityJSONLTestRecord(id, name, evidenceID string) map[string]any {
+func entityJSONLTestRecord(id, name, chapterID, evidenceSceneID string) map[string]any {
 	return map[string]any{
 		"record_type":    "entity",
 		"id":             id,
+		"chapter_id":     chapterID,
 		"type":           "character",
 		"canonical_name": name,
 		"aliases":        []string{name},
-		"evidence":       []string{evidenceID},
+		"evidence":       []string{evidenceSceneID},
 		"generation": map[string]any{
 			"run_id":         "compile-entities-test",
 			"model":          "test-model",
-			"prompt_version": "entity-resolution-v1",
+			"prompt_version": "entity-resolution-v2",
 		},
 		"status": "generated",
 	}
 }
 
-func mentionJSONLTestRecord(entityID, chapterID, paragraphID, surface string) map[string]any {
+func occurrenceJSONLTestRecord(entityID, chapterID, sceneID, surface string) map[string]any {
 	return map[string]any{
-		"record_type":  "mention",
-		"entity_id":    entityID,
-		"chapter_id":   chapterID,
-		"paragraph_id": paragraphID,
-		"surface_text": surface,
-		"confidence":   0.95,
+		"record_type":   "occurrence",
+		"entity_id":     entityID,
+		"chapter_id":    chapterID,
+		"scene_id":      sceneID,
+		"surface_texts": []string{surface},
+		"source_fields": []string{"participants"},
+		"confidence":    0.95,
 		"generation": map[string]any{
 			"run_id":         "compile-entities-test",
 			"model":          "test-model",
-			"prompt_version": "entity-resolution-v1",
+			"prompt_version": "entity-resolution-v2",
 		},
 		"status": "generated",
 	}
