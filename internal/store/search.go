@@ -70,6 +70,13 @@ func (s *Store) SearchSceneCards(query string, limit int) ([]SceneCardRow, error
 // SearchSceneCardsByStatusPolicy returns scene cards matching query whose
 // status is eligible under policy.
 func (s *Store) SearchSceneCardsByStatusPolicy(query string, policy SceneCardStatusPolicy, limit int) ([]SceneCardRow, error) {
+	return s.SearchSceneCardsByStatusPolicyForChapter(query, "", policy, limit)
+}
+
+// SearchSceneCardsByStatusPolicyForChapter returns scene cards matching query
+// whose status is eligible under policy. If chapterID is non-empty, results are
+// restricted to scenes in that chapter.
+func (s *Store) SearchSceneCardsByStatusPolicyForChapter(query, chapterID string, policy SceneCardStatusPolicy, limit int) ([]SceneCardRow, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -79,13 +86,24 @@ func (s *Store) SearchSceneCardsByStatusPolicy(query string, policy SceneCardSta
 	}
 
 	statuses := allowedSceneCardStatuses(policy)
+	join := `JOIN scene_cards sc ON sc.scene_id = f.scene_id`
+	where := `scene_cards_fts MATCH ? AND lower(sc.status) IN (` + placeholders(len(statuses)) + `)`
+	args := append([]any{q}, stringsToAny(statuses)...)
+	if chapterID != "" {
+		join += `
+		 JOIN scenes sn ON sn.id = sc.scene_id`
+		where += ` AND sn.chapter_id = ?`
+		args = append(args, chapterID)
+	}
+	args = append(args, limit)
+
 	sceneIDs, err := s.queryFTSIDs(
 		`SELECT f.scene_id
 		 FROM scene_cards_fts f
-		 JOIN scene_cards sc ON sc.scene_id = f.scene_id
-		 WHERE scene_cards_fts MATCH ? AND lower(sc.status) IN (`+placeholders(len(statuses))+`)
+		 `+join+`
+		 WHERE `+where+`
 		 ORDER BY rank LIMIT ?`,
-		append(append([]any{q}, stringsToAny(statuses)...), limit)...,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("search scene cards: %w", err)

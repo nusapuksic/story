@@ -128,7 +128,7 @@ func Ask(
 	// Step 1b: FTS fallback – if the keyword search found nothing, gather all
 	// scene cards so the model can still answer from structural context.
 	if len(ret.Paragraphs) == 0 && len(ret.SceneCards) == 0 {
-		cards, err := st.AllSceneCardsByStatusPolicy(cardPolicy)
+		cards, err := st.AllSceneCardsByStatusPolicyForChapter(opts.ChapterID, cardPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("fallback scene card retrieval: %w", err)
 		}

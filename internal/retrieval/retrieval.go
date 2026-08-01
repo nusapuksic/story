@@ -17,7 +17,7 @@ type Result struct {
 
 // Options controls a search operation.
 type Options struct {
-	// ChapterID restricts paragraph results to a specific chapter.
+	// ChapterID restricts paragraph and scene-card results to a specific chapter.
 	ChapterID string
 	// MaxParagraphs is the maximum number of paragraph results (default 20).
 	MaxParagraphs int
@@ -47,7 +47,7 @@ func Search(st *store.Store, query string, opts Options) (Result, error) {
 		return Result{}, err
 	}
 
-	cards, err := st.SearchSceneCardsByStatusPolicy(query, opts.SceneCardStatusPolicy, opts.MaxSceneCards)
+	cards, err := st.SearchSceneCardsByStatusPolicyForChapter(query, opts.ChapterID, opts.SceneCardStatusPolicy, opts.MaxSceneCards)
 	if err != nil {
 		return Result{}, err
 	}

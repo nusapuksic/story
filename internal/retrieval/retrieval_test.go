@@ -169,8 +169,42 @@ func TestSearchChapterFilter(t *testing.T) {
 		"Mara sat by the river bank quietly."); err != nil {
 		t.Fatalf("insert paragraph 2: %v", err)
 	}
+	for _, fixture := range []struct {
+		sceneID string
+		chapter string
+		pid     string
+		title   string
+	}{
+		{sceneID: "sc-0001", chapter: "ch-0001", pid: "p-0001", title: "Mara forest scene"},
+		{sceneID: "sc-0002", chapter: "ch-0002", pid: "p-0002", title: "Mara river scene"},
+	} {
+		if err := st.InsertScene(store.SceneRow{
+			ID:             fixture.sceneID,
+			ChapterID:      fixture.chapter,
+			ParagraphStart: fixture.pid,
+			ParagraphEnd:   fixture.pid,
+			Ordinal:        1,
+			BoundarySource: "chapter_end",
+			Status:         "generated",
+		}); err != nil {
+			t.Fatalf("insert scene %s: %v", fixture.sceneID, err)
+		}
+		if err := st.InsertSceneCard(store.SceneCardRow{
+			SceneID:         fixture.sceneID,
+			Title:           fixture.title,
+			Summary:         "Mara appears in this chapter-specific scene card.",
+			Evidence:        []string{fixture.pid},
+			GenerationRun:   "compile-test",
+			GenerationModel: "test-model",
+			PromptVersion:   "v1",
+			Status:          "verified",
+			RawJSON:         "{}",
+		}); err != nil {
+			t.Fatalf("insert scene card %s: %v", fixture.sceneID, err)
+		}
+	}
 
-	// Filter to ch-0001 – only p-0001 should match.
+	// Filter to ch-0001 – only p-0001 and sc-0001 should match.
 	result, err := retrieval.Search(st, "Mara", retrieval.Options{ChapterID: "ch-0001"})
 	if err != nil {
 		t.Fatalf("Search with chapter filter: %v", err)
@@ -179,6 +213,9 @@ func TestSearchChapterFilter(t *testing.T) {
 		if p.ChapterID != "ch-0001" {
 			t.Errorf("got paragraph from chapter %s, want ch-0001", p.ChapterID)
 		}
+	}
+	if len(result.SceneCards) != 1 || result.SceneCards[0].SceneID != "sc-0001" {
+		t.Fatalf("scene-card results = %#v, want only sc-0001", result.SceneCards)
 	}
 }
 

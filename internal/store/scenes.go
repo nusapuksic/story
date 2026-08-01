@@ -355,15 +355,25 @@ func (s *Store) DeleteChapterSnapshot(chapterID string) error {
 // AllSceneCards returns all scene card rows ordered by their scene's chapter
 // ordinal and scene ordinal.
 func (s *Store) AllSceneCards() ([]SceneCardRow, error) {
-	rows, err := s.db.Query(
-		`SELECT sc.scene_id, sc.title, sc.summary, sc.evidence_json,
+	return s.allSceneCardsForChapter("")
+}
+
+func (s *Store) allSceneCardsForChapter(chapterID string) ([]SceneCardRow, error) {
+	query := `SELECT sc.scene_id, sc.title, sc.summary, sc.evidence_json,
 		        sc.generation_run, sc.generation_model, sc.prompt_version,
 		        sc.status, sc.raw_json
 		 FROM scene_cards sc
 		 JOIN scenes sn ON sn.id = sc.scene_id
-		 JOIN chapters c ON c.id = sn.chapter_id
-		 ORDER BY c.ordinal, sn.ordinal`,
-	)
+		 JOIN chapters c ON c.id = sn.chapter_id`
+	var args []any
+	if chapterID != "" {
+		query += `
+		 WHERE sn.chapter_id = ?`
+		args = append(args, chapterID)
+	}
+	query += `
+		 ORDER BY c.ordinal, sn.ordinal`
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("all scene cards: %w", err)
 	}
@@ -374,7 +384,14 @@ func (s *Store) AllSceneCards() ([]SceneCardRow, error) {
 // AllSceneCardsByStatusPolicy returns all scene cards eligible under policy in
 // manuscript order.
 func (s *Store) AllSceneCardsByStatusPolicy(policy SceneCardStatusPolicy) ([]SceneCardRow, error) {
-	cards, err := s.AllSceneCards()
+	return s.AllSceneCardsByStatusPolicyForChapter("", policy)
+}
+
+// AllSceneCardsByStatusPolicyForChapter returns all scene cards eligible under
+// policy in manuscript order. If chapterID is non-empty, results are restricted
+// to scenes in that chapter.
+func (s *Store) AllSceneCardsByStatusPolicyForChapter(chapterID string, policy SceneCardStatusPolicy) ([]SceneCardRow, error) {
+	cards, err := s.allSceneCardsForChapter(chapterID)
 	if err != nil {
 		return nil, err
 	}

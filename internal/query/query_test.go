@@ -310,6 +310,64 @@ func TestAskIncludeGeneratedAllowsGeneratedSceneCards(t *testing.T) {
 		t.Fatalf("prompt missing generated scene-card context with IncludeGenerated: %s", prompt)
 	}
 }
+func TestAskChapterFallbackSceneCardsStayInChapter(t *testing.T) {
+	st := openTestStore(t)
+	for _, ch := range []struct {
+		id      string
+		ordinal int
+		pid     string
+		sceneID string
+		title   string
+		summary string
+	}{
+		{id: "ch-0001", ordinal: 1, pid: "p-ASKCHAPTER0001", sceneID: "sc-ask-chapter-1", title: "Chapter one fallback context", summary: "Only chapter one should appear."},
+		{id: "ch-0002", ordinal: 2, pid: "p-ASKCHAPTER0002", sceneID: "sc-ask-chapter-2", title: "Chapter two fallback context", summary: "Chapter two must stay out."},
+	} {
+		if err := st.InsertChapterForTest(ch.id, ch.ordinal, ch.id); err != nil {
+			t.Fatalf("insert chapter %s: %v", ch.id, err)
+		}
+		if err := st.InsertParagraphWithTextForTest(ch.pid, ch.id, 1, ch.summary); err != nil {
+			t.Fatalf("insert paragraph %s: %v", ch.pid, err)
+		}
+		if err := st.InsertScene(store.SceneRow{
+			ID:             ch.sceneID,
+			ChapterID:      ch.id,
+			ParagraphStart: ch.pid,
+			ParagraphEnd:   ch.pid,
+			Ordinal:        1,
+			BoundarySource: "chapter_end",
+			Status:         "generated",
+		}); err != nil {
+			t.Fatalf("insert scene %s: %v", ch.sceneID, err)
+		}
+		if err := st.InsertSceneCard(store.SceneCardRow{
+			SceneID:         ch.sceneID,
+			Title:           ch.title,
+			Summary:         ch.summary,
+			Evidence:        []string{ch.pid},
+			GenerationRun:   "compile-test",
+			GenerationModel: "test-model",
+			PromptVersion:   "scene-extraction-v1",
+			Status:          "verified",
+			RawJSON:         "{}",
+		}); err != nil {
+			t.Fatalf("insert scene card %s: %v", ch.sceneID, err)
+		}
+	}
+	fake := &fakeProvider{response: `{"answer":"Only chapter one context is available.","evidence":[],"uncertainties":[]}`}
+
+	_, err := query.Ask(context.Background(), st, fake, "fake-model", "zzzxxy", query.Options{ChapterID: "ch-0001"})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	prompt := fake.requests[0].Messages[1].Content
+	if !strings.Contains(prompt, "Chapter one fallback context") || !strings.Contains(prompt, "## Scene context") {
+		t.Fatalf("prompt missing chapter-scoped fallback scene card: %s", prompt)
+	}
+	if strings.Contains(prompt, "Chapter two fallback context") || strings.Contains(prompt, "ch-0002") {
+		t.Fatalf("prompt included cross-chapter fallback context: %s", prompt)
+	}
+}
 func isInsufficientEvidence(err error) bool {
 	return err != nil && err.Error() == query.ErrInsufficientEvidence.Error()
 }
