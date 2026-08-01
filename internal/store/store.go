@@ -122,6 +122,24 @@ CREATE TABLE IF NOT EXISTS chapter_scene_snapshots (
 	chapter_id   TEXT PRIMARY KEY REFERENCES chapters(id),
 	committed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reverse_index_terms (
+	term_type        TEXT NOT NULL,
+	term             TEXT NOT NULL,
+	occurrence_count INTEGER NOT NULL,
+	PRIMARY KEY (term_type, term)
+);
+CREATE TABLE IF NOT EXISTS reverse_index_refs (
+	term_type    TEXT NOT NULL,
+	term         TEXT NOT NULL,
+	scene_id     TEXT NOT NULL REFERENCES scenes(id),
+	chapter_id   TEXT NOT NULL REFERENCES chapters(id),
+	source_field TEXT NOT NULL,
+	weight       REAL NOT NULL,
+	raw_value    TEXT NOT NULL,
+	PRIMARY KEY (term_type, term, scene_id, source_field, raw_value)
+);
+CREATE INDEX IF NOT EXISTS reverse_index_refs_scene ON reverse_index_refs(scene_id);
+CREATE INDEX IF NOT EXISTS reverse_index_refs_chapter ON reverse_index_refs(chapter_id);
 `
 
 // Open opens (creating if necessary) the SQLite index at path.

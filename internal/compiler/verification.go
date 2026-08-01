@@ -275,6 +275,8 @@ func buildSceneCardVerificationPrompt(card SceneCardRecord, evidenceParagraphs [
 		Title        string   `json:"title"`
 		Summary      string   `json:"summary"`
 		POV          []string `json:"pov,omitempty"`
+		Themes       []string `json:"themes,omitempty"`
+		Entities     []string `json:"entities,omitempty"`
 		Participants []string `json:"participants,omitempty"`
 		Locations    []string `json:"locations,omitempty"`
 		Unresolved   []string `json:"unresolved,omitempty"`
@@ -286,6 +288,8 @@ func buildSceneCardVerificationPrompt(card SceneCardRecord, evidenceParagraphs [
 		Title:        card.Title,
 		Summary:      card.Summary,
 		POV:          card.POV,
+		Themes:       card.Themes,
+		Entities:     card.Entities,
 		Participants: card.Participants,
 		Locations:    card.Locations,
 		Unresolved:   card.Unresolved,

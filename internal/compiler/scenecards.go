@@ -36,6 +36,8 @@ type SceneCardRecord struct {
 	Title        string                 `json:"title"`
 	Summary      string                 `json:"summary"`
 	POV          []string               `json:"pov,omitempty"`
+	Themes       []string               `json:"themes,omitempty"`
+	Entities     []string               `json:"entities,omitempty"`
 	Participants []string               `json:"participants,omitempty"`
 	Locations    []string               `json:"locations,omitempty"`
 	Unresolved   []string               `json:"unresolved,omitempty"`
@@ -66,6 +68,8 @@ type rawSceneCard struct {
 	Title        flexibleString       `json:"title"`
 	Summary      flexibleString       `json:"summary"`
 	POV          flexibleStringList   `json:"pov"`
+	Themes       flexibleStringList   `json:"themes"`
+	Entities     flexibleStringList   `json:"entities"`
 	Participants flexibleStringList   `json:"participants"`
 	Locations    flexibleStringList   `json:"locations"`
 	Unresolved   flexibleStringList   `json:"unresolved"`
@@ -615,6 +619,8 @@ func parseSceneCardResponse(
 		Title:        title,
 		Summary:      summary,
 		POV:          []string(raw.POV),
+		Themes:       []string(raw.Themes),
+		Entities:     []string(raw.Entities),
 		Participants: []string(raw.Participants),
 		Locations:    []string(raw.Locations),
 		Unresolved:   []string(raw.Unresolved),
@@ -815,7 +821,8 @@ func buildSceneCardPrompt(scene store.SceneRow, paragraphs []store.ParagraphRow)
 	sb.WriteString(scene.ID)
 	sb.WriteString("\n")
 	sb.WriteString("Return JSON matching the schema:\n")
-	sb.WriteString(`{"title":"...","summary":"...","pov":[],"participants":[],"locations":[],"unresolved":[],"evidence":["p-..."]}`)
+	sb.WriteString(`{"title":"...","summary":"...","pov":[],"themes":[],"entities":[],"participants":[],"locations":[],"unresolved":[],"evidence":["p-..."]}`)
+	sb.WriteString("\nUse themes for motifs or ideas. Use entities for named people, places, organizations, objects, or concepts, whether or not they are present; participants are the actors present in this scene.")
 	sb.WriteString("\n\nCite paragraph IDs for every concrete statement. Use only IDs from the allowed list below.")
 	sb.WriteString("\n\nAllowed evidence paragraph IDs:\n")
 	for _, p := range paragraphs {

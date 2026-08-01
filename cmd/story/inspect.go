@@ -12,6 +12,7 @@ import (
 
 	"github.com/nusapuksic/story/internal/compiler"
 	"github.com/nusapuksic/story/internal/project"
+	"github.com/nusapuksic/story/internal/store"
 )
 
 func newInspectCmd() *cobra.Command {
@@ -19,7 +20,7 @@ func newInspectCmd() *cobra.Command {
 		Use:   "inspect",
 		Short: "Inspect indexed project objects",
 	}
-	cmd.AddCommand(newInspectChapterCmd(), newInspectParagraphCmd(), newInspectSummaryCmd())
+	cmd.AddCommand(newInspectChapterCmd(), newInspectParagraphCmd(), newInspectSummaryCmd(), newInspectIndexCmd())
 	return cmd
 }
 
@@ -128,6 +129,78 @@ func newInspectSummaryCmd() *cobra.Command {
 			printSummaryRecord(rec)
 			return nil
 		},
+	}
+}
+
+func newInspectIndexCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "index <theme|entity|participant|pov|location|unresolved> <term-or-prefix>",
+		Short: "Inspect reverse-index terms and scene-card refs",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := openProject()
+			if err != nil {
+				return err
+			}
+			s, err := openIndex(p)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+
+			termType, err := normalizeReverseIndexTermType(args[0])
+			if err != nil {
+				return err
+			}
+			query := args[1]
+			terms, refs, err := s.InspectReverseIndex(termType, query, 50)
+			if err != nil {
+				return err
+			}
+			if flags.jsonOut {
+				return printJSON(map[string]any{
+					"term_type": termType,
+					"query":     query,
+					"terms":     terms,
+					"refs":      refs,
+				})
+			}
+			if len(refs) > 0 {
+				info("Reverse index: %s %q", termType, query)
+				info("Occurrences:   %d", len(refs))
+				for _, ref := range refs {
+					info("  - %s (%s, %s, raw %q)", ref.SceneID, ref.ChapterID, ref.SourceField, ref.RawValue)
+				}
+				return nil
+			}
+			if len(terms) > 0 {
+				info("Reverse index terms: %s prefix %q", termType, query)
+				for _, term := range terms {
+					info("  - %s (%d)", term.Term, term.OccurrenceCount)
+				}
+				return nil
+			}
+			return fmt.Errorf("no reverse index entries for %s %q", termType, query)
+		},
+	}
+}
+
+func normalizeReverseIndexTermType(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "theme", "themes":
+		return store.ReverseTermTheme, nil
+	case "entity", "entities":
+		return store.ReverseTermEntity, nil
+	case "participant", "participants":
+		return store.ReverseTermParticipant, nil
+	case "pov", "povs":
+		return store.ReverseTermPOV, nil
+	case "location", "locations":
+		return store.ReverseTermLocation, nil
+	case "unresolved", "question", "questions", "unresolved_question", "unresolved_questions":
+		return store.ReverseTermUnresolved, nil
+	default:
+		return "", fmt.Errorf("unknown reverse index type %q; supported: theme, entity, participant, pov, location, unresolved", value)
 	}
 }
 

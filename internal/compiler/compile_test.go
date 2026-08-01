@@ -178,7 +178,7 @@ func TestCompileSceneCardsWithFakeProvider(t *testing.T) {
 	}
 
 	// Now compile scene cards with a fake provider.
-	cardJSON := `{"title":"Mara walks","summary":"Mara walks the road.","evidence":[]}`
+	cardJSON := `{"title":"Mara walks","summary":"Mara walks the road.","themes":["threshold"],"entities":["Mara"],"participants":["Mara"],"unresolved":["Why the road?"],"evidence":[]}`
 	fake := &fakeProvider{response: cardJSON}
 
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -194,6 +194,14 @@ func TestCompileSceneCardsWithFakeProvider(t *testing.T) {
 	}
 	assertRunPendingFiles(t, p, result.RunID, compiler.LayerSceneCards, 2)
 	assertRunCommitLogSequences(t, p, result.RunID, compiler.LayerSceneCards, []int{0, 1})
+
+	refs, err := st.ReverseIndexRefs(store.ReverseTermTheme, `threshold`)
+	if err != nil {
+		t.Fatalf(`ReverseIndexRefs: %v`, err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf(`theme refs = %d, want 2: %#v`, len(refs), refs)
+	}
 }
 
 func TestCompileSceneCardsKeepsSuccessfulFullChapterScene(t *testing.T) {

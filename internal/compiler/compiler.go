@@ -275,6 +275,10 @@ func runLayers(
 		reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Verification: completed (%d built)", n)})
 	}
 
+	if err := rebuildReverseIndexForCompile(st, opts); err != nil {
+		return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, err
+	}
+
 	// Summaries layer.
 	if opts.Layer == "" || opts.Layer == LayerSummaries {
 		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "layer-start", Total: len(chapters), Message: "Summaries: starting"})
@@ -308,6 +312,15 @@ func runLayers(
 	}
 
 	return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, nil
+}
+
+func rebuildReverseIndexForCompile(st *store.Store, opts Options) error {
+	reportProgress(opts, ProgressEvent{Layer: "reverse-index", Stage: "item-start", Message: "Reverse index: rebuilding"})
+	if err := st.RebuildReverseIndex(); err != nil {
+		return err
+	}
+	reportProgress(opts, ProgressEvent{Layer: "reverse-index", Stage: "item-complete", Message: "Reverse index: rebuilt"})
+	return nil
 }
 
 // chaptersToProcess returns the chapters to compile, optionally filtered to one.

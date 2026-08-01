@@ -1088,11 +1088,14 @@ story inspect chapter <id>
 story inspect paragraph <id>
 story inspect summary book
 story inspect summary <chapter-id>
+story inspect index <theme|entity|participant|pov|location|unresolved> <term-or-prefix>
 story inspect scene <id>
 story inspect entity <id>
 story inspect claim <id>
 story inspect event <id>
 story inspect run <id>
+
+Reverse-index inspection reads the rebuildable SQLite index built from scene-card themes, entities, participants, POVs, locations, and unresolved questions. Exact term lookups return supporting scene-card refs; otherwise the query is treated as a literal prefix over stored values. Values are not normalized in v0.1.6.
 
 Example:
 
