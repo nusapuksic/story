@@ -13,6 +13,20 @@ import (
 	"github.com/nusapuksic/story/internal/store"
 )
 
+const (
+	sceneDetectionExplicit       = "explicit"
+	sceneDetectionHybrid         = "hybrid"
+	sceneDetectionModel          = "model"
+	sceneDetectionParagraphCount = "paragraph-count"
+
+	defaultSceneMaxParagraphs = 24
+
+	boundarySourceExplicit       = "explicit"
+	boundarySourceModel          = "model"
+	boundarySourceParagraphCount = "paragraph_count"
+	boundarySourceChapterEnd     = "chapter_end"
+)
+
 // SceneRecord represents one scene in model/scenes.jsonl.
 type SceneRecord struct {
 	RecordType     string `json:"record_type"` // "scene"
@@ -21,7 +35,7 @@ type SceneRecord struct {
 	ParagraphStart string `json:"paragraph_start"`
 	ParagraphEnd   string `json:"paragraph_end"`
 	Ordinal        int    `json:"ordinal"`
-	BoundarySource string `json:"boundary_source"` // "explicit", "model", "chapter_end"
+	BoundarySource string `json:"boundary_source"` // "explicit", "model", "paragraph_count", "chapter_end"
 	Status         string `json:"status"`          // "generated"
 }
 
@@ -53,9 +67,11 @@ type boundaryResponse struct {
 // Priority:
 //  1. explicit scene_break blocks (manuscript.BlockSceneBreak)
 //  2. LLM-proposed boundaries (when prov is non-nil and mode is "hybrid" or "model")
-//  3. chapter end
+//  3. deterministic paragraph-count boundaries (when configured)
+//  4. chapter end
 //
-// If prov is nil the function falls back to explicit-only detection.
+// If prov is nil the function falls back to explicit and deterministic
+// paragraph-count detection.
 func detectScenes(
 	ctx context.Context,
 	p *project.Project,
@@ -75,25 +91,30 @@ func detectScenes(
 	// Build the set of paragraph IDs that mark a boundary end (the last
 	// paragraph of a scene before an explicit break).
 	breakAfterIDs := buildExplicitBreakMap(paragraphs, explicitBreakPositions)
+	breakSources := make(map[string]string, len(breakAfterIDs))
+	for pid := range breakAfterIDs {
+		breakSources[pid] = boundarySourceExplicit
+	}
 
 	// Merge with LLM proposals if a provider is configured and mode requires it.
-	if prov != nil && cfg.Mode != "explicit" {
+	if prov != nil && SceneDetectionUsesModel(cfg.Mode) {
 		proposed, err := proposeSceneBoundaries(ctx, p, ch, paragraphs, prov, model, cfg, run)
 		if err != nil {
-			// Non-fatal: fall back to explicit-only with a warning.
+			// Non-fatal: fall back to explicit/deterministic boundaries.
 			_ = err // errors are recorded in the run already
 		} else {
 			// LLM proposals fill gaps where no explicit break exists.
 			for pid := range proposed {
-				if !breakAfterIDs[pid] {
-					breakAfterIDs[pid] = true
+				if _, exists := breakSources[pid]; !exists {
+					breakSources[pid] = boundarySourceModel
 				}
 			}
 		}
 	}
+	mergeParagraphCountBreaks(paragraphs, breakSources, cfg)
 
 	// Build scenes from the merged boundary set.
-	return buildScenesFromBreaks(ch.ID, paragraphs, breakAfterIDs), nil
+	return buildScenesFromBreaks(ch.ID, paragraphs, breakSources), nil
 }
 
 // buildExplicitBreakMap returns a set of paragraph IDs that are the last
@@ -121,9 +142,57 @@ func buildExplicitBreakMap(
 	return out
 }
 
+func mergeParagraphCountBreaks(paragraphs []store.ParagraphRow, breakSources map[string]string, cfg sceneDetectConfig) {
+	maxParagraphs := effectiveSceneMaxParagraphs(cfg)
+	if maxParagraphs <= 0 || len(paragraphs) <= maxParagraphs || !sceneDetectionUsesParagraphCount(cfg) {
+		return
+	}
+	if breakSources == nil {
+		return
+	}
+
+	step := maxParagraphs - normalizedOverlapParagraphs(cfg.OverlapParagraphs, maxParagraphs)
+	if step <= 0 {
+		step = 1
+	}
+
+	spanStart := 0
+	for i, p := range paragraphs {
+		_, existingBreak := breakSources[p.ID]
+		if !existingBreak && i != len(paragraphs)-1 {
+			continue
+		}
+		addParagraphCountBreaks(paragraphs, spanStart, i, maxParagraphs, step, breakSources)
+		spanStart = i + 1
+	}
+}
+
+func addParagraphCountBreaks(paragraphs []store.ParagraphRow, start, end, maxParagraphs, step int, breakSources map[string]string) {
+	if start > end || end-start+1 <= maxParagraphs {
+		return
+	}
+	for cut := start + step - 1; cut < end; cut += step {
+		pid := paragraphs[cut].ID
+		if _, exists := breakSources[pid]; !exists {
+			breakSources[pid] = boundarySourceParagraphCount
+		}
+	}
+}
+
+func normalizedOverlapParagraphs(overlap, maxParagraphs int) int {
+	if overlap < 0 {
+		return 0
+	}
+	if overlap >= maxParagraphs {
+		return maxParagraphs - 1
+	}
+	return overlap
+}
+
 // buildScenesFromBreaks converts the boundary map into ordered SceneRecord
-// values.  breakAfterIDs marks paragraph IDs after which a new scene begins.
-func buildScenesFromBreaks(chapterID string, paragraphs []store.ParagraphRow, breakAfterIDs map[string]bool) []SceneRecord {
+// values.  breakSources maps paragraph IDs to the source of the boundary after
+// that paragraph.
+func buildScenesFromBreaks(chapterID string, paragraphs []store.ParagraphRow, breakSources map[string]string) []SceneRecord {
 	if len(paragraphs) == 0 {
 		return nil
 	}
@@ -131,13 +200,10 @@ func buildScenesFromBreaks(chapterID string, paragraphs []store.ParagraphRow, br
 	ordinal := 1
 	sceneStart := 0
 	for i, p := range paragraphs {
-		if breakAfterIDs[p.ID] || i == len(paragraphs)-1 {
+		if src, ok := breakSources[p.ID]; ok || i == len(paragraphs)-1 {
 			// End scene here.
-			src := "explicit"
-			if !breakAfterIDs[p.ID] {
-				src = "chapter_end"
-			} else if !isExplicitBreak(p.ID, breakAfterIDs) {
-				src = "model"
+			if !ok {
+				src = boundarySourceChapterEnd
 			}
 			scenes = append(scenes, SceneRecord{
 				RecordType:     "scene",
@@ -154,15 +220,6 @@ func buildScenesFromBreaks(chapterID string, paragraphs []store.ParagraphRow, br
 		}
 	}
 	return scenes
-}
-
-// isExplicitBreak is a placeholder; the breakAfterIDs map is populated from
-// explicit breaks first and then supplemented by model proposals, so we can't
-// distinguish them here without an extra set. For now all entries that are in
-// breakAfterIDs before LLM proposals are treated as explicit. This function
-// always returns true to produce "explicit" or "chapter_end" boundaries.
-func isExplicitBreak(_ string, _ map[string]bool) bool {
-	return true
 }
 
 // proposeSceneBoundaries calls the LLM scene-boundaries prompt for each window
@@ -306,7 +363,51 @@ type sceneDetectConfig struct {
 	TargetContextTokens int
 	MaxOutputTokens     int
 	OverlapParagraphs   int
+	MaxParagraphs       int
 	Temperature         float64
+}
+
+// SceneDetectionUsesModel reports whether a scene_detection mode should ask
+// the configured extraction model for scene-boundary proposals.
+func SceneDetectionUsesModel(mode string) bool {
+	switch normalizeSceneDetectionMode(mode) {
+	case sceneDetectionExplicit, sceneDetectionParagraphCount:
+		return false
+	default:
+		return true
+	}
+}
+
+func sceneDetectionUsesParagraphCount(cfg sceneDetectConfig) bool {
+	mode := normalizeSceneDetectionMode(cfg.Mode)
+	if mode == sceneDetectionExplicit {
+		return false
+	}
+	return mode == sceneDetectionParagraphCount || cfg.MaxParagraphs > 0
+}
+
+func effectiveSceneMaxParagraphs(cfg sceneDetectConfig) int {
+	if cfg.MaxParagraphs > 0 {
+		return cfg.MaxParagraphs
+	}
+	if normalizeSceneDetectionMode(cfg.Mode) == sceneDetectionParagraphCount {
+		return defaultSceneMaxParagraphs
+	}
+	return 0
+}
+
+func normalizeSceneDetectionMode(mode string) string {
+	normalized := strings.TrimSpace(strings.ToLower(mode))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	normalized = strings.ReplaceAll(normalized, " ", "-")
+	switch normalized {
+	case "", sceneDetectionHybrid:
+		return sceneDetectionHybrid
+	case "paragraph", "paragraphs", "deterministic", "deterministic-paragraphs", sceneDetectionParagraphCount:
+		return sceneDetectionParagraphCount
+	default:
+		return normalized
+	}
 }
 
 // runID safely extracts the run ID from a potentially nil Run.

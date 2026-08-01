@@ -440,7 +440,7 @@ func compileScenes(
 }
 
 func sceneDetectionWorkerLimit(cfg sceneDetectConfig, opts Options) int {
-	if strings.EqualFold(strings.TrimSpace(cfg.Mode), "explicit") || opts.ExtractionProvider == nil {
+	if !SceneDetectionUsesModel(cfg.Mode) || opts.ExtractionProvider == nil {
 		if n := runtime.NumCPU(); n > 0 {
 			return n
 		}

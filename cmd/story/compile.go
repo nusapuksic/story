@@ -75,7 +75,7 @@ func runCompile(ctx context.Context, layer, chapterID string, force, strictExtra
 
 	var extractProv provider.Provider
 	var extractModel string
-	if compileNeedsExtractionProvider(layer) {
+	if compileNeedsExtractionProvider(layer, p.Config.Compile.SceneDetection) {
 		prov, model, provErr := provider.ForRole(p.Config.LLM, "extraction")
 		if provErr == nil {
 			extractProv = prov
@@ -313,10 +313,12 @@ func uniqueRecoveryChapters(events []compiler.SceneCardRecoveryEvent) []string {
 	return chapters
 }
 
-func compileNeedsExtractionProvider(layer string) bool {
+func compileNeedsExtractionProvider(layer, sceneDetection string) bool {
 	switch layer {
-	case "", compiler.LayerScenes, compiler.LayerSceneCards, compiler.LayerEntities, compiler.LayerSummaries:
+	case "", compiler.LayerSceneCards, compiler.LayerEntities, compiler.LayerSummaries:
 		return true
+	case compiler.LayerScenes:
+		return compiler.SceneDetectionUsesModel(sceneDetection)
 	default:
 		return false
 	}
