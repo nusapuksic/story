@@ -222,9 +222,19 @@ func (s *Store) SceneCounts() (scenes, cards int, err error) {
 }
 
 // DeleteScenesForChapter removes all scenes (and their cards) for a chapter.
-func (s *Store) DeleteScenesForChapter(chapterID string) error {
+func (s *Store) DeleteScenesForChapter(chapterID string) (retErr error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("delete scenes for chapter %s: %w", chapterID, err)
+	}
+	defer func() {
+		if retErr != nil {
+			tx.Rollback()
+		}
+	}()
+
 	// Collect scene IDs first so we can clean FTS.
-	rows, err := s.db.Query(`SELECT id FROM scenes WHERE chapter_id = ?`, chapterID)
+	rows, err := tx.Query(`SELECT id FROM scenes WHERE chapter_id = ?`, chapterID)
 	if err != nil {
 		return fmt.Errorf("list scenes for chapter %s: %w", chapterID, err)
 	}
@@ -242,28 +252,42 @@ func (s *Store) DeleteScenesForChapter(chapterID string) error {
 		return err
 	}
 
+	// The reverse index is a derived projection over scene cards and scenes.
+	// Invalidate it before deleting parent scene rows so FK checks cannot block
+	// a force recompile, and so no stale terms survive if the caller stops here.
+	for _, stmt := range []string{
+		`DELETE FROM reverse_index_refs`,
+		`DELETE FROM reverse_index_terms`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("delete reverse index before scenes for chapter %s: %w", chapterID, err)
+		}
+	}
+
 	// Remove FTS entries for the affected scene cards.
 	for _, id := range sceneIDs {
-		s.db.Exec(`DELETE FROM scene_cards_fts WHERE scene_id = ?`, id) //nolint:errcheck
+		if _, err := tx.Exec(`DELETE FROM scene_cards_fts WHERE scene_id = ?`, id); err != nil {
+			return fmt.Errorf("delete scene card FTS %s: %w", id, err)
+		}
 	}
 
 	// scene_cards references scenes by scene_id, so delete cards first.
-	_, err = s.db.Exec(
+	_, err = tx.Exec(
 		`DELETE FROM scene_cards WHERE scene_id IN
 		 (SELECT id FROM scenes WHERE chapter_id = ?)`, chapterID,
 	)
 	if err != nil {
 		return fmt.Errorf("delete scene cards for chapter %s: %w", chapterID, err)
 	}
-	_, err = s.db.Exec(`DELETE FROM scenes WHERE chapter_id = ?`, chapterID)
+	_, err = tx.Exec(`DELETE FROM scenes WHERE chapter_id = ?`, chapterID)
 	if err != nil {
 		return fmt.Errorf("delete scenes for chapter %s: %w", chapterID, err)
 	}
-	_, err = s.db.Exec(`DELETE FROM chapter_scene_snapshots WHERE chapter_id = ?`, chapterID)
+	_, err = tx.Exec(`DELETE FROM chapter_scene_snapshots WHERE chapter_id = ?`, chapterID)
 	if err != nil {
 		return fmt.Errorf("delete chapter snapshot %s: %w", chapterID, err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // SceneBreakOrdinals returns the block ordinals (1-based) of all scene_break

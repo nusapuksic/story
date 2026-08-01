@@ -60,6 +60,56 @@ func TestRebuildReverseIndexUsesLiteralSceneCardValues(t *testing.T) {
 	}
 }
 
+func TestDeleteScenesForChapterClearsReverseIndexRefs(t *testing.T) {
+	s := openTestStore(t)
+	insertChapter(t, s, `ch-0001`, 1, `Chapter One`)
+	insertParagraph(t, s, `p-001`, `ch-0001`, 1)
+
+	if err := s.InsertScene(store.SceneRow{
+		ID: `sc-001`, ChapterID: `ch-0001`,
+		ParagraphStart: `p-001`, ParagraphEnd: `p-001`,
+		Ordinal: 1, BoundarySource: `explicit`, Status: `generated`,
+	}); err != nil {
+		t.Fatalf(`InsertScene: %v`, err)
+	}
+
+	if err := s.InsertSceneCard(store.SceneCardRow{
+		SceneID:         `sc-001`,
+		Title:           `Mara hides the letter`,
+		Summary:         `She hides it.`,
+		Evidence:        []string{`p-001`},
+		GenerationRun:   `run-001`,
+		GenerationModel: `test-model`,
+		PromptVersion:   `scene-extraction-v1`,
+		Status:          `generated`,
+		RawJSON:         `{"title":"Mara hides the letter","summary":"She hides it.","themes":["Memory"],"evidence":["p-001"]}`,
+	}); err != nil {
+		t.Fatalf(`InsertSceneCard: %v`, err)
+	}
+	if err := s.RebuildReverseIndex(); err != nil {
+		t.Fatalf(`RebuildReverseIndex: %v`, err)
+	}
+	requireReverseIndexRefs(t, s, store.ReverseTermTheme, `Memory`, 1)
+
+	if err := s.DeleteScenesForChapter(`ch-0001`); err != nil {
+		t.Fatalf(`DeleteScenesForChapter: %v`, err)
+	}
+
+	refs, err := s.ReverseIndexRefs(store.ReverseTermTheme, `Memory`)
+	if err != nil {
+		t.Fatalf(`ReverseIndexRefs: %v`, err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf(`reverse index refs remain after scene delete: %#v`, refs)
+	}
+	terms, err := s.ReverseIndexTerms(store.ReverseTermTheme, ``, 10)
+	if err != nil {
+		t.Fatalf(`ReverseIndexTerms: %v`, err)
+	}
+	if len(terms) != 0 {
+		t.Fatalf(`reverse index terms remain after scene delete: %#v`, terms)
+	}
+}
 func requireReverseIndexRefs(t *testing.T, s *store.Store, termType, term string, want int) []store.ReverseIndexRef {
 	t.Helper()
 	refs, err := s.ReverseIndexRefs(termType, term)

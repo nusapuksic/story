@@ -295,6 +295,8 @@ func (s *Store) IndexScenesJSONL(path string) (retErr error) {
 		}
 	}()
 	for _, stmt := range []string{
+		`DELETE FROM reverse_index_refs`,
+		`DELETE FROM reverse_index_terms`,
 		`DELETE FROM chapter_scene_snapshots`,
 		`DELETE FROM scene_cards_fts`,
 		`DELETE FROM scene_cards`,
