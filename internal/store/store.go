@@ -175,8 +175,82 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("initialize index %s: %w", path, err)
 	}
+	if err := migrateSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate index %s: %w", path, err)
+	}
 	return &Store{db: db}, nil
 }
 
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
+
+func migrateSchema(db *sql.DB) error {
+	if _, err := db.Exec(`DROP TABLE IF EXISTS mentions`); err != nil {
+		return fmt.Errorf("drop legacy entity mentions table: %w", err)
+	}
+	reset, err := needsEntityProjectionReset(db)
+	if err != nil {
+		return err
+	}
+	if !reset {
+		return nil
+	}
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS occurrences`,
+		`DROP TABLE IF EXISTS chapter_entity_snapshots`,
+		`DROP TABLE IF EXISTS entities`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("reset entity projection: %w", err)
+		}
+	}
+	if _, err := db.Exec(schema); err != nil {
+		return fmt.Errorf("recreate entity projection schema: %w", err)
+	}
+	return nil
+}
+
+func needsEntityProjectionReset(db *sql.DB) (bool, error) {
+	for _, check := range []struct {
+		table  string
+		column string
+	}{
+		{table: "entities", column: "chapter_id"},
+		{table: "occurrences", column: "scene_id"},
+		{table: "occurrences", column: "surface_texts_json"},
+		{table: "chapter_entity_snapshots", column: "occurrence_count"},
+	} {
+		hasColumn, err := tableHasColumn(db, check.table, check.column)
+		if err != nil {
+			return false, err
+		}
+		if !hasColumn {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func tableHasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, fmt.Errorf("inspect table %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return false, fmt.Errorf("inspect table %s: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("inspect table %s: %w", table, err)
+	}
+	return false, nil
+}

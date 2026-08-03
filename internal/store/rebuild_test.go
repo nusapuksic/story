@@ -158,6 +158,53 @@ func TestRebuildRestoresEntitiesAndOccurrencesFromSnapshot(t *testing.T) {
 	}
 }
 
+func TestRebuildIgnoresMentionEraEntitiesJSONL(t *testing.T) {
+	p, p1, _, p3 := newProjectWithChapter(t)
+	writeEntitySceneJSONL(t, p, p1, p3)
+	writeEntitiesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":    "entity",
+			"id":             "entity-old",
+			"type":           "character",
+			"canonical_name": "Mara",
+			"aliases":        []string{"Mara"},
+			"evidence":       []string{p1},
+			"generation": map[string]any{
+				"run_id":         "compile-entities-old",
+				"model":          "test-model",
+				"prompt_version": "entity-extraction-v1",
+			},
+			"status": "generated",
+		},
+		map[string]any{
+			"record_type":   "entity_snapshot",
+			"chapter_id":    "ch-0001",
+			"entity_count":  1,
+			"mention_count": 0,
+			"committed_at":  "2024-01-01T00:00:00Z",
+		},
+	})
+
+	if err := store.Rebuild(p); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	st := openProjectStore(t, p)
+	entities, occurrences, err := st.EntityCounts()
+	if err != nil {
+		t.Fatalf("EntityCounts: %v", err)
+	}
+	if entities != 0 || occurrences != 0 {
+		t.Fatalf("legacy entity records were indexed: (%d, %d), want (0, 0)", entities, occurrences)
+	}
+	committed, err := st.IsEntitySnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsEntitySnapshotCommitted: %v", err)
+	}
+	if committed {
+		t.Fatal("legacy mention-era entity snapshot should not be marked committed")
+	}
+}
+
 func TestRebuildDiscardsEntitiesWithoutSnapshot(t *testing.T) {
 	p, p1, _, p3 := newProjectWithChapter(t)
 	sceneID := writeEntitySceneJSONL(t, p, p1, p3)
@@ -221,6 +268,7 @@ func TestRebuildFailsOnEntitySnapshotOccurrenceCountMismatch(t *testing.T) {
 		t.Fatalf("Rebuild error = %v, want occurrence_count mismatch", err)
 	}
 }
+
 func TestRebuildFailsOnMissingSceneParagraph(t *testing.T) {
 	p, _, _, _ := newProjectWithChapter(t)
 	writeScenesJSONL(t, p, []any{

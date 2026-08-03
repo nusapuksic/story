@@ -64,6 +64,9 @@ type Answer struct {
 
 // Options controls a query.
 type Options struct {
+	// QueryRunID optionally supplies the identifier for this query run. Empty
+	// generates a fresh query run ID.
+	QueryRunID string
 	// Mode is the query mode: recall, continuity, interpretation, style,
 	// development.  Defaults to "recall".
 	Mode string
@@ -92,6 +95,11 @@ type rawAnswer struct {
 	Evidence      []string `json:"evidence"`
 	Uncertainties []string `json:"uncertainties"`
 }
+
+const (
+	defaultFallbackSceneCardLimit = 6
+	endingFallbackSceneCardLimit  = 4
+)
 
 // Ask runs the evidence-backed query pipeline against the indexed project.
 // It calls the configured discussion model and returns a validated answer.
@@ -125,14 +133,17 @@ func Ask(
 		return nil, fmt.Errorf("retrieval: %w", err)
 	}
 
-	// Step 1b: FTS fallback – if the keyword search found nothing, gather all
-	// scene cards so the model can still answer from structural context.
+	endingQuestion := isEndingQuestion(question)
+
+	// Step 1b: FTS fallback. If keyword search found nothing, use a bounded
+	// structural slice instead of sending every scene card. Ending questions
+	// need the tail of the manuscript; broad questions get bookends.
 	if len(ret.Paragraphs) == 0 && len(ret.SceneCards) == 0 {
 		cards, err := st.AllSceneCardsByStatusPolicyForChapter(opts.ChapterID, cardPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("fallback scene card retrieval: %w", err)
 		}
-		ret.SceneCards = cards
+		ret.SceneCards = selectFallbackSceneCards(question, cards)
 	}
 
 	paragraphs := make([]store.ParagraphRow, 0, len(ret.Paragraphs))
@@ -148,34 +159,52 @@ func Ask(
 		paragraphs = append(paragraphs, p)
 	}
 
-	// Step 2: Summary evidence is ranked first so high-level theme/context
-	// answers do not lose their support when the evidence packet is capped.
-	for _, p := range summaryEvidenceParagraphs(st, opts.Summaries, opts.ChapterID) {
-		addParagraph(p)
-	}
-	for _, p := range ret.Paragraphs {
-		addParagraph(p)
-	}
-
-	// Step 3: For each matched scene card, also pull in any paragraphs from
-	// the scene that are not already in the retrieved set.
-	for _, card := range ret.SceneCards {
-		for _, pid := range card.Evidence {
-			if _, ok := paraByID[pid]; ok {
-				continue
-			}
-			p, err := st.InspectParagraph(pid)
-			if err != nil {
-				continue
-			}
+	addRetrievedParagraphs := func() {
+		for _, p := range ret.Paragraphs {
 			addParagraph(p)
 		}
 	}
+	addSummaryEvidenceParagraphs := func() {
+		for _, p := range summaryEvidenceParagraphs(st, opts.Summaries, opts.ChapterID) {
+			addParagraph(p)
+		}
+	}
+	addSceneCardEvidenceParagraphs := func() {
+		for _, card := range ret.SceneCards {
+			for _, pid := range card.Evidence {
+				if _, ok := paraByID[pid]; ok {
+					continue
+				}
+				p, err := st.InspectParagraph(pid)
+				if err != nil {
+					continue
+				}
+				addParagraph(p)
+			}
+		}
+	}
+
+	if endingQuestion {
+		// Ending/completeness questions need citable final-scene paragraphs more
+		// than broad summary support, especially when the evidence packet is capped.
+		addRetrievedParagraphs()
+		addSceneCardEvidenceParagraphs()
+		addSummaryEvidenceParagraphs()
+	} else {
+		// Summary evidence is ranked first so high-level theme/context answers do
+		// not lose their support when the evidence packet is capped.
+		addSummaryEvidenceParagraphs()
+		addRetrievedParagraphs()
+		addSceneCardEvidenceParagraphs()
+	}
+
+	usedParagraphFallback := false
 
 	// Step 3b: If still no paragraphs (e.g. no scene cards compiled yet),
 	// gather all indexed paragraphs from all chapters as a broad fallback.
 	// This ensures the question can still be answered from source text alone.
 	if len(paragraphs) == 0 {
+		usedParagraphFallback = true
 		chapters, chErr := st.AllChapters()
 		if chErr == nil {
 			for _, ch := range chapters {
@@ -197,15 +226,25 @@ func Ask(
 		return nil, ErrInsufficientEvidence
 	}
 
-	// Cap paragraphs at MaxEvidence.
+	// Cap paragraphs at MaxEvidence. If an ending question fell back to raw
+	// manuscript paragraphs, keep the tail rather than the opening.
 	if len(paragraphs) > opts.MaxEvidence {
-		paragraphs = paragraphs[:opts.MaxEvidence]
+		if endingQuestion && usedParagraphFallback {
+			paragraphs = paragraphs[len(paragraphs)-opts.MaxEvidence:]
+		} else {
+			paragraphs = paragraphs[:opts.MaxEvidence]
+		}
 	}
 
 	// Build a set of valid paragraph IDs for citation validation.
 	validIDs := make(map[string]string, len(paragraphs)) // id → chapter_id
 	for _, p := range paragraphs {
 		validIDs[p.ID] = p.ChapterID
+	}
+
+	entityContext, err := entityContextForQuestion(st, question, opts.Mode, opts.ChapterID)
+	if err != nil {
+		return nil, fmt.Errorf("entity context: %w", err)
 	}
 
 	// Step 5: Build the evidence packet and call the discussion model.
@@ -215,9 +254,12 @@ func Ask(
 		loadedPrompt = fallback
 	}
 	systemPrompt := buildSystemPrompt(loadedPrompt.Content, opts.Mode)
-	userPrompt := buildUserPrompt(question, opts.Mode, opts.Summaries, ret.SceneCards, paragraphs)
+	userPrompt := buildUserPrompt(question, opts.Mode, opts.Summaries, entityContext, ret.SceneCards, paragraphs)
 
-	queryRunID := ids.NewQueryRunID()
+	queryRunID := strings.TrimSpace(opts.QueryRunID)
+	if queryRunID == "" {
+		queryRunID = ids.NewQueryRunID()
+	}
 	req := provider.GenerationRequest{
 		Model: model,
 		Messages: []provider.Message{
@@ -263,6 +305,110 @@ func Ask(
 	}, nil
 }
 
+func selectFallbackSceneCards(question string, cards []store.SceneCardRow) []store.SceneCardRow {
+	if len(cards) == 0 {
+		return nil
+	}
+	if isEndingQuestion(question) {
+		return tailSceneCards(cards, endingFallbackSceneCardLimit)
+	}
+	return bookendSceneCards(cards, defaultFallbackSceneCardLimit)
+}
+
+func tailSceneCards(cards []store.SceneCardRow, limit int) []store.SceneCardRow {
+	if limit <= 0 || len(cards) <= limit {
+		return cards
+	}
+	out := make([]store.SceneCardRow, limit)
+	copy(out, cards[len(cards)-limit:])
+	return out
+}
+
+func bookendSceneCards(cards []store.SceneCardRow, limit int) []store.SceneCardRow {
+	if limit <= 0 || len(cards) <= limit {
+		return cards
+	}
+	head := limit / 2
+	tail := limit - head
+	out := make([]store.SceneCardRow, 0, limit)
+	out = append(out, cards[:head]...)
+	out = append(out, cards[len(cards)-tail:]...)
+	return out
+}
+
+func isEndingQuestion(question string) bool {
+	normalized := normalizeQuestionText(question)
+	for _, phrase := range []string{
+		"how does the story end",
+		"how does it end",
+		"how does this end",
+		"story end",
+		"story ends",
+		"book end",
+		"book ends",
+		"manuscript end",
+		"manuscript ends",
+		"novel end",
+		"novel ends",
+		"at the end of the story",
+		"by the end of the story",
+		"at the end of the book",
+		"by the end of the book",
+		"at the end of the novel",
+		"by the end of the novel",
+		"at the end of the manuscript",
+		"by the end of the manuscript",
+		"the ending",
+		"ending",
+		"conclusion",
+		"concludes",
+		"resolution",
+		"resolved",
+		"epilogue",
+		"final scene",
+		"final chapter",
+		"last scene",
+		"last chapter",
+		"last paragraph",
+		"last page",
+		"is it complete",
+		"does it feel complete",
+		"feels complete",
+		"complete ending",
+	} {
+		if containsQuestionPhrase(normalized, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeQuestionText(question string) string {
+	lower := strings.ToLower(question)
+	normalized := strings.NewReplacer(
+		"?", " ",
+		".", " ",
+		",", " ",
+		"!", " ",
+		";", " ",
+		":", " ",
+		"-", " ",
+		"_", " ",
+		"/", " ",
+		"\\", " ",
+		"'", " ",
+		"\"", " ",
+	).Replace(lower)
+	return strings.Join(strings.Fields(normalized), " ")
+}
+
+func containsQuestionPhrase(normalizedQuestion, phrase string) bool {
+	phrase = normalizeQuestionText(phrase)
+	if phrase == "" {
+		return false
+	}
+	return strings.Contains(" "+normalizedQuestion+" ", " "+phrase+" ")
+}
 func sceneCardStatusPolicy(opts Options) store.SceneCardStatusPolicy {
 	if opts.SceneCardStatusPolicy != "" {
 		return opts.SceneCardStatusPolicy
@@ -352,6 +498,9 @@ func parseAnswerResponse(content string) (rawAnswer, error) {
 			content = content[:i]
 		}
 		content = strings.TrimSpace(content)
+	}
+	if content == "" {
+		return rawAnswer{}, errors.New("model returned empty response")
 	}
 
 	var a rawAnswer

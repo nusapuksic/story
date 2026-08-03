@@ -28,6 +28,7 @@ func buildSystemPrompt(base, mode string) string {
 func buildUserPrompt(
 	question, mode string,
 	summaries []SummaryContext,
+	entityContext []EntityContext,
 	cards []store.SceneCardRow,
 	paragraphs []store.ParagraphRow,
 ) string {
@@ -41,6 +42,14 @@ func buildUserPrompt(
 				continue
 			}
 			writeSummaryContext(&sb, s)
+		}
+	}
+
+	if len(entityContext) > 0 {
+		sb.WriteString("## Entity context\n\n")
+		sb.WriteString("Use this compiled context for character/entity identity, aliases, and scene-scoped appearances. It is not a citation source; cite only paragraph IDs from the evidence paragraphs below.\n\n")
+		for _, ctx := range entityContext {
+			writeEntityContext(&sb, ctx)
 		}
 	}
 
@@ -98,6 +107,78 @@ func hasListValue(values []string) bool {
 	return false
 }
 
+func writeEntityContext(sb *strings.Builder, ctx EntityContext) {
+	entity := ctx.Entity
+	name := strings.TrimSpace(entity.CanonicalName)
+	if name == "" {
+		return
+	}
+	if strings.TrimSpace(entity.ID) != "" {
+		sb.WriteString("[")
+		sb.WriteString(entity.ID)
+		sb.WriteString("] ")
+	}
+	sb.WriteString(name)
+	if entityType := strings.TrimSpace(entity.Type); entityType != "" {
+		sb.WriteString(" (")
+		sb.WriteString(entityType)
+		sb.WriteString(")")
+	}
+	if chapterID := strings.TrimSpace(entity.ChapterID); chapterID != "" {
+		sb.WriteString(" - ")
+		sb.WriteString(chapterID)
+	}
+	sb.WriteString("\n")
+
+	if aliases := limitedPromptList(entity.Aliases, defaultEntityListValueLimit); len(aliases) > 0 {
+		sb.WriteString("Aliases: ")
+		sb.WriteString(strings.Join(aliases, "; "))
+		sb.WriteString("\n")
+	}
+	if len(ctx.Occurrences) > 0 {
+		sb.WriteString("Occurrences:\n")
+		for _, occ := range ctx.Occurrences {
+			sb.WriteString("- ")
+			sb.WriteString(occ.SceneID)
+			if occ.ChapterID != "" {
+				sb.WriteString(" (")
+				sb.WriteString(occ.ChapterID)
+				sb.WriteString(")")
+			}
+			if surfaces := limitedPromptList(occ.SurfaceTexts, defaultEntityListValueLimit); len(surfaces) > 0 {
+				sb.WriteString(": ")
+				sb.WriteString(strings.Join(surfaces, "; "))
+			}
+			if fields := limitedPromptList(occ.SourceFields, defaultEntityListValueLimit); len(fields) > 0 {
+				sb.WriteString(" [")
+				sb.WriteString(strings.Join(fields, "; "))
+				sb.WriteString("]")
+			}
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\n")
+}
+
+func limitedPromptList(values []string, limit int) []string {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, limit)
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
 func writeSummaryContext(sb *strings.Builder, s SummaryContext) {
 	switch s.RecordType {
 	case "book_summary":
@@ -130,7 +211,6 @@ func writeSummaryContext(sb *strings.Builder, s SummaryContext) {
 	}
 	writePromptList(sb, "Themes", s.Themes)
 	writePromptList(sb, "Unresolved", s.Unresolved)
-	writePromptList(sb, "Supporting references", s.Evidence)
 	sb.WriteString("\n")
 }
 

@@ -1201,6 +1201,8 @@ Evidence:
 Uncertainty:
   The manuscript does not establish whether she has connected the seal
   on the warning to Elias at this point.
+Run: query-...
+Artifacts: .story/runs/query-...
 
 Machine-readable output:
 
@@ -1219,7 +1221,8 @@ Machine-readable output:
   "records_used": [
     "claim-..."
   ],
-  "model_run": "query-..."
+  "model_run": "query-...",
+  "run_dir": ".story/runs/query-..."
 }
 
 12.7 Query workflow
@@ -1236,7 +1239,7 @@ The query engine:
 8. removes unsupported citations;
 9. returns the answer with provenance.
 
-A query answer is never promoted into the story model automatically.
+A query answer is never promoted into the story model automatically. Character/entity-shaped questions automatically include compact compiled entity context with aliases and scene-scoped appearances. Broad structural questions may be answered from summary and scene-card context with an empty paragraph evidence list when paragraph citations would be misleading. When keyword retrieval misses an ending-shaped question, the fallback uses the tail of the scene-card timeline rather than the full scene-card set. Each query writes local run artifacts under `.story/runs/<query-id>/`, including the exact provider request, a readable prompt transcript, the raw model response, response metadata, and errors when present. `.story/logs/runs.jsonl` receives the terminal status for both successful and failed query runs.
 
 ⸻
 
@@ -1296,6 +1299,16 @@ Every compilation creates:
     <task-id>.meta.json
   errors.jsonl
   summary.json
+
+Every query creates:
+
+.story/runs/<query-id>/
+  run.json
+  request.json
+  prompt.md
+  raw-response.txt
+  raw-response.meta.json
+  errors.jsonl
 
 Task states:
 

@@ -82,6 +82,7 @@ type entitySnapshotJSONLRecord struct {
 	ChapterID       string `json:"chapter_id"`
 	EntityCount     *int   `json:"entity_count"`
 	OccurrenceCount *int   `json:"occurrence_count"`
+	MentionCount    *int   `json:"mention_count"`
 	CommittedAt     string `json:"committed_at"`
 }
 
@@ -224,6 +225,106 @@ func (s *Store) EntityCounts() (entities, occurrences int, err error) {
 		return 0, 0, fmt.Errorf("count occurrences: %w", err)
 	}
 	return entities, occurrences, nil
+}
+
+// EntityRowsForChapter returns indexed entities, optionally restricted to one
+// chapter, ordered by type and canonical name for stable prompt context.
+func (s *Store) EntityRowsForChapter(chapterID string) ([]EntityRow, error) {
+	query := `SELECT id, chapter_id, type, canonical_name, aliases_json, evidence_json,
+		        generation_run, generation_model, prompt_version, status, raw_json
+		 FROM entities`
+	var args []any
+	if strings.TrimSpace(chapterID) != "" {
+		query += ` WHERE chapter_id = ?`
+		args = append(args, strings.TrimSpace(chapterID))
+	}
+	query += ` ORDER BY lower(type), lower(canonical_name), id`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list entities: %w", err)
+	}
+	defer rows.Close()
+	return scanEntityRows(rows)
+}
+
+// OccurrencesForEntity returns scene-scoped occurrences for an entity in
+// manuscript order. If chapterID is non-empty, results are restricted to it.
+func (s *Store) OccurrencesForEntity(entityID, chapterID string, limit int) ([]OccurrenceRow, error) {
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	query := `SELECT o.entity_id, o.chapter_id, o.scene_id, o.surface_texts_json,
+		        o.source_fields_json, o.confidence, o.generation_run, o.generation_model,
+		        o.prompt_version, o.status, o.raw_json
+		 FROM occurrences o
+		 JOIN chapters c ON c.id = o.chapter_id
+		 JOIN scenes sn ON sn.id = o.scene_id
+		 WHERE o.entity_id = ?`
+	args := []any{entityID}
+	if strings.TrimSpace(chapterID) != "" {
+		query += ` AND o.chapter_id = ?`
+		args = append(args, strings.TrimSpace(chapterID))
+	}
+	query += ` ORDER BY c.ordinal, sn.ordinal LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("occurrences for entity %s: %w", entityID, err)
+	}
+	defer rows.Close()
+	return scanOccurrenceRows(rows)
+}
+
+func scanEntityRows(rows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}) ([]EntityRow, error) {
+	var out []EntityRow
+	for rows.Next() {
+		var r EntityRow
+		var aliasesJSON, evidenceJSON string
+		if err := rows.Scan(&r.ID, &r.ChapterID, &r.Type, &r.CanonicalName, &aliasesJSON, &evidenceJSON,
+			&r.GenerationRun, &r.GenerationModel, &r.PromptVersion, &r.Status, &r.RawJSON); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(aliasesJSON), &r.Aliases); err != nil {
+			return nil, fmt.Errorf("parse aliases for entity %s: %w", r.ID, err)
+		}
+		if err := json.Unmarshal([]byte(evidenceJSON), &r.Evidence); err != nil {
+			return nil, fmt.Errorf("parse evidence for entity %s: %w", r.ID, err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func scanOccurrenceRows(rows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}) ([]OccurrenceRow, error) {
+	var out []OccurrenceRow
+	for rows.Next() {
+		var r OccurrenceRow
+		var surfacesJSON, sourceFieldsJSON string
+		if err := rows.Scan(&r.EntityID, &r.ChapterID, &r.SceneID, &surfacesJSON, &sourceFieldsJSON,
+			&r.Confidence, &r.GenerationRun, &r.GenerationModel, &r.PromptVersion, &r.Status, &r.RawJSON); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(surfacesJSON), &r.SurfaceTexts); err != nil {
+			return nil, fmt.Errorf("parse surface texts for occurrence %s/%s: %w", r.EntityID, r.SceneID, err)
+		}
+		if err := json.Unmarshal([]byte(sourceFieldsJSON), &r.SourceFields); err != nil {
+			return nil, fmt.Errorf("parse source fields for occurrence %s/%s: %w", r.EntityID, r.SceneID, err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // IndexEntitiesJSONL replays committed model/entities.jsonl snapshots and
@@ -395,12 +496,15 @@ func readCommittedEntityJSONL(
 			if strings.TrimSpace(rec.ID) == "" {
 				return fmt.Errorf("index entities jsonl: %s:%d: entity missing id", path, lineNo)
 			}
-			chapterID, err := entityRecordChapter(path, lineNo, rec, chapterIDs, sceneChapterByID)
+			allEntityIDs[rec.ID] = true
+			chapterID, current, err := entityRecordChapter(path, lineNo, rec, chapterIDs, sceneChapterByID)
 			if err != nil {
 				return err
 			}
+			if !current {
+				return nil
+			}
 			rec.ChapterID = chapterID
-			allEntityIDs[rec.ID] = true
 			runID := strings.TrimSpace(rec.Generation.RunID)
 			batch := pendingByChapter[chapterID]
 			if batch.entities == nil || batch.runID != runID {
@@ -423,6 +527,9 @@ func readCommittedEntityJSONL(
 				return fmt.Errorf("index entities jsonl: %s:%d: entity_snapshot missing entity_count", path, lineNo)
 			}
 			if snap.OccurrenceCount == nil {
+				if snap.MentionCount != nil {
+					return nil
+				}
 				return fmt.Errorf("index entities jsonl: %s:%d: entity_snapshot missing occurrence_count", path, lineNo)
 			}
 			if *snap.EntityCount < 0 {
@@ -471,31 +578,43 @@ func readCommittedEntityJSONL(
 	return committedEntities, entityChapterByID, allEntityIDs, snapshots, nil
 }
 
-func entityRecordChapter(path string, lineNo int, rec entityJSONLRecord, chapterIDs map[string]bool, sceneChapterByID map[string]string) (string, error) {
+func entityRecordChapter(path string, lineNo int, rec entityJSONLRecord, chapterIDs map[string]bool, sceneChapterByID map[string]string) (string, bool, error) {
 	chapterID := strings.TrimSpace(rec.ChapterID)
-	if chapterID == "" {
-		return "", fmt.Errorf("index entities jsonl: %s:%d: entity %s missing chapter_id", path, lineNo, rec.ID)
-	}
-	if !chapterIDs[chapterID] {
-		return "", fmt.Errorf("index entities jsonl: %s:%d: entity %s references missing chapter %q", path, lineNo, rec.ID, chapterID)
-	}
 	if len(rec.Evidence) == 0 {
-		return "", fmt.Errorf("index entities jsonl: %s:%d: entity %s has no scene evidence", path, lineNo, rec.ID)
+		if chapterID == "" {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("index entities jsonl: %s:%d: entity %s has no scene evidence", path, lineNo, rec.ID)
 	}
+	inferredChapterID := ""
 	for _, sceneID := range rec.Evidence {
 		sceneID = strings.TrimSpace(sceneID)
 		if sceneID == "" {
-			return "", fmt.Errorf("index entities jsonl: %s:%d: entity %s has blank scene evidence", path, lineNo, rec.ID)
+			return "", false, fmt.Errorf("index entities jsonl: %s:%d: entity %s has blank scene evidence", path, lineNo, rec.ID)
 		}
 		sceneChapter, ok := sceneChapterByID[sceneID]
 		if !ok {
-			return "", fmt.Errorf("index entities jsonl: %s:%d: entity %s references missing evidence scene %q", path, lineNo, rec.ID, sceneID)
+			if chapterID == "" {
+				return "", false, nil
+			}
+			return "", false, fmt.Errorf("index entities jsonl: %s:%d: entity %s references missing evidence scene %q", path, lineNo, rec.ID, sceneID)
 		}
-		if sceneChapter != chapterID {
-			return "", fmt.Errorf("index entities jsonl: %s:%d: entity %s evidence scene %s is in chapter %s, not %s", path, lineNo, rec.ID, sceneID, sceneChapter, chapterID)
+		if inferredChapterID == "" {
+			inferredChapterID = sceneChapter
+		} else if inferredChapterID != sceneChapter {
+			return "", false, fmt.Errorf("index entities jsonl: %s:%d: entity %s evidence spans chapters %s and %s", path, lineNo, rec.ID, inferredChapterID, sceneChapter)
 		}
 	}
-	return chapterID, nil
+	if chapterID == "" {
+		return inferredChapterID, true, nil
+	}
+	if !chapterIDs[chapterID] {
+		return "", false, fmt.Errorf("index entities jsonl: %s:%d: entity %s references missing chapter %q", path, lineNo, rec.ID, chapterID)
+	}
+	if inferredChapterID != chapterID {
+		return "", false, fmt.Errorf("index entities jsonl: %s:%d: entity %s evidence is in chapter %s, not %s", path, lineNo, rec.ID, inferredChapterID, chapterID)
+	}
+	return chapterID, true, nil
 }
 
 func readCommittedOccurrenceJSONL(

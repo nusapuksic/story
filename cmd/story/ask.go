@@ -66,21 +66,47 @@ func runAsk(ctx context.Context, question, mode, chapterID string, maxEvidence i
 	}
 	defer st.Close()
 
+	recorder, err := newAskRunRecorder(p, askRunConfig{
+		Question:         question,
+		Mode:             mode,
+		ChapterID:        chapterID,
+		MaxEvidence:      maxEvidence,
+		IncludeGenerated: includeGenerated,
+	})
+	if err != nil {
+		return err
+	}
+	fail := func(runErr error) error {
+		finishErr := recorder.finish(runErr, "")
+		if finishErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("finalize ask run: %w", finishErr))
+		}
+		annotated := recorder.annotateError(runErr)
+		if errors.Is(runErr, query.ErrInsufficientEvidence) {
+			return &insufficientEvidenceError{annotated}
+		}
+		return annotated
+	}
+
 	// Load the discussion provider.
 	prov, model, provErr := provider.ForRole(p.Config.LLM, "discussion")
 	if provErr != nil {
 		if errors.Is(provErr, provider.ErrNoProvider) {
-			return fmt.Errorf("no discussion provider configured: add [llm.roles.discussion] to story.toml")
+			return fail(fmt.Errorf("no discussion provider configured: add [llm.roles.discussion] to story.toml"))
 		}
-		return fmt.Errorf("load discussion provider: %w", provErr)
+		return fail(fmt.Errorf("load discussion provider: %w", provErr))
+	}
+	if err := recorder.setModel(model); err != nil {
+		return fail(fmt.Errorf("record ask model: %w", err))
 	}
 
 	summaries, err := summaryContextForAsk(p, st, chapterID)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 
 	opts := query.Options{
+		QueryRunID:       recorder.id(),
 		Mode:             mode,
 		ChapterID:        chapterID,
 		MaxEvidence:      maxEvidence,
@@ -89,17 +115,19 @@ func runAsk(ctx context.Context, question, mode, chapterID string, maxEvidence i
 		Summaries:        summaries,
 	}
 
-	ans, err := query.Ask(ctx, st, prov, model, question, opts)
+	ans, err := query.Ask(ctx, st, &askRecordingProvider{inner: prov, recorder: recorder}, model, question, opts)
 	if err != nil {
-		if errors.Is(err, query.ErrInsufficientEvidence) {
-			// Use a distinct error type so the CLI can return exit code 40.
-			return &insufficientEvidenceError{err}
-		}
-		return err
+		return fail(err)
+	}
+	if err := recorder.finish(nil, ans.PromptVersion); err != nil {
+		return fmt.Errorf("finalize ask run %s: %w", recorder.id(), err)
 	}
 
 	if flags.jsonOut {
-		return printJSON(ans)
+		return printJSON(struct {
+			*query.Answer
+			RunDir string `json:"run_dir,omitempty"`
+		}{Answer: ans, RunDir: recorder.runDir()})
 	}
 
 	// Human-readable output.
@@ -116,6 +144,8 @@ func runAsk(ctx context.Context, question, mode, chapterID string, maxEvidence i
 			info("  %s", u)
 		}
 	}
+	info("\nRun: %s", ans.QueryRunID)
+	info("Artifacts: %s", recorder.runDir())
 	return nil
 }
 
