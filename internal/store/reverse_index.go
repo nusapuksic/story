@@ -3,7 +3,9 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sort"
+	"sync"
 )
 
 const (
@@ -76,18 +78,31 @@ func (s *Store) RebuildReverseIndex() (retErr error) {
 			return fmt.Errorf("rebuild reverse index: %w", err)
 		}
 	}
+	insertTermStmt, err := tx.Prepare(
+		`INSERT INTO reverse_index_terms (term_type, term, occurrence_count) VALUES (?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("rebuild reverse index: prepare term insert: %w", err)
+	}
+	defer insertTermStmt.Close()
+	insertRefStmt, err := tx.Prepare(
+		`INSERT INTO reverse_index_refs (term_type, term, scene_id, chapter_id, source_field, weight, raw_value)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("rebuild reverse index: prepare ref insert: %w", err)
+	}
+	defer insertRefStmt.Close()
+
 	for _, term := range terms {
-		if _, err := tx.Exec(
-			`INSERT INTO reverse_index_terms (term_type, term, occurrence_count) VALUES (?, ?, ?)`,
+		if _, err := insertTermStmt.Exec(
 			term.TermType, term.Term, term.OccurrenceCount,
 		); err != nil {
 			return fmt.Errorf("rebuild reverse index: insert term %s/%s: %w", term.TermType, term.Term, err)
 		}
 	}
 	for _, ref := range refs {
-		if _, err := tx.Exec(
-			`INSERT INTO reverse_index_refs (term_type, term, scene_id, chapter_id, source_field, weight, raw_value)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		if _, err := insertRefStmt.Exec(
 			ref.TermType, ref.Term, ref.SceneID, ref.ChapterID, ref.SourceField, ref.Weight, ref.RawValue,
 		); err != nil {
 			return fmt.Errorf("rebuild reverse index: insert ref %s/%s/%s: %w", ref.TermType, ref.Term, ref.SceneID, err)
@@ -124,30 +139,18 @@ func (s *Store) reverseIndexSourceCards() ([]reverseIndexSourceCard, error) {
 }
 
 func reverseIndexRowsFromCards(cards []reverseIndexSourceCard) ([]ReverseIndexRef, []ReverseIndexTerm) {
+	cardRefs := reverseIndexRefsFromCards(cards)
 	seenRef := make(map[string]bool)
 	termCounts := make(map[string]int)
-	refs := make([]ReverseIndexRef, 0)
-	for _, card := range cards {
-		valuesByField := sceneCardLiteralValues(card.RawJSON)
-		for _, source := range reverseTermSources {
-			for _, value := range valuesByField[source.field] {
-				key := reverseIndexRefKey(source.termType, value, card.SceneID, source.field, value)
-				if seenRef[key] {
-					continue
-				}
-				seenRef[key] = true
-				termCounts[reverseIndexTermKey(source.termType, value)]++
-				refs = append(refs, ReverseIndexRef{
-					TermType:    source.termType,
-					Term:        value,
-					SceneID:     card.SceneID,
-					ChapterID:   card.ChapterID,
-					SourceField: source.field,
-					Weight:      1,
-					RawValue:    value,
-				})
-			}
+	refs := make([]ReverseIndexRef, 0, len(cardRefs))
+	for _, ref := range cardRefs {
+		key := reverseIndexRefKey(ref.TermType, ref.Term, ref.SceneID, ref.SourceField, ref.RawValue)
+		if seenRef[key] {
+			continue
 		}
+		seenRef[key] = true
+		termCounts[reverseIndexTermKey(ref.TermType, ref.Term)]++
+		refs = append(refs, ref)
 	}
 
 	terms := make([]ReverseIndexTerm, 0, len(termCounts))
@@ -180,6 +183,83 @@ func reverseIndexRowsFromCards(cards []reverseIndexSourceCard) ([]ReverseIndexRe
 		return refs[i].RawValue < refs[j].RawValue
 	})
 	return refs, terms
+}
+
+func reverseIndexRefsFromCards(cards []reverseIndexSourceCard) []ReverseIndexRef {
+	if len(cards) == 0 {
+		return nil
+	}
+	workerLimit := reverseIndexWorkerLimit(len(cards))
+	if workerLimit == 1 {
+		refs := make([]ReverseIndexRef, 0, len(cards))
+		for _, card := range cards {
+			refs = append(refs, reverseIndexRefsForCard(card)...)
+		}
+		return refs
+	}
+
+	jobs := make(chan reverseIndexSourceCard)
+	results := make(chan []ReverseIndexRef, len(cards))
+
+	var wg sync.WaitGroup
+	for i := 0; i < workerLimit; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for card := range jobs {
+				results <- reverseIndexRefsForCard(card)
+			}
+		}()
+	}
+
+	go func() {
+		for _, card := range cards {
+			jobs <- card
+		}
+		close(jobs)
+	}()
+
+	wg.Wait()
+	close(results)
+
+	refs := make([]ReverseIndexRef, 0, len(cards))
+	for batch := range results {
+		refs = append(refs, batch...)
+	}
+	return refs
+}
+
+func reverseIndexRefsForCard(card reverseIndexSourceCard) []ReverseIndexRef {
+	valuesByField := sceneCardLiteralValues(card.RawJSON)
+	refs := make([]ReverseIndexRef, 0, len(reverseTermSources))
+	for _, source := range reverseTermSources {
+		for _, value := range valuesByField[source.field] {
+			refs = append(refs, ReverseIndexRef{
+				TermType:    source.termType,
+				Term:        value,
+				SceneID:     card.SceneID,
+				ChapterID:   card.ChapterID,
+				SourceField: source.field,
+				Weight:      1,
+				RawValue:    value,
+			})
+		}
+	}
+	return refs
+}
+
+func reverseIndexWorkerLimit(cardCount int) int {
+	if cardCount <= 1 {
+		return 1
+	}
+	limit := runtime.GOMAXPROCS(0)
+	if limit <= 0 {
+		limit = 1
+	}
+	if limit > cardCount {
+		limit = cardCount
+	}
+	return limit
 }
 
 func sceneCardLiteralValues(raw string) map[string][]string {

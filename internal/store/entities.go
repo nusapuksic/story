@@ -156,6 +156,103 @@ func (s *Store) InsertOccurrence(r OccurrenceRow) error {
 	return nil
 }
 
+// ReplaceEntityProjectionForChapter replaces indexed entities and occurrences
+// for one chapter and marks the chapter snapshot as committed.
+func (s *Store) ReplaceEntityProjectionForChapter(
+	chapterID string,
+	entities []EntityRow,
+	occurrences []OccurrenceRow,
+	entityCount int,
+	occurrenceCount int,
+	committedAt string,
+) (retErr error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("replace entity projection for chapter %s: %w", chapterID, err)
+	}
+	defer func() {
+		if retErr != nil {
+			tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.Exec(`DELETE FROM occurrences WHERE chapter_id = ?`, chapterID); err != nil {
+		return fmt.Errorf("replace entity projection for chapter %s: %w", chapterID, err)
+	}
+	if _, err := tx.Exec(`DELETE FROM chapter_entity_snapshots WHERE chapter_id = ?`, chapterID); err != nil {
+		return fmt.Errorf("replace entity projection for chapter %s: %w", chapterID, err)
+	}
+	if _, err := tx.Exec(`DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM occurrences)`); err != nil {
+		return fmt.Errorf("replace entity projection for chapter %s: %w", chapterID, err)
+	}
+
+	insertEntityStmt, err := tx.Prepare(
+		`INSERT OR REPLACE INTO entities
+			(id, chapter_id, type, canonical_name, aliases_json, evidence_json, generation_run,
+			 generation_model, prompt_version, status, raw_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("replace entity projection for chapter %s: prepare entity insert: %w", chapterID, err)
+	}
+	defer insertEntityStmt.Close()
+
+	insertOccurrenceStmt, err := tx.Prepare(
+		`INSERT OR REPLACE INTO occurrences
+			(entity_id, chapter_id, scene_id, surface_texts_json, source_fields_json, confidence, generation_run,
+			 generation_model, prompt_version, status, raw_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("replace entity projection for chapter %s: prepare occurrence insert: %w", chapterID, err)
+	}
+	defer insertOccurrenceStmt.Close()
+
+	for _, row := range entities {
+		aliasesJSON, err := json.Marshal(row.Aliases)
+		if err != nil {
+			return fmt.Errorf("replace entity projection for chapter %s: marshal aliases for entity %s: %w", chapterID, row.ID, err)
+		}
+		evidenceJSON, err := json.Marshal(row.Evidence)
+		if err != nil {
+			return fmt.Errorf("replace entity projection for chapter %s: marshal evidence for entity %s: %w", chapterID, row.ID, err)
+		}
+		if _, err := insertEntityStmt.Exec(
+			row.ID, row.ChapterID, row.Type, row.CanonicalName, string(aliasesJSON), string(evidenceJSON),
+			row.GenerationRun, row.GenerationModel, row.PromptVersion, row.Status, row.RawJSON,
+		); err != nil {
+			return fmt.Errorf("replace entity projection for chapter %s: insert entity %s: %w", chapterID, row.ID, err)
+		}
+	}
+
+	for _, row := range occurrences {
+		surfaceTextsJSON, err := json.Marshal(row.SurfaceTexts)
+		if err != nil {
+			return fmt.Errorf("replace entity projection for chapter %s: marshal surface texts for occurrence %s/%s: %w", chapterID, row.EntityID, row.SceneID, err)
+		}
+		sourceFieldsJSON, err := json.Marshal(row.SourceFields)
+		if err != nil {
+			return fmt.Errorf("replace entity projection for chapter %s: marshal source fields for occurrence %s/%s: %w", chapterID, row.EntityID, row.SceneID, err)
+		}
+		if _, err := insertOccurrenceStmt.Exec(
+			row.EntityID, row.ChapterID, row.SceneID, string(surfaceTextsJSON), string(sourceFieldsJSON), row.Confidence,
+			row.GenerationRun, row.GenerationModel, row.PromptVersion, row.Status, row.RawJSON,
+		); err != nil {
+			return fmt.Errorf("replace entity projection for chapter %s: insert occurrence %s/%s: %w", chapterID, row.EntityID, row.SceneID, err)
+		}
+	}
+
+	if _, err := tx.Exec(
+		`INSERT OR REPLACE INTO chapter_entity_snapshots (chapter_id, entity_count, occurrence_count, committed_at)
+		 VALUES (?, ?, ?, ?)`,
+		chapterID, entityCount, occurrenceCount, committedAt,
+	); err != nil {
+		return fmt.Errorf("replace entity projection for chapter %s: mark snapshot: %w", chapterID, err)
+	}
+
+	return tx.Commit()
+}
+
 // DeleteEntityOccurrencesForChapter removes indexed entity occurrences for a
 // chapter, clears the chapter entity snapshot, and then drops entities that no
 // longer have any occurrences.

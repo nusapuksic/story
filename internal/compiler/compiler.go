@@ -740,6 +740,20 @@ func appendJSONL(w *os.File, v any) error {
 	return w.Sync()
 }
 
+func appendJSONLBatch(w *os.File, records []any) error {
+	if len(records) == 0 {
+		return nil
+	}
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	for _, record := range records {
+		if err := enc.Encode(record); err != nil {
+			return err
+		}
+	}
+	return w.Sync()
+}
+
 // ReadScenesJSONL reads all scene and scene card records from model/scenes.jsonl.
 func ReadScenesJSONL(path string) ([]SceneRecord, []SceneCardRecord, error) {
 	f, err := os.Open(path)

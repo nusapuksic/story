@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/nusapuksic/story/internal/store"
@@ -110,6 +111,92 @@ func TestDeleteScenesForChapterClearsReverseIndexRefs(t *testing.T) {
 		t.Fatalf(`reverse index terms remain after scene delete: %#v`, terms)
 	}
 }
+
+func TestRebuildReverseIndexStableAcrossRepeatedRuns(t *testing.T) {
+	s := openTestStore(t)
+	insertChapter(t, s, `ch-0001`, 1, `Chapter One`)
+	insertParagraph(t, s, `p-001`, `ch-0001`, 1)
+	insertParagraph(t, s, `p-002`, `ch-0001`, 2)
+
+	if err := s.InsertScene(store.SceneRow{
+		ID: `sc-001`, ChapterID: `ch-0001`,
+		ParagraphStart: `p-001`, ParagraphEnd: `p-001`,
+		Ordinal: 1, BoundarySource: `explicit`, Status: `generated`,
+	}); err != nil {
+		t.Fatalf(`InsertScene sc-001: %v`, err)
+	}
+	if err := s.InsertScene(store.SceneRow{
+		ID: `sc-002`, ChapterID: `ch-0001`,
+		ParagraphStart: `p-002`, ParagraphEnd: `p-002`,
+		Ordinal: 2, BoundarySource: `explicit`, Status: `generated`,
+	}); err != nil {
+		t.Fatalf(`InsertScene sc-002: %v`, err)
+	}
+
+	for _, card := range []store.SceneCardRow{
+		{
+			SceneID:         `sc-001`,
+			Title:           `Card 1`,
+			Summary:         `Summary 1`,
+			Evidence:        []string{`p-001`},
+			GenerationRun:   `run-001`,
+			GenerationModel: `test-model`,
+			PromptVersion:   `scene-extraction-v1`,
+			Status:          `generated`,
+			RawJSON:         `{"themes":["Memory","Memory"],"entities":["Mara"],"participants":["Mara"],"evidence":["p-001"]}`,
+		},
+		{
+			SceneID:         `sc-002`,
+			Title:           `Card 2`,
+			Summary:         `Summary 2`,
+			Evidence:        []string{`p-002`},
+			GenerationRun:   `run-001`,
+			GenerationModel: `test-model`,
+			PromptVersion:   `scene-extraction-v1`,
+			Status:          `generated`,
+			RawJSON:         `{"themes":["Memory"],"entities":["Mara"],"participants":["Mara"],"evidence":["p-002"]}`,
+		},
+	} {
+		if err := s.InsertSceneCard(card); err != nil {
+			t.Fatalf(`InsertSceneCard %s: %v`, card.SceneID, err)
+		}
+	}
+
+	if err := s.RebuildReverseIndex(); err != nil {
+		t.Fatalf(`first RebuildReverseIndex: %v`, err)
+	}
+	firstTerms, err := s.ReverseIndexTerms(store.ReverseTermTheme, ``, 20)
+	if err != nil {
+		t.Fatalf(`ReverseIndexTerms first: %v`, err)
+	}
+	firstRefs, err := s.ReverseIndexRefs(store.ReverseTermTheme, `Memory`)
+	if err != nil {
+		t.Fatalf(`ReverseIndexRefs first: %v`, err)
+	}
+
+	if err := s.RebuildReverseIndex(); err != nil {
+		t.Fatalf(`second RebuildReverseIndex: %v`, err)
+	}
+	secondTerms, err := s.ReverseIndexTerms(store.ReverseTermTheme, ``, 20)
+	if err != nil {
+		t.Fatalf(`ReverseIndexTerms second: %v`, err)
+	}
+	secondRefs, err := s.ReverseIndexRefs(store.ReverseTermTheme, `Memory`)
+	if err != nil {
+		t.Fatalf(`ReverseIndexRefs second: %v`, err)
+	}
+
+	if !reflect.DeepEqual(firstTerms, secondTerms) {
+		t.Fatalf("terms changed across rebuilds\nfirst:  %#v\nsecond: %#v", firstTerms, secondTerms)
+	}
+	if !reflect.DeepEqual(firstRefs, secondRefs) {
+		t.Fatalf("refs changed across rebuilds\nfirst:  %#v\nsecond: %#v", firstRefs, secondRefs)
+	}
+	if len(secondRefs) != 2 {
+		t.Fatalf("Memory refs = %d, want 2", len(secondRefs))
+	}
+}
+
 func requireReverseIndexRefs(t *testing.T, s *store.Store, termType, term string, want int) []store.ReverseIndexRef {
 	t.Helper()
 	refs, err := s.ReverseIndexRefs(termType, term)

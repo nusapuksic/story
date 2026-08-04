@@ -124,33 +124,35 @@ func (c compileArtifactCommitter) CommitEntities(output entityWorkOutput, entiti
 	if c.occurrencesFile == nil {
 		return fmt.Errorf("commit entities: occurrences file is nil")
 	}
+	entityRecords := make([]any, 0, len(entities)+1)
+	entityRows := make([]store.EntityRow, 0, len(entities))
 	for _, entity := range entities {
-		if err := appendJSONL(c.entitiesFile, entity); err != nil {
-			return err
-		}
+		entityRecords = append(entityRecords, entity)
+		entityRows = append(entityRows, entityRowFromRecord(entity))
 	}
-	for _, occurrence := range occurrences {
-		if err := appendJSONL(c.occurrencesFile, occurrence); err != nil {
-			return err
-		}
-	}
-	if err := appendJSONL(c.entitiesFile, output.Snapshot); err != nil {
+	entityRecords = append(entityRecords, output.Snapshot)
+	if err := appendJSONLBatch(c.entitiesFile, entityRecords); err != nil {
 		return fmt.Errorf("write entity_snapshot for %s: %w", output.Input.Chapter.ID, err)
 	}
-	if err := c.st.DeleteEntityOccurrencesForChapter(output.Input.Chapter.ID); err != nil {
+
+	occurrenceRecords := make([]any, 0, len(occurrences))
+	occurrenceRows := make([]store.OccurrenceRow, 0, len(occurrences))
+	for _, occurrence := range occurrences {
+		occurrenceRecords = append(occurrenceRecords, occurrence)
+		occurrenceRows = append(occurrenceRows, occurrenceRowFromRecord(occurrence))
+	}
+	if err := appendJSONLBatch(c.occurrencesFile, occurrenceRecords); err != nil {
 		return err
 	}
-	for _, entity := range entities {
-		if err := c.st.InsertEntity(entityRowFromRecord(entity)); err != nil {
-			return err
-		}
-	}
-	for _, occurrence := range occurrences {
-		if err := c.st.InsertOccurrence(occurrenceRowFromRecord(occurrence)); err != nil {
-			return err
-		}
-	}
-	if err := c.st.MarkEntitySnapshotCommitted(output.Input.Chapter.ID, output.Snapshot.EntityCount, output.Snapshot.OccurrenceCount, output.Snapshot.CommittedAt); err != nil {
+
+	if err := c.st.ReplaceEntityProjectionForChapter(
+		output.Input.Chapter.ID,
+		entityRows,
+		occurrenceRows,
+		output.Snapshot.EntityCount,
+		output.Snapshot.OccurrenceCount,
+		output.Snapshot.CommittedAt,
+	); err != nil {
 		return err
 	}
 	return c.recordCommit(output.Staged)
