@@ -1,8 +1,8 @@
 // Package compiler implements the story compilation pipeline.
 //
 // The pipeline converts a canonical manuscript into a layered story model.
-// Full compilation runs scenes, scene cards, optional verification, summaries,
-// then entities.
+// Full compilation runs scenes, scene cards, optional verification, entities,
+// then summaries.
 //
 // Each compilation creates a run record under .story/runs/<run-id>/ that can
 // be used for resumability and provenance.

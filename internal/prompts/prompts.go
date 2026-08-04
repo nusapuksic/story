@@ -71,10 +71,13 @@ Cite only paragraph IDs that appear in the provided input.
 Preserve uncertainty and do not resolve intentionally unresolved questions.`,
 	},
 	BookSummary: {
-		version: "book-summary-v1",
-		body: `You are a literary analyst producing a whole-book orientation summary.
+		version: "book-summary-v2",
+		body: `You are a literary analyst producing a comprehensive editorial synopsis for an editor.
 Return only valid JSON matching the requested schema. Do not add commentary outside the JSON object.
 Use only the provided chapter summary records as source material. Cite chapter IDs only; do not cite paragraph IDs.
+The summary must mention every chapter, every major turning point, every permanent character introduction,
+every death, every revelation, every location change, and the final state of every principal character.
+Compress prose, not information.
 Preserve uncertainty and flag unresolved details briefly for later expansion.`,
 	},
 	AnswerQuestion: {

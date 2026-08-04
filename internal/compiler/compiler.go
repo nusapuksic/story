@@ -279,6 +279,22 @@ func runLayers(
 		return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, err
 	}
 
+	// Entities layer. Book summaries depend on entities for principal-character coverage.
+	needEntities := opts.Layer == "" || opts.Layer == LayerEntities || opts.Layer == LayerSummaries
+	if needEntities {
+		msg := "Entities: starting"
+		if opts.Layer == LayerSummaries {
+			msg = "Entities: starting (prerequisite for summaries)"
+		}
+		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "layer-start", Total: len(chapters), Message: msg})
+		n, err := compileEntities(ctx, p, st, chapters, opts, cfg, run)
+		if err != nil {
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, 0, verificationsBuilt, summariesBuilt, err
+		}
+		entitiesBuilt = n
+		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Entities: completed (%d built)", n)})
+	}
+
 	// Summaries layer.
 	if opts.Layer == "" || opts.Layer == LayerSummaries {
 		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "layer-start", Total: len(chapters), Message: "Summaries: starting"})
@@ -293,17 +309,6 @@ func runLayers(
 		}
 		summariesBuilt = n
 		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Summaries: completed (%d built)", n)})
-	}
-
-	// Entities layer.
-	if opts.Layer == "" || opts.Layer == LayerEntities {
-		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "layer-start", Total: len(chapters), Message: "Entities: starting"})
-		n, err := compileEntities(ctx, p, st, chapters, opts, cfg, run)
-		if err != nil {
-			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, 0, verificationsBuilt, summariesBuilt, err
-		}
-		entitiesBuilt = n
-		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Entities: completed (%d built)", n)})
 	}
 
 	return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, nil

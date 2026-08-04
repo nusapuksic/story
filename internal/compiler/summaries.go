@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,6 +51,11 @@ type rawSummary struct {
 type summaryIndex struct {
 	Chapters map[string]SummaryRecord
 	Book     *SummaryRecord
+}
+
+type principalCharacter struct {
+	Name            string
+	ChapterMentions int
 }
 
 const paragraphIDPatternSource = `p-[0-9A-HJKMNP-TV-Z]{26}`
@@ -165,7 +171,12 @@ func compileSummaries(
 	}
 
 	reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-start", Message: fmt.Sprintf("Book summary: extracting from %d chapter summary record(s)", len(chapterSummaries))})
-	book, err := extractBookSummary(ctx, p, chapterSummaries,
+	principals, err := principalCharactersForBookSummary(st, chapters)
+	if err != nil {
+		return total, fmt.Errorf("resolve principal characters for book summary: %w", err)
+	}
+
+	book, err := extractBookSummary(ctx, p, chapterSummaries, principals,
 		opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 	if err != nil {
 		return total, fmt.Errorf("extract book summary: %w", err)
@@ -373,6 +384,7 @@ func extractBookSummary(
 	ctx context.Context,
 	p *project.Project,
 	chapterSummaries []SummaryRecord,
+	principals []principalCharacter,
 	prov provider.Provider,
 	model string,
 	cfg sceneDetectConfig,
@@ -395,7 +407,7 @@ func extractBookSummary(
 		Model: model,
 		Messages: []provider.Message{
 			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: buildBookSummaryPrompt(p.Config.Title, chapterSummaries)},
+			{Role: "user", Content: buildBookSummaryPrompt(p.Config.Title, chapterSummaries, principals)},
 		},
 		Temperature: cfg.Temperature,
 		MaxTokens:   cfg.MaxOutputTokens,
@@ -410,6 +422,9 @@ func extractBookSummary(
 
 	rec, parseErr := parseSummaryResponse(resp.Content, "book_summary", "", "", sourceRecords,
 		validEvidenceIDs, fallbackSummary, fallbackEvidence, runID(run), model, promptVersion)
+	if parseErr == nil {
+		parseErr = validateBookSummaryCoverage(rec, sourceRecords, principals)
+	}
 	status := TaskStatusCompleted
 	errMsg := ""
 	if parseErr != nil {
@@ -719,18 +734,54 @@ func writeParagraphExcerpts(sb *strings.Builder, paragraphs []store.ParagraphRow
 		sb.WriteString("\n\n")
 	}
 }
-func buildBookSummaryPrompt(title string, summaries []SummaryRecord) string {
+func buildBookSummaryPrompt(title string, summaries []SummaryRecord, principals []principalCharacter) string {
 	var sb strings.Builder
-	sb.WriteString("Produce a whole-book orientation summary from chapter summary records as evidence-backed JSON.\n")
+	sb.WriteString("Produce a comprehensive editorial synopsis from chapter summary records as evidence-backed JSON.\n")
 	if title != "" {
 		sb.WriteString("Book title: ")
 		sb.WriteString(title)
 		sb.WriteString("\n")
 	}
+	sb.WriteString("Coverage requirements:\n")
+	sb.WriteString("- Mention every chapter.\n")
+	sb.WriteString("- Mention every major turning point.\n")
+	sb.WriteString("- Mention every permanent character introduction.\n")
+	sb.WriteString("- Mention every death.\n")
+	sb.WriteString("- Mention every revelation.\n")
+	sb.WriteString("- Mention every location change.\n")
+	sb.WriteString("- Include the final state of every principal character listed below.\n")
+	sb.WriteString("- Compress prose, not information.\n")
 	sb.WriteString("Return JSON matching the schema:\n")
 	sb.WriteString(`{"summary":"...","themes":[],"unresolved":[],"evidence":["ch-..."]}`)
 	sb.WriteString("\nCite only chapter IDs from the records below. Do not cite paragraph IDs.\n")
 	sb.WriteString("Use unresolved only for questions or tensions that remain open at book-summary level.\n\n")
+	sb.WriteString("Required chapter coverage:\n")
+	for _, rec := range summaries {
+		if rec.ChapterID == "" {
+			continue
+		}
+		sb.WriteString("- ")
+		sb.WriteString(rec.ChapterID)
+		if rec.ChapterTitle != "" {
+			sb.WriteString(" (")
+			sb.WriteString(rec.ChapterTitle)
+			sb.WriteString(")")
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\nPrincipal characters requiring final-state coverage:\n")
+	if len(principals) == 0 {
+		sb.WriteString("- (none detected from compiled entities)\n")
+	} else {
+		for _, principal := range principals {
+			sb.WriteString("- ")
+			sb.WriteString(principal.Name)
+			sb.WriteString(" (mentioned in ")
+			sb.WriteString(fmt.Sprintf("%d", principal.ChapterMentions))
+			sb.WriteString(" chapter(s))\n")
+		}
+	}
+	sb.WriteString("\n")
 	sb.WriteString("Chapter summary records:\n")
 	for _, rec := range summaries {
 		sb.WriteString("- ")
@@ -753,6 +804,120 @@ func buildBookSummaryPrompt(title string, summaries []SummaryRecord) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+func validateBookSummaryCoverage(rec *SummaryRecord, chapterIDs []string, principals []principalCharacter) error {
+	if rec == nil {
+		return fmt.Errorf("book summary is missing")
+	}
+	evidence := make(map[string]bool, len(rec.Evidence))
+	for _, id := range rec.Evidence {
+		evidence[strings.TrimSpace(id)] = true
+	}
+	for _, chapterID := range chapterIDs {
+		if strings.TrimSpace(chapterID) == "" {
+			continue
+		}
+		if !evidence[chapterID] {
+			return fmt.Errorf("book summary missing chapter evidence %q", chapterID)
+		}
+	}
+
+	summaryLower := strings.ToLower(rec.Summary)
+	for _, principal := range principals {
+		name := strings.TrimSpace(principal.Name)
+		if name == "" {
+			continue
+		}
+		if !strings.Contains(summaryLower, strings.ToLower(name)) {
+			return fmt.Errorf("book summary missing final state for principal character %q", name)
+		}
+	}
+	return nil
+}
+
+func principalCharactersForBookSummary(st *store.Store, chapters []store.ChapterRow) ([]principalCharacter, error) {
+	if st == nil || len(chapters) == 0 {
+		return nil, nil
+	}
+
+	selectedChapters := make(map[string]bool, len(chapters))
+	for _, ch := range chapters {
+		if strings.TrimSpace(ch.ID) != "" {
+			selectedChapters[ch.ID] = true
+		}
+	}
+
+	rows, err := st.EntityRowsForChapter("")
+	if err != nil {
+		return nil, err
+	}
+
+	type tally struct {
+		Name     string
+		Chapters map[string]bool
+	}
+	byName := make(map[string]*tally)
+	for _, row := range rows {
+		if !selectedChapters[row.ChapterID] {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(row.Type), "character") {
+			continue
+		}
+		name := strings.TrimSpace(row.CanonicalName)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		current, ok := byName[key]
+		if !ok {
+			current = &tally{Name: name, Chapters: make(map[string]bool)}
+			byName[key] = current
+		}
+		current.Chapters[row.ChapterID] = true
+	}
+	for _, ch := range chapters {
+		refs, err := st.ReverseIndexRefsForChapter(ch.ID, []string{store.ReverseTermPOV})
+		if err != nil {
+			return nil, err
+		}
+		for _, ref := range refs {
+			name := strings.TrimSpace(ref.RawValue)
+			if name == "" {
+				name = strings.TrimSpace(ref.Term)
+			}
+			if name == "" {
+				continue
+			}
+			key := strings.ToLower(name)
+			current, ok := byName[key]
+			if !ok {
+				current = &tally{Name: name, Chapters: make(map[string]bool)}
+				byName[key] = current
+			}
+			current.Chapters[ch.ID] = true
+		}
+	}
+
+	threshold := (len(selectedChapters) + 1) / 2
+	out := make([]principalCharacter, 0, len(byName))
+	for _, entry := range byName {
+		count := len(entry.Chapters)
+		if count >= threshold {
+			out = append(out, principalCharacter{
+				Name:            entry.Name,
+				ChapterMentions: count,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ChapterMentions != out[j].ChapterMentions {
+			return out[i].ChapterMentions > out[j].ChapterMentions
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out, nil
 }
 func deriveChapterFallbackSummary(paragraphs []store.ParagraphRow) (string, []string) {
 	parts := make([]string, 0, 2)

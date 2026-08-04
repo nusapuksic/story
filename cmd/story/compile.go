@@ -31,10 +31,10 @@ Supported layers:
   scenes        Detect scene boundaries (explicit + optional LLM proposals)
   scene-cards   Extract structured scene cards using the configured LLM
   verification  Verify generated scene cards against cited manuscript evidence
-  summaries     Generate chapter and book summaries using the configured LLM
   entities      Consolidate entities and scene-scoped occurrences from scene-card signals
+  summaries     Generate chapter summaries and an editorial book synopsis using the configured LLM
 
-Without --layer, all implemented layers are run in order: scenes, scene-cards, verification when enabled, summaries, entities.
+Without --layer, all implemented layers are run in order: scenes, scene-cards, verification when enabled, entities, summaries.
 
 Scene-card extraction retries invalid model output once, retries timeouts with compact context, and then writes a deterministic fallback card. Use --strict-extraction for developer/debug runs that should fail immediately.`,
 		Args: cobra.NoArgs,

@@ -809,10 +809,10 @@ Contains:
 * character timelines;
 * relationship progressions;
 * unresolved-thread index;
-* whole-book orientation summary;
+* whole-book editorial summary;
 * tentative motifs and themes.
 
-Chapter summaries cite source paragraphs. Whole-book orientation summaries cite chapter summary records only; narrower expansion passes may bring in scene cards or source paragraphs for specific unresolved details.
+Chapter summaries cite source paragraphs. Whole-book editorial summaries cite chapter summary records only; narrower expansion passes may bring in scene cards or source paragraphs for specific unresolved details.
 
 ⸻
 
@@ -847,9 +847,9 @@ verify evidence when enabled
     ↓
 construct chapter synthesis
     ↓
-construct whole-book orientation summary
-    ↓
 consolidate entities and scene-scoped occurrences from reverse-index signals
+    ↓
+construct whole-book editorial summary
     ↓
 resolve aliases conservatively
     ↓
