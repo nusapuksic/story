@@ -1075,8 +1075,8 @@ func TestCompileBookSummaryUsesChapterSummariesOnly(t *testing.T) {
 		t.Fatalf("ParagraphsByChapter ch-0002: %v", err)
 	}
 
-	summaries := `{"record_type":"chapter_summary","chapter_id":"ch-0001","summary":"Chapter one opens the shore.","evidence":["` + ch1Paragraphs[0].ID + `"],"generation":{},"status":"generated"}` + "\n" +
-		`{"record_type":"chapter_summary","chapter_id":"ch-0002","summary":"The drowned village was merely covered [` + ch2Paragraphs[1].ID + `].","evidence":[],"generation":{},"status":"generated"}` + "\n"
+	summaries := `{"record_type":"chapter_summary","chapter_id":"ch-0001","summary":"Chapter one opens the shore.","evidence":["` + ch1Paragraphs[0].ID + `"],"generation":{"prompt_version":"chapter-summary-v1"},"status":"generated"}` + "\n" +
+		`{"record_type":"chapter_summary","chapter_id":"ch-0002","summary":"The drowned village was merely covered [` + ch2Paragraphs[1].ID + `].","evidence":[],"generation":{"prompt_version":"chapter-summary-v1"},"status":"generated"}` + "\n"
 	path := p.Path(filepath.Join(project.ModelDir, "summaries.jsonl"))
 	if err := os.WriteFile(path, []byte(summaries), 0o644); err != nil {
 		t.Fatalf("write existing summaries: %v", err)
@@ -1542,6 +1542,37 @@ func seedEntityReverseIndex(t *testing.T, p *project.Project, st *store.Store) [
 	return scenes
 }
 
+func seedSecondSceneCrewReverseIndex(t *testing.T, p *project.Project, st *store.Store, scenes []store.SceneRow) {
+	t.Helper()
+	if len(scenes) < 2 {
+		t.Fatalf("expected at least 2 scenes, got %d", len(scenes))
+	}
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	if len(paragraphs) < 2 {
+		t.Fatalf("expected at least 2 paragraphs, got %d", len(paragraphs))
+	}
+	rawCard := `{"record_type":"scene_card","scene_id":"` + scenes[1].ID + `","title":"Crew threat","summary":"The good-for-nothing crew blocks the road.","entities":["good-for-nothing crew"],"participants":["good-for-nothing crew"],"evidence":["` + paragraphs[1].ID + `"],"generation":{},"status":"generated"}`
+	if err := st.InsertSceneCard(store.SceneCardRow{
+		SceneID:         scenes[1].ID,
+		Title:           "Crew threat",
+		Summary:         "The good-for-nothing crew blocks the road.",
+		Evidence:        []string{paragraphs[1].ID},
+		GenerationRun:   "compile-test",
+		GenerationModel: "test-model",
+		PromptVersion:   "scene-extraction-v1",
+		Status:          "generated",
+		RawJSON:         rawCard,
+	}); err != nil {
+		t.Fatalf("InsertSceneCard second scene: %v", err)
+	}
+	if err := st.RebuildReverseIndex(); err != nil {
+		t.Fatalf("RebuildReverseIndex second scene: %v", err)
+	}
+}
+
 func TestCompileEntitiesWithFakeProvider(t *testing.T) {
 	p, st := buildTestProject(t)
 	scenes := seedEntityReverseIndex(t, p, st)
@@ -1586,6 +1617,87 @@ func TestCompileEntitiesWithFakeProvider(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"surface_texts":["Mara","Maraa"]`) {
 		t.Fatalf("occurrences.jsonl missing consolidated surfaces: %s", data)
+	}
+}
+
+func TestCompileEntitiesDropsUnsupportedSceneScopedOccurrence(t *testing.T) {
+	p, st := buildTestProject(t)
+	scenes := seedEntityReverseIndex(t, p, st)
+	seedSecondSceneCrewReverseIndex(t, p, st, scenes)
+
+	fake := &fakeProvider{response: `{"entities":[{"canonical_name":"good-for-nothing crew","type":"group","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["good-for-nothing crew"],"confidence":0.9}]}]}`}
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities with unsupported occurrence: %v", err)
+	}
+	if result.EntitiesBuilt != 0 {
+		t.Fatalf("EntitiesBuilt = %d, want 0 unsupported entities", result.EntitiesBuilt)
+	}
+
+	entities, occurrences, err := st.EntityCounts()
+	if err != nil {
+		t.Fatalf("EntityCounts: %v", err)
+	}
+	if entities != 0 || occurrences != 0 {
+		t.Fatalf("entity counts = (%d, %d), want (0, 0)", entities, occurrences)
+	}
+	committed, err := st.IsEntitySnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsEntitySnapshotCommitted: %v", err)
+	}
+	if !committed {
+		t.Fatal("unsupported entity result should still commit an empty chapter snapshot")
+	}
+}
+
+func TestCompileEntitiesKeepsValidOccurrenceWhenSkippingUnsupportedOne(t *testing.T) {
+	p, st := buildTestProject(t)
+	scenes := seedEntityReverseIndex(t, p, st)
+	seedSecondSceneCrewReverseIndex(t, p, st, scenes)
+
+	fake := &fakeProvider{response: `{"entities":[{"canonical_name":"good-for-nothing crew","type":"group","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["good-for-nothing crew"],"confidence":0.9},{"scene_id":"` + scenes[1].ID + `","surface_texts":["good-for-nothing crew"],"confidence":0.9}]}]}`}
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities with mixed occurrence support: %v", err)
+	}
+	if result.EntitiesBuilt != 1 {
+		t.Fatalf("EntitiesBuilt = %d, want 1 entity with valid occurrence", result.EntitiesBuilt)
+	}
+
+	entities, occurrences, err := st.EntityCounts()
+	if err != nil {
+		t.Fatalf("EntityCounts: %v", err)
+	}
+	if entities != 1 || occurrences != 1 {
+		t.Fatalf("entity counts = (%d, %d), want (1, 1)", entities, occurrences)
+	}
+	rows, err := st.EntityRowsForChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("EntityRowsForChapter: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("entity rows = %d, want 1", len(rows))
+	}
+	occRows, err := st.OccurrencesForEntity(rows[0].ID, "ch-0001", 0)
+	if err != nil {
+		t.Fatalf("OccurrencesForEntity: %v", err)
+	}
+	if len(occRows) != 1 {
+		t.Fatalf("occurrence rows = %d, want 1", len(occRows))
+	}
+	if occRows[0].SceneID != scenes[1].ID {
+		t.Fatalf("occurrence scene = %s, want %s", occRows[0].SceneID, scenes[1].ID)
+	}
+	if len(occRows[0].SurfaceTexts) != 1 || occRows[0].SurfaceTexts[0] != "good-for-nothing crew" {
+		t.Fatalf("occurrence surfaces = %#v, want good-for-nothing crew", occRows[0].SurfaceTexts)
 	}
 }
 
@@ -1634,6 +1746,38 @@ func TestCompileEntitiesEmptyTruncatedJSONDoesNotFail(t *testing.T) {
 	}
 	if result.EntitiesBuilt != 0 {
 		t.Fatalf("EntitiesBuilt = %d, want 0", result.EntitiesBuilt)
+	}
+}
+
+func TestCompileEntitiesMalformedJSONFails(t *testing.T) {
+	p, st := buildTestProject(t)
+	seedEntityReverseIndex(t, p, st)
+	fake := &fakeProvider{response: `{"entities":"not an array"}`}
+
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err == nil {
+		t.Fatal("expected malformed entity JSON to fail")
+	}
+	if !strings.Contains(err.Error(), "parse entity response for ch-0001") {
+		t.Fatalf("error = %v, want parse entity response context", err)
+	}
+	committed, err := st.IsEntitySnapshotCommitted("ch-0001")
+	if err != nil {
+		t.Fatalf("IsEntitySnapshotCommitted: %v", err)
+	}
+	if committed {
+		t.Fatal("malformed entity JSON should not commit an entity snapshot")
+	}
+	entities, occurrences, err := st.EntityCounts()
+	if err != nil {
+		t.Fatalf("EntityCounts: %v", err)
+	}
+	if entities != 0 || occurrences != 0 {
+		t.Fatalf("entity counts = (%d, %d), want (0, 0)", entities, occurrences)
 	}
 }
 
@@ -1839,6 +1983,7 @@ func TestCompileEntitiesUsesReverseIndexContext(t *testing.T) {
 	prompt := fake.requests[0].Messages[1].Content
 	for _, want := range []string{
 		"Consolidate candidate entities from scene-card reverse-index results",
+		"copy surface_texts exactly from that occurrence's own scene block",
 		"Reverse-index candidates:",
 		"- scene " + scenes[0].ID,
 		"entities: Maraa",

@@ -143,6 +143,9 @@ func Open(dir string) (*Project, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w: %v", dir, ErrInvalidProject, err)
 	}
+	if _, err := prompts.SyncDefaults(filepath.Join(dir, PromptsDir)); err != nil {
+		return nil, fmt.Errorf("open %s: sync prompts: %w", dir, err)
+	}
 	return &Project{Dir: dir, Config: cfg}, nil
 }
 

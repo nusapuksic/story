@@ -92,11 +92,13 @@ func compileSummaries(
 	}
 	defer summariesFile.Close()
 	committer := compileArtifactCommitter{staging: staging, summariesFile: summariesFile}
+	chapterPromptVersion := loadCompilerPrompt(p, storyprompts.ChapterSummary).Version
+	bookPromptVersion := loadCompilerPrompt(p, storyprompts.BookSummary).Version
 
 	items := make([]OrderedWorkItem[summaryWorkInput], 0, len(chapters))
 	for chapterIndex, ch := range chapters {
 		if !opts.Force {
-			if existing, ok := idx.Chapters[ch.ID]; ok && strings.TrimSpace(existing.Summary) != "" {
+			if existing, ok := idx.Chapters[ch.ID]; ok && summaryRecordIsCurrent(existing, chapterPromptVersion) {
 				reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-skip", ChapterID: ch.ID, Current: chapterIndex + 1, Total: len(chapters), Message: fmt.Sprintf("Summary %s (%d/%d): already exists", ch.ID, chapterIndex+1, len(chapters))})
 				continue
 			}
@@ -161,7 +163,7 @@ func compileSummaries(
 	if opts.ChapterID != "" {
 		return total, nil
 	}
-	if !opts.Force && chapterSummariesBuilt == 0 && idx.Book != nil && strings.TrimSpace(idx.Book.Summary) != "" {
+	if !opts.Force && chapterSummariesBuilt == 0 && idx.Book != nil && summaryRecordIsCurrent(*idx.Book, bookPromptVersion) {
 		return total, nil
 	}
 
@@ -561,6 +563,9 @@ func readSummaryIndex(path string) (summaryIndex, error) {
 	return idx, sc.Err()
 }
 
+func summaryRecordIsCurrent(rec SummaryRecord, promptVersion string) bool {
+	return strings.TrimSpace(rec.Summary) != "" && strings.TrimSpace(rec.Generation.PromptVersion) == strings.TrimSpace(promptVersion)
+}
 func orderedChapterSummaries(chapters []store.ChapterRow, byID map[string]SummaryRecord) []SummaryRecord {
 	out := make([]SummaryRecord, 0, len(chapters))
 	for _, ch := range chapters {

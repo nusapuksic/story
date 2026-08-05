@@ -4,7 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	storyprompts "github.com/nusapuksic/story/internal/prompts"
 )
 
 func TestMain(m *testing.M) {
@@ -51,6 +54,39 @@ func TestInitCreatesLayout(t *testing.T) {
 	}
 }
 
+func TestOpenSyncsOlderPromptDefaults(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "novel")
+	created, err := Init(dir, InitOptions{Title: "Prompted Novel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	promptPath := filepath.Join(dir, PromptsDir, storyprompts.BookSummary)
+	oldPrompt := "<!-- prompt_version: book-summary-v1 -->\n\nold local summary prompt\n"
+	if err := os.WriteFile(promptPath, []byte(oldPrompt), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Config.ProjectID != created.Config.ProjectID {
+		t.Errorf("project_id = %q, want %q", opened.Config.ProjectID, created.Config.ProjectID)
+	}
+
+	data, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if version := storyprompts.VersionFromText(content); version != "book-summary-v2" {
+		t.Fatalf("book summary prompt version = %q, want book-summary-v2\n%s", version, content)
+	}
+	if strings.Contains(content, "old local summary prompt") {
+		t.Fatalf("older project prompt was not replaced:\n%s", content)
+	}
+}
 func TestInitDefaultModelPopulatesLLMRoles(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "novel")
 	p, err := Init(dir, InitOptions{Title: "My Novel", DefaultModel: "llama3.1"})

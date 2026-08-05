@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -32,6 +33,25 @@ type template struct {
 	version string
 	body    string
 }
+
+// SyncReport describes prompt files touched by SyncDefaults.
+type SyncReport struct {
+	Results []SyncResult
+}
+
+// SyncResult records one prompt default sync decision.
+type SyncResult struct {
+	Name            string
+	PreviousVersion string
+	CurrentVersion  string
+	Action          string
+}
+
+const (
+	SyncActionRestored = "restored"
+	SyncActionUpdated  = "updated"
+	SyncActionKept     = "kept"
+)
 
 var defaults = map[string]template{
 	SceneBoundaries: {
@@ -167,6 +187,54 @@ func WriteDefaults(dir string) error {
 	return nil
 }
 
+// SyncDefaults makes dir contain the current embedded default prompt files.
+// Local prompt files are replaced only when their version is missing,
+// malformed, from a different prompt family, or older than the embedded
+// default.
+func SyncDefaults(dir string) (SyncReport, error) {
+	var report SyncReport
+	if strings.TrimSpace(dir) == "" {
+		return report, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return report, err
+	}
+	for _, name := range Names() {
+		def, _ := Default(name)
+		path := filepath.Join(dir, name)
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.WriteFile(path, []byte(def.Content), 0o644); err != nil {
+				return report, err
+			}
+			report.Results = append(report.Results, SyncResult{Name: name, CurrentVersion: def.Version, Action: SyncActionRestored})
+			continue
+		}
+		if err != nil {
+			return report, err
+		}
+
+		content := string(data)
+		previous := VersionFromText(content)
+		if strings.TrimSpace(content) == "" {
+			if err := os.WriteFile(path, []byte(def.Content), 0o644); err != nil {
+				return report, err
+			}
+			report.Results = append(report.Results, SyncResult{Name: name, PreviousVersion: previous, CurrentVersion: def.Version, Action: SyncActionRestored})
+			continue
+		}
+		if shouldReplaceWithDefault(previous, def.Version) {
+			if err := os.WriteFile(path, []byte(def.Content), 0o644); err != nil {
+				return report, err
+			}
+			report.Results = append(report.Results, SyncResult{Name: name, PreviousVersion: previous, CurrentVersion: def.Version, Action: SyncActionUpdated})
+			continue
+		}
+		report.Results = append(report.Results, SyncResult{Name: name, PreviousVersion: previous, CurrentVersion: def.Version, Action: SyncActionKept})
+	}
+	return report, nil
+}
+
 // VersionFromText extracts a prompt_version marker from prompt text.
 func VersionFromText(text string) string {
 	const marker = "prompt_version:"
@@ -183,6 +251,34 @@ func VersionFromText(text string) string {
 	return ""
 }
 
+func shouldReplaceWithDefault(localVersion, defaultVersion string) bool {
+	localFamily, localNumber, localOK := parsePromptVersion(localVersion)
+	defaultFamily, defaultNumber, defaultOK := parsePromptVersion(defaultVersion)
+	if !defaultOK {
+		return false
+	}
+	if !localOK || localFamily != defaultFamily {
+		return true
+	}
+	return defaultNumber > localNumber
+}
+
+func parsePromptVersion(version string) (string, int, bool) {
+	version = strings.TrimSpace(version)
+	idx := strings.LastIndex(version, "-v")
+	if idx <= 0 || idx+2 >= len(version) {
+		return "", 0, false
+	}
+	number, err := strconv.Atoi(version[idx+2:])
+	if err != nil {
+		return "", 0, false
+	}
+	family := strings.TrimSpace(version[:idx])
+	if family == "" {
+		return "", 0, false
+	}
+	return family, number, true
+}
 func promptText(version, body string) string {
 	return "<!-- prompt_version: " + version + " -->\n\n" +
 		"The manuscript excerpts are the sole authority for this task.\n" +

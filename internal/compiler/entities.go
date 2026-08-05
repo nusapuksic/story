@@ -179,6 +179,11 @@ func compileEntities(
 	err = RunOrderedWork(ctx, items, OrderedExecutorOptions{WorkerLimit: 1}, func(ctx context.Context, item OrderedWorkItem[entityWorkInput]) (entityWorkOutput, error) {
 		input := item.Input
 		output := entityWorkOutput{Input: input}
+		if len(input.Refs) == 0 {
+			reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-start", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Entities %s (%d/%d): no reverse-index candidates", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal)})
+		} else {
+			reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-start", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Entities %s (%d/%d): consolidating %d reverse-index candidate(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(input.Refs))})
+		}
 		if len(input.Refs) > 0 {
 			candidates, err := consolidateEntitiesForChapter(ctx, p, input.Chapter, input.Refs,
 				opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
@@ -198,11 +203,6 @@ func compileEntities(
 	}, func(ctx context.Context, result OrderedWorkResult[entityWorkOutput]) error {
 		output := result.Output
 		input := output.Input
-		if len(input.Refs) == 0 {
-			reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-start", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Entities %s (%d/%d): no reverse-index candidates", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal)})
-		} else {
-			reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "item-start", ChapterID: input.Chapter.ID, Current: input.ChapterIndex + 1, Total: input.ChapterTotal, Message: fmt.Sprintf("Entities %s (%d/%d): consolidating %d reverse-index candidate(s)", input.Chapter.ID, input.ChapterIndex+1, input.ChapterTotal, len(input.Refs))})
-		}
 		entities, occurrences := finalizeEntityCandidates(input.Chapter.ID, output.Candidates)
 		output.Snapshot = entitySnapshotForRecords(input.Chapter.ID, entities, occurrences)
 		if err := committer.CommitEntities(output, entities, occurrences); err != nil {
@@ -373,7 +373,10 @@ func consolidateEntitiesForChapter(
 		errMsg = parseErr.Error()
 	}
 	recordEntityTask(run, taskID, ch.ID, status, loadedPrompt.Version, errMsg, timing)
-	return candidates, parseErr
+	if parseErr != nil {
+		return candidates, fmt.Errorf("entity consolidation output for %s: %w", ch.ID, parseErr)
+	}
+	return candidates, nil
 }
 
 func buildEntityPrompt(ch store.ChapterRow, refs []store.ReverseIndexRef) string {
@@ -386,6 +389,7 @@ func buildEntityPrompt(ch store.ChapterRow, refs []store.ReverseIndexRef) string
 	sb.WriteString("\nReturn JSON matching the schema:\n")
 	sb.WriteString(`{"entities":[{"canonical_name":"...","type":"character|location|object|organization|group|document|event-concept|unknown","aliases":[],"occurrences":[{"scene_id":"sc-...","surface_texts":["..."],"confidence":0.9,"flags":[{"type":"possible_typo","value":"...","suggested":"...","reason":"...","confidence":0.8}]}],"flags":[]}]}`)
 	sb.WriteString("\nUse only scene IDs and surface_texts listed below. Occurrences are scene-scoped. ")
+	sb.WriteString("For each occurrence, copy surface_texts exactly from that occurrence's own scene block; omit the occurrence if no listed surface applies. ")
 	sb.WriteString("Merge aliases conservatively; preserve ambiguity by keeping uncertain names separate. ")
 	sb.WriteString("Flag likely typos instead of silently correcting original surface_texts.\n\n")
 	sb.WriteString("Reverse-index candidates:\n")
@@ -562,9 +566,6 @@ func occurrenceCandidateFromRaw(
 	}
 	surfaces, sourceFields := filterOccurrenceSurfaces(sceneID, surfaces, idx)
 	if len(surfaces) == 0 {
-		if strictEvidence {
-			return occurrenceRecordCandidate{}, false, fmt.Errorf("entity %q occurrence for scene %s has no listed surface_texts", canonicalName, sceneID)
-		}
 		return occurrenceRecordCandidate{}, false, nil
 	}
 	confidence := clampConfidence(raw.Confidence)

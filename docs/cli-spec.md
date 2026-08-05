@@ -1410,6 +1410,8 @@ No fuzzy re-import match may silently preserve a paragraph identifier.
 
 Prompts are project-visible and versioned.
 
+When an existing project is opened, any project prompt with an older, missing, blank, malformed, or different-family `prompt_version` is replaced by the newer embedded default prompt version. Same-version or newer same-family project prompts are preserved.
+
 All extraction prompts must require the model to:
 
 * cite paragraph IDs;
