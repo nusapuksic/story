@@ -14,6 +14,7 @@ import (
 // fakeProvider returns a fixed response for every Generate call.
 type fakeProvider struct {
 	response      string
+	responses     []string
 	err           error
 	gotNilContext bool
 	requests      []provider.GenerationRequest
@@ -28,8 +29,13 @@ func (f *fakeProvider) Capabilities(_ context.Context, _ string) (provider.Capab
 }
 func (f *fakeProvider) Generate(ctx context.Context, req provider.GenerationRequest) (provider.GenerationResponse, error) {
 	f.gotNilContext = ctx == nil
+	idx := len(f.requests)
 	f.requests = append(f.requests, req)
-	return provider.GenerationResponse{Content: f.response}, f.err
+	content := f.response
+	if idx < len(f.responses) {
+		content = f.responses[idx]
+	}
+	return provider.GenerationResponse{Content: content}, f.err
 }
 func (f *fakeProvider) Embed(_ context.Context, _ provider.EmbeddingRequest) (provider.EmbeddingResponse, error) {
 	return provider.EmbeddingResponse{}, f.err
@@ -161,6 +167,134 @@ func TestAskAllowsSummaryOnlyContext(t *testing.T) {
 	}
 	if strings.Contains(prompt, "Supporting references") || strings.Contains(prompt, "- ch-0001") {
 		t.Fatalf("prompt included non-citable summary supporting references: %s", prompt)
+	}
+}
+
+func TestAskSummaryQuestionPrefersBookSummaryRecord(t *testing.T) {
+	st := openTestStore(t)
+	fake := &fakeProvider{response: `{"answer":"This is the book summary.","evidence":[],"records_used":["book_summary"],"uncertainties":[]}`}
+
+	ans, err := query.Ask(context.Background(), st, fake, "fake-model", "Summarize the story.", query.Options{
+		Summaries: []query.SummaryContext{
+			{RecordType: "book_summary", Summary: "A book-level synopsis covers the whole story.", Themes: []string{"Memory"}},
+			{RecordType: "chapter_summary", ChapterID: "ch-0001", ChapterTitle: "Opening", Summary: "The opening chapter summary."},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(ans.RecordsUsed) != 1 || ans.RecordsUsed[0] != "book_summary" {
+		t.Fatalf("RecordsUsed = %#v, want book_summary", ans.RecordsUsed)
+	}
+	prompt := fake.requests[0].Messages[1].Content
+	if !strings.Contains(prompt, "[book_summary] Book summary") || !strings.Contains(prompt, "A book-level synopsis") {
+		t.Fatalf("prompt missing book summary evidence:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "The opening chapter summary") {
+		t.Fatalf("story summary prompt should prefer book summary over chapter detail:\n%s", prompt)
+	}
+}
+
+func TestAskCharacterInventoryUsesRolesAndEntities(t *testing.T) {
+	st := openTestStore(t)
+	_ = seedEntityContextForAsk(t, st)
+	fake := &fakeProvider{response: `{"answer":"Mara is the protagonist.","evidence":[],"records_used":["character_role:char-mara","entity-mara"],"uncertainties":[]}`}
+
+	ans, err := query.Ask(context.Background(), st, fake, "fake-model", "Who are the main characters in the story?", query.Options{
+		CharacterRoles: []query.CharacterRoleContext{
+			{
+				CharacterID:     "char-mara",
+				SourceEntityIDs: []string{"entity-mara"},
+				CanonicalName:   "Mara Vale",
+				Aliases:         []string{"Mara"},
+				Classification:  "principal",
+				Role:            "protagonist",
+				Confidence:      0.94,
+				Rationale:       "Mara drives the investigation.",
+				Evidence:        []query.CharacterRoleEvidence{{SceneID: "sc-entity-context", Reason: "Shows Mara carrying the central action."}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(ans.RecordsUsed) != 2 || ans.RecordsUsed[0] != "character_role:char-mara" || ans.RecordsUsed[1] != "entity-mara" {
+		t.Fatalf("RecordsUsed = %#v, want role and entity", ans.RecordsUsed)
+	}
+	prompt := fake.requests[0].Messages[1].Content
+	for _, want := range []string{"## Character role context", "[character_role:char-mara]", "principal; protagonist", "Mara drives the investigation", "## Entity context", "[entity-mara]"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("character inventory prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestAskCharacterArcUsesNamedRoleWithoutCharacterKeyword(t *testing.T) {
+	st := openTestStore(t)
+	_ = seedEntityContextForAsk(t, st)
+	fake := &fakeProvider{response: "{\"answer\":\"Mara grows less secretive.\",\"evidence\":[],\"records_used\":[\"character_role:char-mara\"],\"uncertainties\":[]}"}
+
+	ans, err := query.Ask(context.Background(), st, fake, "fake-model", "How does Mara change?", query.Options{
+		CharacterRoles: []query.CharacterRoleContext{
+			{
+				CharacterID:     "char-mara",
+				SourceEntityIDs: []string{"entity-mara"},
+				CanonicalName:   "Mara Vale",
+				Aliases:         []string{"Mara"},
+				Classification:  "principal",
+				Role:            "protagonist",
+				Rationale:       "Mara carries the central change arc.",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(ans.RecordsUsed) != 1 || ans.RecordsUsed[0] != "character_role:char-mara" {
+		t.Fatalf("RecordsUsed = %#v, want character_role:char-mara", ans.RecordsUsed)
+	}
+	prompt := fake.requests[0].Messages[1].Content
+	for _, want := range []string{"## Character role context", "[character_role:char-mara]", "Mara carries the central change arc"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("character arc prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+func TestAskBroadOverflowCondensesAndBalancesParagraphs(t *testing.T) {
+	st := openTestStore(t)
+	for i := 1; i <= 6; i++ {
+		chapterID := fmt.Sprintf("ch-%04d", i)
+		pid := fmt.Sprintf("p-OVERVIEW%04d", i)
+		if err := st.InsertChapterForTest(chapterID, i, fmt.Sprintf("Chapter %d", i)); err != nil {
+			t.Fatalf("insert chapter %d: %v", i, err)
+		}
+		if err := st.InsertParagraphWithTextForTest(pid, chapterID, 1, fmt.Sprintf("Whole story marker %d.", i)); err != nil {
+			t.Fatalf("insert paragraph %d: %v", i, err)
+		}
+	}
+	fake := &fakeProvider{responses: []string{
+		`{"summary":"The story moves from marker one to marker six.","support":["p-OVERVIEW0001","p-OVERVIEW0006"],"uncertainties":[]}`,
+		`{"answer":"The story spans the first and final markers.","evidence":[],"records_used":["digest-0001"],"uncertainties":[]}`,
+	}}
+
+	ans, err := query.Ask(context.Background(), st, fake, "fake-model", "Give me a broad overview of the whole story.", query.Options{MaxEvidence: 2})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if len(fake.requests) != 2 {
+		t.Fatalf("Generate calls = %d, want condense + final answer", len(fake.requests))
+	}
+	if len(ans.RecordsUsed) != 1 || ans.RecordsUsed[0] != "digest-0001" {
+		t.Fatalf("RecordsUsed = %#v, want digest-0001", ans.RecordsUsed)
+	}
+	prompt := fake.requests[1].Messages[1].Content
+	for _, want := range []string{"## Condensed evidence", "[digest-0001]", "p-OVERVIEW0001", "p-OVERVIEW0006"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("broad overflow prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "p-OVERVIEW0002") {
+		t.Fatalf("broad overflow prompt used opening-only truncation instead of balanced evidence:\n%s", prompt)
 	}
 }
 

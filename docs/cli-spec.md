@@ -1243,6 +1243,9 @@ know that Elias survived.
 Evidence:
   [ch-0004:p-0031]
   [ch-0006:p-0088]
+Records used:
+  [book_summary]
+  [character_role:char-...]
 Uncertainty:
   The manuscript does not establish whether she has connected the seal
   on the warning to Elias at this point.
@@ -1264,7 +1267,10 @@ Machine-readable output:
     "The manuscript does not establish ..."
   ],
   "records_used": [
-    "claim-..."
+    "book_summary",
+    "character_role:char-...",
+    "sc-...",
+    "digest-0001"
   ],
   "model_run": "query-...",
   "run_dir": ".story/runs/query-..."
@@ -1274,17 +1280,19 @@ Machine-readable output:
 
 The query engine:
 
-1. classifies or accepts the requested mode;
-2. retrieves relevant accepted and verified records;
-3. retrieves exact source paragraphs;
-4. expands to neighboring paragraphs where useful;
-5. constructs a bounded evidence packet;
-6. calls the discussion model;
-7. validates all returned evidence identifiers;
-8. removes unsupported citations;
-9. returns the answer with provenance.
+1. classifies the question into a narrow, summary, character, character-arc, theme/style, ending, or broad intent;
+2. retrieves more candidate paragraphs for broad intents so the cap is applied after planning rather than as opening-only truncation;
+3. adds generated book/chapter summaries for summary and structural questions;
+4. adds compiled entity context and `model/character_roles.jsonl` role records for character-shaped questions;
+5. adds scene-card coverage for broad questions when summaries are unavailable or insufficient;
+6. condenses overflowing broad paragraph packets into run-local digest records when no higher-level summaries or scene cards can carry coverage;
+7. constructs a bounded evidence packet with paragraph IDs, summary IDs, character-role IDs, entity IDs, scene IDs, and digest IDs;
+8. calls the discussion model, potentially after one or more condensation model calls;
+9. validates all returned paragraph citations against the final paragraph packet;
+10. validates all returned `records_used` IDs against supplied higher-level records;
+11. returns the answer with provenance.
 
-A query answer is never promoted into the story model automatically. Character/entity-shaped questions automatically include compact compiled entity context with aliases and scene-scoped appearances. Broad structural questions may be answered from summary and scene-card context with an empty paragraph evidence list when paragraph citations would be misleading. When keyword retrieval misses an ending-shaped question, the fallback uses the tail of the scene-card timeline rather than the full scene-card set. Each query writes local run artifacts under `.story/runs/<query-id>/`, including the exact provider request, a readable prompt transcript, the raw model response, response metadata, and errors when present. `.story/logs/runs.jsonl` receives the terminal status for both successful and failed query runs.
+A query answer is never promoted into the story model automatically. Summary-shaped questions should use existing summaries when available. Character inventory/profile/development questions should use compiled entity and character-role context as much as possible. Paragraph citations remain strict: the model may only cite paragraph IDs listed in the final Evidence paragraphs section. Higher-level records belong in `records_used`, not in `evidence`. Broad structural questions may be answered from summaries, scene cards, character-role records, entity context, or ask-run digests with an empty paragraph evidence list when paragraph citations would be misleading. Condensed evidence digests are ephemeral query-run artifacts generated from validated paragraph packets; they are not persisted into the story model and do not create durable manuscript facts. When keyword retrieval misses an ending-shaped question, the fallback uses the tail of the scene-card timeline rather than the full scene-card set. Each query writes local run artifacts under `.story/runs/<query-id>/`, including latest request/prompt/response mirrors, per-model-call artifacts under `calls/`, response metadata, and errors when present. `.story/logs/runs.jsonl` receives the terminal status for both successful and failed query runs.
 
 ⸻
 

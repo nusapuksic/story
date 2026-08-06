@@ -104,6 +104,10 @@ func runAsk(ctx context.Context, question, mode, chapterID string, maxEvidence i
 	if err != nil {
 		return fail(err)
 	}
+	characterRoles, err := characterRoleContextForAsk(p)
+	if err != nil {
+		return fail(err)
+	}
 
 	opts := query.Options{
 		QueryRunID:       recorder.id(),
@@ -113,6 +117,7 @@ func runAsk(ctx context.Context, question, mode, chapterID string, maxEvidence i
 		IncludeGenerated: includeGenerated,
 		PromptsDir:       p.Path(project.PromptsDir),
 		Summaries:        summaries,
+		CharacterRoles:   characterRoles,
 	}
 
 	ans, err := query.Ask(ctx, st, &askRecordingProvider{inner: prov, recorder: recorder}, model, question, opts)
@@ -136,6 +141,12 @@ func runAsk(ctx context.Context, question, mode, chapterID string, maxEvidence i
 		info("\nEvidence:")
 		for _, ev := range ans.Evidence {
 			info("  [%s:%s]", ev.ChapterID, ev.ParagraphID)
+		}
+	}
+	if len(ans.RecordsUsed) > 0 {
+		info("\nRecords used:")
+		for _, id := range ans.RecordsUsed {
+			info("  [%s]", id)
 		}
 	}
 	if len(ans.Uncertainties) > 0 {

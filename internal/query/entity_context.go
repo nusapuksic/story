@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	defaultEntityContextLimit    = 6
-	defaultEntityOccurrenceLimit = 8
-	defaultEntityListValueLimit  = 6
+	defaultEntityContextLimit      = 6
+	defaultCharacterInventoryLimit = 24
+	defaultEntityOccurrenceLimit   = 8
+	defaultEntityListValueLimit    = 6
 )
 
 // EntityContext is compiled entity context made available to ask prompts.
@@ -25,7 +26,7 @@ type scoredEntityContext struct {
 	index int
 }
 
-func entityContextForQuestion(st *store.Store, question, mode, chapterID string) ([]EntityContext, error) {
+func entityContextForQuestion(st *store.Store, question, mode, chapterID string, intent queryIntent) ([]EntityContext, error) {
 	entities, err := st.EntityRowsForChapter(chapterID)
 	if err != nil {
 		return nil, err
@@ -70,8 +71,12 @@ func entityContextForQuestion(st *store.Store, question, mode, chapterID string)
 		}
 		return scored[i].index < scored[j].index
 	})
-	if len(scored) > defaultEntityContextLimit {
-		scored = scored[:defaultEntityContextLimit]
+	limit := defaultEntityContextLimit
+	if intent == intentCharacterInventory {
+		limit = defaultCharacterInventoryLimit
+	}
+	if len(scored) > limit {
+		scored = scored[:limit]
 	}
 
 	out := make([]EntityContext, len(scored))

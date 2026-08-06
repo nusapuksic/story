@@ -39,7 +39,7 @@ func summaryContextForAsk(p *project.Project, st *store.Store, chapterID string)
 	}
 
 	var out []query.SummaryContext
-	includeChapterText := set.Book == nil
+	includeChapterText := true
 	if set.Book != nil {
 		out = append(out, summaryContextFromRecord(*set.Book, true))
 	}
@@ -111,11 +111,12 @@ func readLatestSummarySet(p *project.Project) (latestSummarySet, error) {
 
 func summaryContextFromRecord(rec compiler.SummaryRecord, includeText bool) query.SummaryContext {
 	ctx := query.SummaryContext{
-		RecordType:    rec.RecordType,
-		ChapterID:     rec.ChapterID,
-		ChapterTitle:  rec.ChapterTitle,
-		Evidence:      copyStrings(rec.Evidence),
-		SourceRecords: copyStrings(rec.SourceRecords),
+		RecordType:           rec.RecordType,
+		ChapterID:            rec.ChapterID,
+		ChapterTitle:         rec.ChapterTitle,
+		Evidence:             copyStrings(rec.Evidence),
+		SourceRecords:        copyStrings(rec.SourceRecords),
+		CharacterFinalStates: summaryFinalStatesFromRecord(rec.CharacterFinalStates),
 	}
 	if includeText {
 		ctx.Summary = rec.Summary
@@ -123,6 +124,23 @@ func summaryContextFromRecord(rec compiler.SummaryRecord, includeText bool) quer
 		ctx.Unresolved = copyStrings(rec.Unresolved)
 	}
 	return ctx
+}
+
+func summaryFinalStatesFromRecord(values []compiler.CharacterFinalState) []query.SummaryCharacterFinalState {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]query.SummaryCharacterFinalState, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value.CharacterID) == "" || strings.TrimSpace(value.State) == "" {
+			continue
+		}
+		out = append(out, query.SummaryCharacterFinalState{
+			CharacterID: value.CharacterID,
+			State:       value.State,
+		})
+	}
+	return out
 }
 
 func copyStrings(values []string) []string {

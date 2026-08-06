@@ -1,9 +1,8 @@
 package query
 
 import (
+	"fmt"
 	"strings"
-
-	"github.com/nusapuksic/story/internal/store"
 )
 
 // buildSystemPrompt returns the system prompt for the discussion model.
@@ -23,21 +22,15 @@ func buildSystemPrompt(base, mode string) string {
 	}
 }
 
-// buildUserPrompt constructs the user-turn message including scene card
-// context, evidence paragraphs, and the question.
-func buildUserPrompt(
-	question, mode string,
-	summaries []SummaryContext,
-	entityContext []EntityContext,
-	cards []store.SceneCardRow,
-	paragraphs []store.ParagraphRow,
-) string {
+// buildUserPrompt constructs the user-turn message including higher-level
+// records, scene context, evidence paragraphs, and the question.
+func buildUserPrompt(question, mode string, packet evidencePacket) string {
 	var sb strings.Builder
 
-	if hasVisibleSummaryContext(summaries) {
+	if hasVisibleSummaryContext(packet.Summaries) {
 		sb.WriteString("## Summary context\n\n")
-		sb.WriteString("Use this generated context for high-level interpretation. It is not a citation source; cite only paragraph IDs from the evidence paragraphs below.\n\n")
-		for _, s := range summaries {
+		sb.WriteString("Use these generated summaries for high-level orientation. They are valid higher-level records for records_used; cite paragraph IDs only from the evidence paragraphs below.\n\n")
+		for _, s := range packet.Summaries {
 			if !isVisibleSummaryContext(s) {
 				continue
 			}
@@ -45,17 +38,34 @@ func buildUserPrompt(
 		}
 	}
 
-	if len(entityContext) > 0 {
+	if len(packet.CharacterRoles) > 0 {
+		sb.WriteString("## Character role context\n\n")
+		sb.WriteString("Use these compiled character-role records for principal/major/supporting roles, aliases, and character function. Include relied-on role IDs in records_used.\n\n")
+		for _, role := range packet.CharacterRoles {
+			writeCharacterRoleContext(&sb, role)
+		}
+	}
+
+	if len(packet.EntityContext) > 0 {
 		sb.WriteString("## Entity context\n\n")
-		sb.WriteString("Use this compiled context for character/entity identity, aliases, and scene-scoped appearances. It is not a citation source; cite only paragraph IDs from the evidence paragraphs below.\n\n")
-		for _, ctx := range entityContext {
+		sb.WriteString("Use this compiled context for character/entity identity, aliases, and scene-scoped appearances. Include relied-on entity IDs in records_used; cite paragraph IDs only from the evidence paragraphs below.\n\n")
+		for _, ctx := range packet.EntityContext {
 			writeEntityContext(&sb, ctx)
 		}
 	}
 
-	if len(cards) > 0 {
+	if len(packet.Digests) > 0 {
+		sb.WriteString("## Condensed evidence\n\n")
+		sb.WriteString("These digests were generated earlier in this ask run from paragraph evidence. They are higher-level records for records_used, not direct paragraph citations.\n\n")
+		for _, digest := range packet.Digests {
+			writeEvidenceDigest(&sb, digest)
+		}
+	}
+
+	if len(packet.SceneCards) > 0 {
 		sb.WriteString("## Scene context\n\n")
-		for _, c := range cards {
+		sb.WriteString("Use these scene records for broader chronology and structure. Include relied-on scene IDs in records_used.\n\n")
+		for _, c := range packet.SceneCards {
 			sb.WriteString("[")
 			sb.WriteString(c.SceneID)
 			sb.WriteString("] ")
@@ -67,20 +77,24 @@ func buildUserPrompt(
 	}
 
 	sb.WriteString("## Evidence paragraphs\n\n")
-	for _, p := range paragraphs {
-		sb.WriteString("[")
-		sb.WriteString(p.ID)
-		sb.WriteString("] (")
-		sb.WriteString(p.ChapterID)
-		sb.WriteString(")\n")
-		sb.WriteString(p.Text)
-		sb.WriteString("\n\n")
+	if len(packet.Paragraphs) == 0 {
+		sb.WriteString("(none)\n\n")
+	} else {
+		for _, p := range packet.Paragraphs {
+			sb.WriteString("[")
+			sb.WriteString(p.ID)
+			sb.WriteString("] (")
+			sb.WriteString(p.ChapterID)
+			sb.WriteString(")\n")
+			sb.WriteString(p.Text)
+			sb.WriteString("\n\n")
+		}
 	}
 
 	sb.WriteString("## Question\n\n")
 	sb.WriteString(question)
 	sb.WriteString("\n\n")
-	sb.WriteString("Answer in JSON as specified. Cite only paragraph IDs listed above.")
+	sb.WriteString("Answer in JSON as specified. Cite only paragraph IDs listed in Evidence paragraphs. Put any summary, character role, entity, scene, or digest IDs you relied on in records_used.")
 
 	return sb.String()
 }
@@ -95,7 +109,7 @@ func hasVisibleSummaryContext(summaries []SummaryContext) bool {
 }
 
 func isVisibleSummaryContext(s SummaryContext) bool {
-	return strings.TrimSpace(s.Summary) != "" || hasListValue(s.Themes) || hasListValue(s.Unresolved)
+	return strings.TrimSpace(s.Summary) != "" || hasListValue(s.Themes) || hasListValue(s.Unresolved) || len(s.CharacterFinalStates) > 0
 }
 
 func hasListValue(values []string) bool {
@@ -160,6 +174,82 @@ func writeEntityContext(sb *strings.Builder, ctx EntityContext) {
 	sb.WriteString("\n")
 }
 
+func writeCharacterRoleContext(sb *strings.Builder, role CharacterRoleContext) {
+	id := characterRoleRecordID(role)
+	name := strings.TrimSpace(role.CanonicalName)
+	if id == "" || name == "" {
+		return
+	}
+	sb.WriteString("[")
+	sb.WriteString(id)
+	sb.WriteString("] ")
+	sb.WriteString(name)
+	if class := strings.TrimSpace(role.Classification); class != "" {
+		sb.WriteString(" (")
+		sb.WriteString(class)
+		if roleText := strings.TrimSpace(role.Role); roleText != "" {
+			sb.WriteString("; ")
+			sb.WriteString(roleText)
+		}
+		sb.WriteString(")")
+	}
+	sb.WriteString("\n")
+	if aliases := limitedPromptList(role.Aliases, defaultEntityListValueLimit); len(aliases) > 0 {
+		sb.WriteString("Aliases: ")
+		sb.WriteString(strings.Join(aliases, "; "))
+		sb.WriteString("\n")
+	}
+	if len(role.SourceEntityIDs) > 0 {
+		sb.WriteString("Source entities: ")
+		sb.WriteString(strings.Join(limitedPromptList(role.SourceEntityIDs, defaultEntityListValueLimit), "; "))
+		sb.WriteString("\n")
+	}
+	if role.Confidence > 0 {
+		fmt.Fprintf(sb, "Confidence: %.2f\n", role.Confidence)
+	}
+	if rationale := strings.TrimSpace(role.Rationale); rationale != "" {
+		sb.WriteString("Rationale: ")
+		sb.WriteString(rationale)
+		sb.WriteString("\n")
+	}
+	if len(role.Evidence) > 0 {
+		sb.WriteString("Scene evidence:\n")
+		for _, ev := range role.Evidence {
+			if strings.TrimSpace(ev.SceneID) == "" {
+				continue
+			}
+			sb.WriteString("- ")
+			sb.WriteString(strings.TrimSpace(ev.SceneID))
+			if reason := strings.TrimSpace(ev.Reason); reason != "" {
+				sb.WriteString(": ")
+				sb.WriteString(reason)
+			}
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\n")
+}
+
+func writeEvidenceDigest(sb *strings.Builder, digest EvidenceDigest) {
+	id := strings.TrimSpace(digest.ID)
+	if id == "" || strings.TrimSpace(digest.Summary) == "" {
+		return
+	}
+	sb.WriteString("[")
+	sb.WriteString(id)
+	sb.WriteString("]")
+	if scope := strings.TrimSpace(digest.Scope); scope != "" {
+		sb.WriteString(" ")
+		sb.WriteString(scope)
+	}
+	sb.WriteString("\n")
+	sb.WriteString(digest.Summary)
+	sb.WriteString("\n")
+	writePromptList(sb, "Support", digest.Support)
+	writePromptList(sb, "Uncertainties", digest.Uncertainties)
+	sb.WriteString("\n")
+}
+
 func limitedPromptList(values []string, limit int) []string {
 	if limit <= 0 || len(values) == 0 {
 		return nil
@@ -179,7 +269,11 @@ func limitedPromptList(values []string, limit int) []string {
 	}
 	return out
 }
+
 func writeSummaryContext(sb *strings.Builder, s SummaryContext) {
+	sb.WriteString("[")
+	sb.WriteString(summaryRecordID(s))
+	sb.WriteString("] ")
 	switch s.RecordType {
 	case "book_summary":
 		sb.WriteString("Book summary\n")
@@ -211,6 +305,21 @@ func writeSummaryContext(sb *strings.Builder, s SummaryContext) {
 	}
 	writePromptList(sb, "Themes", s.Themes)
 	writePromptList(sb, "Unresolved", s.Unresolved)
+	if len(s.CharacterFinalStates) > 0 {
+		sb.WriteString("Character final states:\n")
+		for _, state := range s.CharacterFinalStates {
+			characterID := strings.TrimSpace(state.CharacterID)
+			stateText := strings.TrimSpace(state.State)
+			if characterID == "" || stateText == "" {
+				continue
+			}
+			sb.WriteString("- ")
+			sb.WriteString(characterID)
+			sb.WriteString(": ")
+			sb.WriteString(stateText)
+			sb.WriteString("\n")
+		}
+	}
 	sb.WriteString("\n")
 }
 

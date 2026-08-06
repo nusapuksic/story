@@ -78,8 +78,9 @@ type askRunRecorder struct {
 	dir     string
 	logsDir string
 
-	mu     sync.Mutex
-	record askRunRecord
+	mu      sync.Mutex
+	record  askRunRecord
+	callSeq int
 }
 
 func newAskRunRecorder(p *project.Project, cfg askRunConfig) (*askRunRecorder, error) {
@@ -136,10 +137,15 @@ func (r *askRunRecorder) setModel(model string) error {
 	return r.saveLocked()
 }
 
-func (r *askRunRecorder) recordRequest(req provider.GenerationRequest) error {
+func (r *askRunRecorder) recordRequest(req provider.GenerationRequest) (int, error) {
 	if r == nil {
-		return nil
+		return 0, nil
 	}
+	r.mu.Lock()
+	r.callSeq++
+	callSeq := r.callSeq
+	r.mu.Unlock()
+
 	rec := askRequestRecord{
 		RunID:       r.runID,
 		CapturedAt:  formatAskAuditTime(time.Now().UTC()),
@@ -149,21 +155,30 @@ func (r *askRunRecorder) recordRequest(req provider.GenerationRequest) error {
 		MaxTokens:   req.MaxTokens,
 		JSONMode:    req.JSONMode,
 	}
+	callDir := filepath.Join(r.dir, "calls")
+	if err := os.MkdirAll(callDir, 0o755); err != nil {
+		return callSeq, fmt.Errorf("write ask call artifacts: %w", err)
+	}
+	prefix := fmt.Sprintf("%04d", callSeq)
+	if err := writeIndentedJSON(filepath.Join(callDir, prefix+"-request.json"), rec); err != nil {
+		return callSeq, fmt.Errorf("write ask request: %w", err)
+	}
+	prompt := []byte(formatAskPromptMarkdown(r.runID, req.Messages))
+	if err := os.WriteFile(filepath.Join(callDir, prefix+"-prompt.md"), prompt, 0o644); err != nil {
+		return callSeq, fmt.Errorf("write ask prompt: %w", err)
+	}
 	if err := writeIndentedJSON(filepath.Join(r.dir, "request.json"), rec); err != nil {
-		return fmt.Errorf("write ask request: %w", err)
+		return callSeq, fmt.Errorf("write ask request: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(r.dir, "prompt.md"), []byte(formatAskPromptMarkdown(r.runID, req.Messages)), 0o644); err != nil {
-		return fmt.Errorf("write ask prompt: %w", err)
+	if err := os.WriteFile(filepath.Join(r.dir, "prompt.md"), prompt, 0o644); err != nil {
+		return callSeq, fmt.Errorf("write ask prompt: %w", err)
 	}
-	return nil
+	return callSeq, nil
 }
 
-func (r *askRunRecorder) recordResponse(resp provider.GenerationResponse, duration time.Duration, providerErr error) error {
+func (r *askRunRecorder) recordResponse(callSeq int, resp provider.GenerationResponse, duration time.Duration, providerErr error) error {
 	if r == nil {
 		return nil
-	}
-	if err := os.WriteFile(filepath.Join(r.dir, "raw-response.txt"), []byte(resp.Content), 0o644); err != nil {
-		return fmt.Errorf("write ask raw response: %w", err)
 	}
 	audit := askResponseAudit{
 		CapturedAt:   formatAskAuditTime(time.Now().UTC()),
@@ -176,6 +191,22 @@ func (r *askRunRecorder) recordResponse(resp provider.GenerationResponse, durati
 	}
 	if providerErr != nil {
 		audit.ProviderError = providerErr.Error()
+	}
+	if callSeq > 0 {
+		callDir := filepath.Join(r.dir, "calls")
+		if err := os.MkdirAll(callDir, 0o755); err != nil {
+			return fmt.Errorf("write ask call artifacts: %w", err)
+		}
+		prefix := fmt.Sprintf("%04d", callSeq)
+		if err := os.WriteFile(filepath.Join(callDir, prefix+"-raw-response.txt"), []byte(resp.Content), 0o644); err != nil {
+			return fmt.Errorf("write ask raw response: %w", err)
+		}
+		if err := writeIndentedJSON(filepath.Join(callDir, prefix+"-raw-response.meta.json"), audit); err != nil {
+			return fmt.Errorf("write ask response metadata: %w", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(r.dir, "raw-response.txt"), []byte(resp.Content), 0o644); err != nil {
+		return fmt.Errorf("write ask raw response: %w", err)
 	}
 	if err := writeIndentedJSON(filepath.Join(r.dir, "raw-response.meta.json"), audit); err != nil {
 		return fmt.Errorf("write ask response metadata: %w", err)
@@ -318,13 +349,14 @@ func (p *askRecordingProvider) Capabilities(ctx context.Context, model string) (
 }
 
 func (p *askRecordingProvider) Generate(ctx context.Context, req provider.GenerationRequest) (provider.GenerationResponse, error) {
-	if err := p.recorder.recordRequest(req); err != nil {
-		return provider.GenerationResponse{}, err
+	callSeq, recordReqErr := p.recorder.recordRequest(req)
+	if recordReqErr != nil {
+		return provider.GenerationResponse{}, recordReqErr
 	}
 	started := time.Now().UTC()
 	resp, err := p.inner.Generate(ctx, req)
 	duration := time.Since(started)
-	if recordErr := p.recorder.recordResponse(resp, duration, err); recordErr != nil {
+	if recordErr := p.recorder.recordResponse(callSeq, resp, duration, err); recordErr != nil {
 		return resp, errors.Join(err, recordErr)
 	}
 	return resp, err

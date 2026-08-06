@@ -143,3 +143,44 @@ func TestAskRunRecorderWritesPromptResponseAndFailure(t *testing.T) {
 		t.Fatalf("runs.jsonl missing run id/error:\n%s", logData)
 	}
 }
+
+func TestAskRunRecorderWritesNumberedModelCalls(t *testing.T) {
+	p := &project.Project{Dir: t.TempDir()}
+	recorder, err := newAskRunRecorder(p, askRunConfig{Question: "Summarize the story", Mode: "recall", MaxEvidence: 2})
+	if err != nil {
+		t.Fatalf("newAskRunRecorder: %v", err)
+	}
+	fake := &askRunFakeProvider{resp: provider.GenerationResponse{Content: `{"answer":"ok","evidence":[]}`}}
+	wrapped := &askRecordingProvider{inner: fake, recorder: recorder}
+	for _, content := range []string{"condense call", "final answer call"} {
+		_, err := wrapped.Generate(context.Background(), provider.GenerationRequest{
+			Model:    "fake-model",
+			Messages: []provider.Message{{Role: "user", Content: content}},
+			JSONMode: true,
+		})
+		if err != nil {
+			t.Fatalf("Generate %q: %v", content, err)
+		}
+	}
+
+	runDir := recorder.runDir()
+	for _, name := range []string{
+		"calls/0001-request.json",
+		"calls/0001-prompt.md",
+		"calls/0001-raw-response.txt",
+		"calls/0002-request.json",
+		"calls/0002-prompt.md",
+		"calls/0002-raw-response.txt",
+	} {
+		if _, err := os.Stat(filepath.Join(runDir, name)); err != nil {
+			t.Fatalf("missing numbered call artifact %s: %v", name, err)
+		}
+	}
+	rootPrompt, err := os.ReadFile(filepath.Join(runDir, "prompt.md"))
+	if err != nil {
+		t.Fatalf("read root prompt.md: %v", err)
+	}
+	if !strings.Contains(string(rootPrompt), "final answer call") || strings.Contains(string(rootPrompt), "condense call") {
+		t.Fatalf("root prompt should mirror latest call:\n%s", rootPrompt)
+	}
+}

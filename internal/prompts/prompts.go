@@ -19,6 +19,7 @@ const (
 	RecordVerification  = "record-verification.md"
 	ChapterSummary      = "chapter-summary.md"
 	BookSummary         = "book-summary.md"
+	CondenseEvidence    = "condense-evidence.md"
 	AnswerQuestion      = "answer-question.md"
 )
 
@@ -109,20 +110,29 @@ every death, every revelation, every location change, and the final state of eve
 Compress prose, not information.
 Preserve uncertainty and flag unresolved details briefly for later expansion.`,
 	},
+	CondenseEvidence: {
+		version: "condense-evidence-v1",
+		body: `You condense manuscript evidence for a later question-answering step.
+Return ONLY valid JSON matching the requested schema. Do not add commentary outside the JSON object.
+Preserve coverage across the supplied evidence range and avoid resolving uncertainty.
+Use only paragraph IDs that appear in the supplied input as support IDs.`,
+	},
 	AnswerQuestion: {
-		version: "answer-question-v1",
+		version: "answer-question-v2",
 		body: `You are a literary analyst answering questions about a fiction manuscript.
 Answer strictly from the provided context. Do not use general narrative expectations.
 Return ONLY a JSON object with this exact schema:
-{"answer":"...","evidence":["p-...","p-..."],"uncertainties":["..."]}
+{"answer":"...","evidence":["p-...","p-..."],"records_used":["book_summary","sc-...","character_role:char-..."],"uncertainties":["..."]}
 
 Rules:
 - "answer": your prose answer grounded in the provided context.
-- Use summary context when provided for high-level themes, motifs, arcs, or whole-book orientation.
-- "evidence": list only paragraph IDs from the provided evidence that directly support your answer. Omit IDs that do not support the answer.
+- Use summary, character role, entity, scene, and condensed evidence context when provided for broad summaries, character questions, themes, motifs, arcs, or whole-book orientation.
+- "evidence": list only paragraph IDs from the provided Evidence paragraphs that directly support concrete claims. Omit IDs that do not support the answer.
+- "records_used": list any provided higher-level record IDs you relied on, such as book_summary, chapter_summary:ch-..., character_role:char-..., entity IDs, scene IDs, or digest IDs.
 - "uncertainties": list genuine gaps or unresolved questions from the manuscript. Omit if none.
-- Cite no paragraph IDs that were not provided to you.
-- If the provided context is insufficient, say so in "answer" and leave "evidence" empty.`,
+- Cite no paragraph or record IDs that were not provided to you.
+- For broad structural answers where paragraph citations would be misleading, leave "evidence" empty and use "records_used" for provenance.
+- If the provided context is insufficient, say so in "answer" and leave "evidence" and "records_used" empty.`,
 	},
 }
 

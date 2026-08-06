@@ -78,8 +78,8 @@ func TestSyncDefaultsRestoresMissingBlankAndUnversionedPrompts(t *testing.T) {
 		t.Fatalf("blank prompt action = %q, want %q", action, SyncActionRestored)
 	}
 	answer := readPromptForTest(t, dir, AnswerQuestion)
-	if version := VersionFromText(answer); version != "answer-question-v1" {
-		t.Fatalf("unversioned prompt updated version = %q, want answer-question-v1", version)
+	if version := VersionFromText(answer); version != "answer-question-v2" {
+		t.Fatalf("unversioned prompt updated version = %q, want answer-question-v2", version)
 	}
 	if strings.Contains(answer, "custom prompt without version marker") {
 		t.Fatalf("unversioned prompt content was preserved:\n%s", answer)
