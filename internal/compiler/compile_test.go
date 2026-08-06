@@ -8,12 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/nusapuksic/story/internal/compiler"
 	"github.com/nusapuksic/story/internal/ids"
 	"github.com/nusapuksic/story/internal/manuscript"
 	"github.com/nusapuksic/story/internal/project"
+	"github.com/nusapuksic/story/internal/provider"
 	"github.com/nusapuksic/story/internal/store"
 )
 
@@ -427,6 +427,41 @@ func TestCompileReportsSceneCardProgress(t *testing.T) {
 	}
 }
 
+func principalRoleResponseFromPrompt(t *testing.T, prompt string) string {
+	t.Helper()
+	entityID := promptIDAfter(t, prompt, "Character entity records:", "entity-")
+	sceneID := promptIDAfter(t, prompt, "Linked scene evidence:", "sc-")
+	return `{"characters":[{"source_entity_ids":["` + entityID + `"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + sceneID + `","reason":"Shows Mara carrying the scene action."}]}]}`
+}
+
+func bookSummaryWithFinalStateFromPrompt(t *testing.T, prompt, summary, state string) string {
+	t.Helper()
+	characterID := promptIDAfter(t, prompt, "Principal characters requiring final-state coverage:", "char-")
+	return `{"summary":"` + summary + `","evidence":["ch-0001"],"character_final_states":[{"character_id":"` + characterID + `","state":"` + state + `"}]}`
+}
+
+func promptIDAfter(t *testing.T, prompt, marker, prefix string) string {
+	t.Helper()
+	start := strings.Index(prompt, marker)
+	if start < 0 {
+		t.Fatalf("prompt missing marker %q:\n%s", marker, prompt)
+	}
+	idx := strings.Index(prompt[start:], prefix)
+	if idx < 0 {
+		t.Fatalf("prompt section %q missing id prefix %q:\n%s", marker, prefix, prompt[start:])
+	}
+	idx += start
+	end := idx
+	for end < len(prompt) && isPromptIDByte(prompt[end]) {
+		end++
+	}
+	return prompt[idx:end]
+}
+
+func isPromptIDByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-'
+}
+
 func progressEventsContain(events []compiler.ProgressEvent, layer, stage, text string) bool {
 	for _, event := range events {
 		if event.Layer == layer && event.Stage == stage && strings.Contains(event.Message, text) {
@@ -752,14 +787,24 @@ func TestCompileAllRunsEntitiesBeforeSummaries(t *testing.T) {
 
 	cardJSON := `{"title":"Scene","summary":"Scene summary.","entities":["Mara"],"participants":["Mara"],"evidence":[]}`
 	chapterSummaryJSON := `{"summary":"Chapter summary.","evidence":["` + paragraphs[0].ID + `"]}`
-	bookSummaryJSON := `{"summary":"Book summary. Mara ends the chapter watchful and steady.","evidence":["ch-0001"]}`
 	entitiesJSON := `{"entities":[{"canonical_name":"Mara","type":"character","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara"],"confidence":0.95}]}]}`
-	fake := &fakeProvider{responses: []string{
-		cardJSON,
-		cardJSON,
-		entitiesJSON,
-		chapterSummaryJSON,
-		bookSummaryJSON,
+	fake := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
+		prompt := req.Messages[1].Content
+		switch {
+		case strings.Contains(prompt, "Extract a structured scene card"):
+			return cardJSON
+		case strings.Contains(prompt, "Consolidate candidate entities"):
+			return entitiesJSON
+		case strings.Contains(prompt, "Classify book-level character roles"):
+			return principalRoleResponseFromPrompt(t, prompt)
+		case strings.Contains(prompt, "Summarize this chapter"):
+			return chapterSummaryJSON
+		case strings.Contains(prompt, "Produce a comprehensive editorial synopsis"):
+			return bookSummaryWithFinalStateFromPrompt(t, prompt, "Book summary. Mara ends watchful and steady.", "Mara is watchful and steady.")
+		default:
+			t.Fatalf("unexpected prompt: %s", prompt)
+			return `{}`
+		}
 	}}
 
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -769,18 +814,19 @@ func TestCompileAllRunsEntitiesBeforeSummaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile all layers: %v", err)
 	}
-	if result.CardsBuilt != 2 || result.SummariesBuilt != 2 || result.EntitiesBuilt != 1 {
-		t.Fatalf("built counts = cards %d, summaries %d, entities %d; want 2, 2, 1",
-			result.CardsBuilt, result.SummariesBuilt, result.EntitiesBuilt)
+	if result.CardsBuilt != 2 || result.SummariesBuilt != 2 || result.EntitiesBuilt != 1 || result.PrincipalsBuilt != 1 {
+		t.Fatalf("built counts = cards %d, summaries %d, entities %d, principals %d; want 2, 2, 1, 1",
+			result.CardsBuilt, result.SummariesBuilt, result.EntitiesBuilt, result.PrincipalsBuilt)
 	}
-	if len(fake.requests) != 5 {
-		t.Fatalf("Generate calls = %d, want 5", len(fake.requests))
+	if len(fake.requests) != 6 {
+		t.Fatalf("Generate calls = %d, want 6", len(fake.requests))
 	}
 
 	wantPrompts := []string{
 		"Extract a structured scene card",
 		"Extract a structured scene card",
 		"Consolidate candidate entities",
+		"Classify book-level character roles",
 		"Summarize this chapter",
 		"Produce a comprehensive editorial synopsis",
 	}
@@ -1277,10 +1323,23 @@ func TestCompileSummariesRunsEntitiesPrerequisiteFirst(t *testing.T) {
 		t.Fatal("expected chapter paragraphs and scenes")
 	}
 
-	fake := &fakeProvider{responses: []string{
-		`{"entities":[{"canonical_name":"Mara","type":"character","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara"],"confidence":0.9}]}]}`,
-		`{"summary":"Mara walks and dawn follows.","evidence":["` + paragraphs[0].ID + `"]}`,
-		`{"summary":"Mara's final state is cautious but resolved at dawn.","evidence":["ch-0001"]}`,
+	entitiesJSON := `{"entities":[{"canonical_name":"Mara","type":"character","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara"],"confidence":0.9}]}]}`
+	chapterSummaryJSON := `{"summary":"Mara walks and dawn follows.","evidence":["` + paragraphs[0].ID + `"]}`
+	fake := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
+		prompt := req.Messages[1].Content
+		switch {
+		case strings.Contains(prompt, "Consolidate candidate entities"):
+			return entitiesJSON
+		case strings.Contains(prompt, "Classify book-level character roles"):
+			return principalRoleResponseFromPrompt(t, prompt)
+		case strings.Contains(prompt, "Summarize this chapter"):
+			return chapterSummaryJSON
+		case strings.Contains(prompt, "Produce a comprehensive editorial synopsis"):
+			return bookSummaryWithFinalStateFromPrompt(t, prompt, "Mara's final state is cautious but resolved at dawn.", "Mara is cautious but resolved at dawn.")
+		default:
+			t.Fatalf("unexpected prompt: %s", prompt)
+			return `{}`
+		}
 	}}
 
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -1291,51 +1350,72 @@ func TestCompileSummariesRunsEntitiesPrerequisiteFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile summaries: %v", err)
 	}
-	if result.SummariesBuilt != 2 {
-		t.Fatalf("SummariesBuilt = %d, want 2", result.SummariesBuilt)
+	if result.SummariesBuilt != 2 || result.PrincipalsBuilt != 1 {
+		t.Fatalf("built counts = summaries %d, principals %d; want 2, 1", result.SummariesBuilt, result.PrincipalsBuilt)
 	}
-	if len(fake.requests) != 3 {
-		t.Fatalf("Generate calls = %d, want 3 (entities prerequisite + chapter + book)", len(fake.requests))
+	if len(fake.requests) != 4 {
+		t.Fatalf("Generate calls = %d, want 4 (entities + principals prerequisites + chapter + book)", len(fake.requests))
 	}
 	if !strings.Contains(fake.requests[0].Messages[1].Content, "Consolidate candidate entities from scene-card reverse-index results") {
 		t.Fatalf("first request should be entity consolidation, got: %s", fake.requests[0].Messages[1].Content)
 	}
-	if !strings.Contains(fake.requests[1].Messages[1].Content, "Summarize this chapter as evidence-backed JSON.") {
-		t.Fatalf("second request should be chapter summary, got: %s", fake.requests[1].Messages[1].Content)
+	if !strings.Contains(fake.requests[1].Messages[1].Content, "Classify book-level character roles") {
+		t.Fatalf("second request should be principal classification, got: %s", fake.requests[1].Messages[1].Content)
 	}
-	bookPrompt := fake.requests[2].Messages[1].Content
-	if !strings.Contains(bookPrompt, "Principal characters requiring final-state coverage:") || !strings.Contains(bookPrompt, "Mara") {
-		t.Fatalf("book summary prompt missing principal-character coverage requirements: %s", bookPrompt)
+	if !strings.Contains(fake.requests[2].Messages[1].Content, "Summarize this chapter as evidence-backed JSON.") {
+		t.Fatalf("third request should be chapter summary, got: %s", fake.requests[2].Messages[1].Content)
+	}
+	bookPrompt := fake.requests[3].Messages[1].Content
+	if !strings.Contains(bookPrompt, "Principal characters requiring final-state coverage:") || !strings.Contains(bookPrompt, "char-") || !strings.Contains(bookPrompt, "Mara") {
+		t.Fatalf("book summary prompt missing character-role artifact requirements: %s", bookPrompt)
 	}
 }
 
 func TestCompileSummariesFailsWhenBookSummaryMissesPrincipalFinalState(t *testing.T) {
 	p, st := buildTestProject(t)
 
-	if err := st.InsertEntity(store.EntityRow{
-		ID:              "ent-test-mara",
-		ChapterID:       "ch-0001",
-		Type:            "character",
-		CanonicalName:   "Mara",
-		Aliases:         []string{"Mara"},
-		Evidence:        nil,
-		GenerationRun:   "compile-test",
-		GenerationModel: "test-model",
-		PromptVersion:   "entity-resolution-v1",
-		Status:          "generated",
-		RawJSON:         `{"record_type":"entity","id":"ent-test-mara","chapter_id":"ch-0001","type":"character","canonical_name":"Mara","evidence":[],"generation":{},"status":"generated"}`,
-	}); err != nil {
-		t.Fatalf("InsertEntity: %v", err)
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerScenes})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
 	}
-
-	if err := st.MarkEntitySnapshotCommitted("ch-0001", 1, 0, time.Now().UTC().Format(time.RFC3339)); err != nil {
-		t.Fatalf("MarkEntitySnapshotCommitted: %v", err)
+	sceneCardProvider := &fakeProvider{response: `{"title":"Road","summary":"Mara walks the road.","entities":["Mara"],"participants":["Mara"],"evidence":[]}`}
+	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSceneCards,
+		ExtractionProvider: sceneCardProvider,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile scene cards: %v", err)
 	}
-
 	paragraphs, err := st.ParagraphsByChapter("ch-0001")
 	if err != nil {
 		t.Fatalf("ParagraphsByChapter: %v", err)
 	}
+	scenes, err := st.ScenesByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ScenesByChapter: %v", err)
+	}
+	entitiesProvider := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara"],"confidence":0.9}]}]}`}
+	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: entitiesProvider,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities: %v", err)
+	}
+	principalsProvider := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
+		return principalRoleResponseFromPrompt(t, req.Messages[1].Content)
+	}}
+	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerPrincipals,
+		ExtractionProvider: principalsProvider,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile principals: %v", err)
+	}
+
 	fake := &fakeProvider{responses: []string{
 		`{"summary":"Mara walks and dawn follows.","evidence":["` + paragraphs[0].ID + `"]}`,
 		`{"summary":"A road story reaches dawn.","evidence":["ch-0001"]}`,
@@ -1348,12 +1428,12 @@ func TestCompileSummariesFailsWhenBookSummaryMissesPrincipalFinalState(t *testin
 	if err == nil {
 		t.Fatal("expected error when book summary omits principal character final state")
 	}
-	if !strings.Contains(err.Error(), `principal character "Mara"`) {
-		t.Fatalf("error = %q, want missing principal character detail", err.Error())
+	if !strings.Contains(err.Error(), "missing final state for principal character char-") {
+		t.Fatalf("error = %q, want missing principal character ID detail", err.Error())
 	}
 }
 
-func TestCompileSummariesTreatsPOVAsPrincipalCharacter(t *testing.T) {
+func TestCompileSummariesDoesNotInferPrincipalsFromPOVWithoutCharacterEntity(t *testing.T) {
 	p, st := buildTestProject(t)
 
 	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerScenes})
@@ -1392,8 +1472,8 @@ func TestCompileSummariesTreatsPOVAsPrincipalCharacter(t *testing.T) {
 		t.Fatalf("Generate calls = %d, want 3", len(fake.requests))
 	}
 	bookPrompt := fake.requests[2].Messages[1].Content
-	if !strings.Contains(bookPrompt, "Principal characters requiring final-state coverage:") || !strings.Contains(bookPrompt, "Mara") {
-		t.Fatalf("book summary prompt missing POV-derived principal character: %s", bookPrompt)
+	if !strings.Contains(bookPrompt, "- (none in character_roles artifact)") {
+		t.Fatalf("book summary prompt should not infer principals from POV-only aliases: %s", bookPrompt)
 	}
 }
 
@@ -1901,6 +1981,25 @@ func TestCompileWritesResponseAudit(t *testing.T) {
 	}
 	if task.Response == nil {
 		t.Fatal("task response audit missing")
+	}
+
+	promptData, err := os.ReadFile(filepath.Join(runDir, "prompts", task.TaskID+".md"))
+	if err != nil {
+		t.Fatalf("read prompt transcript: %v", err)
+	}
+	for _, want := range []string{
+		"# Compile Prompt",
+		"Task ID: `" + task.TaskID + "`",
+		"Model: `fake-model`",
+		"Temperature: `0.1`",
+		"JSON mode: `true`",
+		"## system",
+		"## user",
+		"Consolidate candidate entities from scene-card reverse-index results",
+	} {
+		if !strings.Contains(string(promptData), want) {
+			t.Fatalf("prompt transcript missing %s:\n%s", want, promptData)
+		}
 	}
 
 	summaryData, err := os.ReadFile(filepath.Join(runDir, "summary.json"))

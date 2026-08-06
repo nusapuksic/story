@@ -16,6 +16,7 @@ type fakeProvider struct {
 	err          error
 	errors       []error
 	requests     []provider.GenerationRequest
+	responseFunc func(provider.GenerationRequest, int) string
 }
 
 func (f *fakeProvider) Health(_ context.Context) error { return f.err }
@@ -30,7 +31,9 @@ func (f *fakeProvider) Generate(_ context.Context, req provider.GenerationReques
 	idx := len(f.requests) - 1
 
 	content := f.response
-	if len(f.responses) > 0 {
+	if f.responseFunc != nil {
+		content = f.responseFunc(req, idx)
+	} else if len(f.responses) > 0 {
 		responseIdx := idx
 		if responseIdx >= len(f.responses) {
 			responseIdx = len(f.responses) - 1

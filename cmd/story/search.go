@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	"github.com/nusapuksic/story/internal/retrieval"
@@ -89,7 +87,7 @@ func runSearch(query, chapterID string, limit int) error {
 			info("  [%s] %s", c.SceneID, c.Title)
 			info("    %s", truncate(c.Summary, 120))
 		}
-		fmt.Println()
+		info("")
 	}
 
 	if len(result.Paragraphs) > 0 {

@@ -69,6 +69,7 @@ var modelFiles = []string{
 	"events.jsonl",
 	"character-states.jsonl",
 	"unresolved.jsonl",
+	"character_roles.jsonl",
 	"summaries.jsonl",
 }
 

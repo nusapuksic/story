@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -40,13 +43,17 @@ type globalFlags struct {
 
 var flags globalFlags
 
+const terminalTimestampFormat = "2006-01-02 15:04:05"
+
+var terminalNow = time.Now
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	root := newRootCmd()
 	if err := root.ExecuteContext(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
+		terminalErr("Error: %v", err)
 		os.Exit(exitCodeFor(err))
 	}
 }
@@ -133,5 +140,30 @@ func info(format string, args ...any) {
 	if flags.quiet {
 		return
 	}
-	fmt.Printf(format+"\n", args...)
+	terminalOut(format, args...)
+}
+
+func terminalOut(format string, args ...any) {
+	terminalPrint(os.Stdout, format, args...)
+}
+
+func terminalErr(format string, args ...any) {
+	terminalPrint(os.Stderr, format, args...)
+}
+
+func terminalPrint(w io.Writer, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprint(w, formatTerminalOutput(msg, terminalNow())+"\n")
+}
+
+func formatTerminalOutput(msg string, ts time.Time) string {
+	prefix := "[" + ts.Local().Format(terminalTimestampFormat) + "] "
+	lines := strings.Split(msg, "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
 }

@@ -23,6 +23,7 @@ const (
 	LayerScenes       = "scenes"
 	LayerSceneCards   = "scene-cards"
 	LayerEntities     = "entities"
+	LayerPrincipals   = "principals"
 	LayerVerification = "verification"
 	LayerSummaries    = "summaries"
 )
@@ -98,6 +99,7 @@ type Result struct {
 	SceneCardRecoveries     int
 	SceneCardRecoveryEvents []SceneCardRecoveryEvent
 	EntitiesBuilt           int
+	PrincipalsBuilt         int
 	VerificationsBuilt      int
 	SummariesBuilt          int
 }
@@ -108,8 +110,8 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 	ctx = contextOrBackground(ctx)
 
 	if !isSupportedLayer(opts.Layer) {
-		return Result{}, fmt.Errorf("unknown layer %q; supported: %s, %s, %s, %s, %s",
-			opts.Layer, LayerScenes, LayerSceneCards, LayerEntities, LayerVerification, LayerSummaries)
+		return Result{}, fmt.Errorf("unknown layer %q; supported: %s, %s, %s, %s, %s, %s",
+			opts.Layer, LayerScenes, LayerSceneCards, LayerEntities, LayerPrincipals, LayerVerification, LayerSummaries)
 	}
 
 	cfg := sceneDetectConfig{
@@ -134,7 +136,7 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 		return Result{}, err
 	}
 
-	scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, compileErr := runLayers(ctx, p, st, opts, cfg, run)
+	scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, principalsBuilt, verificationsBuilt, summariesBuilt, compileErr := runLayers(ctx, p, st, opts, cfg, run)
 	if compileErr != nil {
 		_ = run.fail(compileErr)
 		return Result{RunID: run.id()}, compileErr
@@ -142,7 +144,7 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 	if err := run.complete(); err != nil {
 		return Result{RunID: run.id()}, err
 	}
-	_ = run.saveSummary(scenesBuilt, cardsBuilt, len(sceneCardRecoveryEvents), sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt)
+	_ = run.saveSummary(scenesBuilt, cardsBuilt, len(sceneCardRecoveryEvents), sceneCardRecoveryEvents, entitiesBuilt, principalsBuilt, verificationsBuilt, summariesBuilt)
 	return Result{
 		RunID:                   run.id(),
 		ScenesBuilt:             scenesBuilt,
@@ -150,6 +152,7 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 		SceneCardRecoveries:     len(sceneCardRecoveryEvents),
 		SceneCardRecoveryEvents: sceneCardRecoveryEvents,
 		EntitiesBuilt:           entitiesBuilt,
+		PrincipalsBuilt:         principalsBuilt,
 		VerificationsBuilt:      verificationsBuilt,
 		SummariesBuilt:          summariesBuilt,
 	}, nil
@@ -157,7 +160,7 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 
 func isSupportedLayer(layer string) bool {
 	switch layer {
-	case "", LayerScenes, LayerSceneCards, LayerEntities, LayerVerification, LayerSummaries:
+	case "", LayerScenes, LayerSceneCards, LayerEntities, LayerPrincipals, LayerVerification, LayerSummaries:
 		return true
 	default:
 		return false
@@ -216,14 +219,14 @@ func runLayers(
 	opts Options,
 	cfg sceneDetectConfig,
 	run *Run,
-) (scenesBuilt, cardsBuilt int, sceneCardRecoveryEvents []SceneCardRecoveryEvent, entitiesBuilt, verificationsBuilt, summariesBuilt int, err error) {
+) (scenesBuilt, cardsBuilt int, sceneCardRecoveryEvents []SceneCardRecoveryEvent, entitiesBuilt, principalsBuilt, verificationsBuilt, summariesBuilt int, err error) {
 	// Determine which chapters to process.
 	chapters, err := chaptersToProcess(st, opts.ChapterID)
 	if err != nil {
-		return 0, 0, nil, 0, 0, 0, err
+		return 0, 0, nil, 0, 0, 0, 0, err
 	}
 	if len(chapters) == 0 {
-		return 0, 0, nil, 0, 0, 0, nil
+		return 0, 0, nil, 0, 0, 0, 0, nil
 	}
 	reportProgress(opts, ProgressEvent{
 		Stage:   "run-start",
@@ -236,7 +239,7 @@ func runLayers(
 		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "layer-start", Total: len(chapters), Message: "Scenes: starting"})
 		n, err := compileScenes(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return 0, 0, nil, 0, 0, 0, err
+			return 0, 0, nil, 0, 0, 0, 0, err
 		}
 		scenesBuilt = n
 		reportProgress(opts, ProgressEvent{Layer: LayerScenes, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Scenes: completed (%d built)", n)})
@@ -246,13 +249,13 @@ func runLayers(
 	if opts.Layer == "" || opts.Layer == LayerSceneCards {
 		reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "layer-start", Total: len(chapters), Message: "Scene cards: starting"})
 		if opts.ExtractionProvider == nil {
-			return scenesBuilt, 0, nil, 0, 0, 0, errors.New(
+			return scenesBuilt, 0, nil, 0, 0, 0, 0, errors.New(
 				"no LLM provider configured: scene cards require an extraction provider; " +
 					"configure [llm] in story.toml")
 		}
 		n, recoveryEvents, err := compileSceneCards(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return scenesBuilt, 0, nil, 0, 0, 0, err
+			return scenesBuilt, 0, nil, 0, 0, 0, 0, err
 		}
 		cardsBuilt = n
 		sceneCardRecoveryEvents = recoveryEvents
@@ -263,20 +266,20 @@ func runLayers(
 	if shouldRunVerificationLayer(opts.Layer, opts.VerificationMode) {
 		reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "layer-start", Total: len(chapters), Message: "Verification: starting"})
 		if opts.VerificationProvider == nil {
-			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, 0, 0, errors.New(
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, principalsBuilt, 0, 0, errors.New(
 				"no LLM provider configured: verification requires a verification provider; " +
 					"configure [llm.roles.verification] in story.toml")
 		}
 		n, err := compileVerification(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, 0, 0, err
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, principalsBuilt, 0, 0, err
 		}
 		verificationsBuilt = n
 		reportProgress(opts, ProgressEvent{Layer: LayerVerification, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Verification: completed (%d built)", n)})
 	}
 
 	if err := rebuildReverseIndexForCompile(st, opts); err != nil {
-		return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, err
+		return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, principalsBuilt, verificationsBuilt, summariesBuilt, err
 	}
 
 	// Entities layer. Book summaries depend on entities for principal-character coverage.
@@ -289,29 +292,44 @@ func runLayers(
 		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "layer-start", Total: len(chapters), Message: msg})
 		n, err := compileEntities(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, 0, verificationsBuilt, summariesBuilt, err
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, 0, principalsBuilt, verificationsBuilt, summariesBuilt, err
 		}
 		entitiesBuilt = n
 		reportProgress(opts, ProgressEvent{Layer: LayerEntities, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Entities: completed (%d built)", n)})
+	}
+
+	needPrincipals := opts.Layer == LayerPrincipals || (opts.ChapterID == "" && (opts.Layer == "" || opts.Layer == LayerSummaries))
+	if needPrincipals {
+		msg := "Principals: starting"
+		if opts.Layer == LayerSummaries {
+			msg = "Principals: starting (prerequisite for summaries)"
+		}
+		reportProgress(opts, ProgressEvent{Layer: LayerPrincipals, Stage: "layer-start", Message: msg})
+		n, err := compilePrincipals(ctx, p, st, chapters, opts, cfg, run)
+		if err != nil {
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, 0, verificationsBuilt, summariesBuilt, err
+		}
+		principalsBuilt = n
+		reportProgress(opts, ProgressEvent{Layer: LayerPrincipals, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Principals: completed (%d role(s))", n)})
 	}
 
 	// Summaries layer.
 	if opts.Layer == "" || opts.Layer == LayerSummaries {
 		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "layer-start", Total: len(chapters), Message: "Summaries: starting"})
 		if opts.ExtractionProvider == nil {
-			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, 0, errors.New(
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, principalsBuilt, verificationsBuilt, 0, errors.New(
 				"no LLM provider configured: summaries require an extraction provider; " +
 					"configure [llm] in story.toml")
 		}
 		n, err := compileSummaries(ctx, p, st, chapters, opts, cfg, run)
 		if err != nil {
-			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, 0, err
+			return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, principalsBuilt, verificationsBuilt, 0, err
 		}
 		summariesBuilt = n
 		reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "layer-complete", Current: n, Message: fmt.Sprintf("Summaries: completed (%d built)", n)})
 	}
 
-	return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, verificationsBuilt, summariesBuilt, nil
+	return scenesBuilt, cardsBuilt, sceneCardRecoveryEvents, entitiesBuilt, principalsBuilt, verificationsBuilt, summariesBuilt, nil
 }
 
 func rebuildReverseIndexForCompile(st *store.Store, opts Options) error {

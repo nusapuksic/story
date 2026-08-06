@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/nusapuksic/story/internal/compiler"
+	"github.com/nusapuksic/story/internal/project"
 	"github.com/nusapuksic/story/internal/provider"
 	"github.com/nusapuksic/story/internal/store"
 )
@@ -32,9 +34,10 @@ Supported layers:
   scene-cards   Extract structured scene cards using the configured LLM
   verification  Verify generated scene cards against cited manuscript evidence
   entities      Consolidate entities and scene-scoped occurrences from scene-card signals
+  principals    Create book-level character IDs and classify principal character roles
   summaries     Generate chapter summaries and an editorial book synopsis using the configured LLM
 
-Without --layer, all implemented layers are run in order: scenes, scene-cards, verification when enabled, entities, summaries.
+Without --layer, all implemented layers are run in order: scenes, scene-cards, verification when enabled, entities, principals, summaries.
 
 Scene-card extraction retries invalid model output once, retries timeouts with compact context, and then writes a deterministic fallback card. Use --strict-extraction for developer/debug runs that should fail immediately.`,
 		Args: cobra.NoArgs,
@@ -42,11 +45,11 @@ Scene-card extraction retries invalid model output once, retries timeouts with c
 			return runCompile(cmd.Context(), layer, chapterID, force, strictExtraction)
 		},
 	}
-	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes, scene-cards, verification, summaries, or entities")
+	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes, scene-cards, verification, entities, principals, or summaries")
 	cmd.Flags().StringVar(&chapterID, "chapter", "", "restrict to one chapter (e.g. ch-0001)")
 	cmd.Flags().BoolVar(&force, "force", false, "recompute already-generated records")
 	cmd.Flags().BoolVar(&strictExtraction, "strict-extraction", false, "fail on invalid scene-card model output or timeouts instead of retrying and falling back")
-	cmd.AddCommand(newCompileStatusCmd())
+	cmd.AddCommand(newCompileStatusCmd(), newCompilePrincipalsCmd())
 	return cmd
 }
 
@@ -140,6 +143,7 @@ func runCompile(ctx context.Context, layer, chapterID string, force, strictExtra
 			"scene_card_recoveries":      result.SceneCardRecoveries,
 			"scene_card_recovery_events": result.SceneCardRecoveryEvents,
 			"entities_built":             result.EntitiesBuilt,
+			"principals_built":           result.PrincipalsBuilt,
 			"verifications_built":        result.VerificationsBuilt,
 			"summaries_built":            result.SummariesBuilt,
 		})
@@ -150,6 +154,7 @@ func runCompile(ctx context.Context, layer, chapterID string, force, strictExtra
 	info("Scene card recoveries: %d", result.SceneCardRecoveries)
 	printSceneCardRecoveryHints(result.SceneCardRecoveryEvents)
 	info("Entities built:        %d", result.EntitiesBuilt)
+	info("Principals built:      %d", result.PrincipalsBuilt)
 	info("Verifications built: %d", result.VerificationsBuilt)
 	info("Summaries built:     %d", result.SummariesBuilt)
 	return nil
@@ -313,9 +318,23 @@ func uniqueRecoveryChapters(events []compiler.SceneCardRecoveryEvent) []string {
 	return chapters
 }
 
+func newCompilePrincipalsCmd() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "principals",
+		Short: "Create book-level character IDs and classify principal character roles",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCompile(cmd.Context(), compiler.LayerPrincipals, "", force, false)
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "recompute character role assessments")
+	return cmd
+}
+
 func compileNeedsExtractionProvider(layer, sceneDetection string) bool {
 	switch layer {
-	case "", compiler.LayerSceneCards, compiler.LayerEntities, compiler.LayerSummaries:
+	case "", compiler.LayerSceneCards, compiler.LayerEntities, compiler.LayerPrincipals, compiler.LayerSummaries:
 		return true
 	case compiler.LayerScenes:
 		return compiler.SceneDetectionUsesModel(sceneDetection)
@@ -365,6 +384,10 @@ func newCompileStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			roles, principalRoles, err := indexedCharacterRoleCounts(p)
+			if err != nil {
+				return err
+			}
 			if flags.jsonOut {
 				return printJSON(map[string]any{
 					"chapters":                         chapters,
@@ -377,6 +400,8 @@ func newCompileStatusCmd() *cobra.Command {
 					"scene_card_recovery_events":       recoveryEvents,
 					"entities":                         entities,
 					"occurrences":                      occurrences,
+					"character_roles":                  roles,
+					"principal_characters":             principalRoles,
 				})
 			}
 			info("Chapters:              %d", chapters)
@@ -390,7 +415,23 @@ func newCompileStatusCmd() *cobra.Command {
 			printSceneCardRecoveryHints(recoveryEvents)
 			info("Entities:              %d", entities)
 			info("Occurrences:           %d", occurrences)
+			info("Character roles:       %d", roles)
+			info("Principal characters:  %d", principalRoles)
 			return nil
 		},
 	}
+}
+
+func indexedCharacterRoleCounts(p *project.Project) (roles, principals int, err error) {
+	records, _, err := compiler.ReadLatestCharacterRoles(p.Path(filepath.Join(project.ModelDir, "character_roles.jsonl")))
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, record := range records {
+		roles++
+		if record.Classification == compiler.CharacterClassificationPrincipal {
+			principals++
+		}
+	}
+	return roles, principals, nil
 }

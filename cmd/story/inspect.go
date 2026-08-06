@@ -20,8 +20,98 @@ func newInspectCmd() *cobra.Command {
 		Use:   "inspect",
 		Short: "Inspect indexed project objects",
 	}
-	cmd.AddCommand(newInspectChapterCmd(), newInspectParagraphCmd(), newInspectSummaryCmd(), newInspectIndexCmd())
+	cmd.AddCommand(newInspectChapterCmd(), newInspectParagraphCmd(), newInspectSummaryCmd(), newInspectIndexCmd(), newInspectCharacterRolesCmd(), newInspectPrincipalsCmd())
 	return cmd
+}
+
+func newInspectPrincipalsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "principals",
+		Short: "Inspect principal character role assessments",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInspectCharacterRoles(true)
+		},
+	}
+}
+
+func newInspectCharacterRolesCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "character-roles",
+		Short: "Inspect all character role assessments",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInspectCharacterRoles(false)
+		},
+	}
+}
+
+func runInspectCharacterRoles(principalsOnly bool) error {
+	p, err := openProject()
+	if err != nil {
+		return err
+	}
+	records, snapshot, err := compiler.ReadLatestCharacterRoles(p.Path(filepath.Join(project.ModelDir, "character_roles.jsonl")))
+	if err != nil {
+		return err
+	}
+	if snapshot == nil {
+		return fmt.Errorf("no character roles found: run 'story compile principals'")
+	}
+	if principalsOnly {
+		filtered := records[:0]
+		for _, record := range records {
+			if record.Classification == compiler.CharacterClassificationPrincipal {
+				filtered = append(filtered, record)
+			}
+		}
+		records = filtered
+	}
+	if flags.jsonOut {
+		return printJSON(map[string]any{
+			"snapshot": snapshot,
+			"records":  records,
+		})
+	}
+	printCharacterRoleRecords(records, snapshot, principalsOnly)
+	return nil
+}
+
+func printCharacterRoleRecords(records []compiler.CharacterRoleRecord, snapshot *compiler.CharacterRolesSnapshotRecord, principalsOnly bool) {
+	if principalsOnly {
+		info("Principal characters")
+	} else {
+		info("Character roles")
+	}
+	if snapshot != nil {
+		info("Run:  %s", snapshot.RunID)
+		info("Hash: %s", snapshot.ArtifactHash)
+	}
+	if len(records) == 0 {
+		info("No records.")
+		return
+	}
+	for _, record := range records {
+		info("")
+		info("%s  %s", record.CharacterID, record.CanonicalName)
+		info("Classification: %s", record.Classification)
+		if record.Role != "" {
+			info("Role:           %s", record.Role)
+		}
+		info("Confidence:     %.2f", record.Confidence)
+		if record.Rationale != "" {
+			info("Rationale:      %s", record.Rationale)
+		}
+		printStringList("Source entities", record.SourceEntityIDs)
+		printStringList("Aliases", record.Aliases)
+		if len(record.Evidence) > 0 {
+			info("")
+			info("Evidence:")
+			for _, ev := range record.Evidence {
+				info("  - %s: %s", ev.SceneID, ev.Reason)
+			}
+		}
+	}
 }
 
 func newInspectChapterCmd() *cobra.Command {

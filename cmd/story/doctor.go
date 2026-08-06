@@ -37,16 +37,16 @@ func runDoctor() error {
 	check := func(label string, ok bool, msg string) {
 		if ok {
 			if !flags.quiet {
-				fmt.Printf("  ✓ %s\n", label)
+				info("  ✓ %s", label)
 			}
 		} else {
 			issues++
-			fmt.Printf("  ✗ %s: %s\n", label, msg)
+			terminalOut("  ✗ %s: %s", label, msg)
 		}
 	}
 
 	if !flags.quiet {
-		fmt.Println("Project health check:")
+		info("Project health check:")
 	}
 
 	// Check project is valid.
@@ -87,7 +87,7 @@ func runDoctor() error {
 		return fmt.Errorf("doctor: %d issue(s) found", issues)
 	}
 	if !flags.quiet {
-		fmt.Println("All checks passed.")
+		info("All checks passed.")
 	}
 	return nil
 }
@@ -128,8 +128,8 @@ func runLLMDoctor() error {
 	llmCfg := p.Config.LLM
 
 	if len(llmCfg.Providers) == 0 {
-		fmt.Println("No LLM providers configured in story.toml.")
-		fmt.Println("Add an [llm.providers.local] section to enable LLM features.")
+		terminalOut("No LLM providers configured in story.toml.")
+		terminalOut("Add an [llm.providers.local] section to enable LLM features.")
 		return nil
 	}
 
@@ -137,21 +137,21 @@ func runLLMDoctor() error {
 	check := func(label string, ok bool, detail string) {
 		if ok {
 			if !flags.quiet {
-				fmt.Printf("  ✓ %s\n", label)
+				info("  ✓ %s", label)
 			}
 		} else {
 			issues++
 			if detail != "" {
-				fmt.Printf("  ✗ %s: %s\n", label, detail)
+				terminalOut("  ✗ %s: %s", label, detail)
 			} else {
-				fmt.Printf("  ✗ %s\n", label)
+				terminalOut("  ✗ %s", label)
 			}
 		}
 	}
 
 	for name, pc := range llmCfg.Providers {
 		if !flags.quiet {
-			fmt.Printf("\nProvider: %s (%s %s)\n", name, pc.Type, pc.BaseURL)
+			info("\nProvider: %s (%s %s)", name, pc.Type, pc.BaseURL)
 		}
 		scope, detail := classifyEndpointScope(pc.BaseURL)
 		check(fmt.Sprintf("endpoint scope (%s)", scope), scope != endpointScopeRemote && scope != endpointScopeInvalid, detail)
@@ -171,7 +171,7 @@ func runLLMDoctor() error {
 			modelIDs[m.ID] = true
 		}
 		if !flags.quiet {
-			fmt.Printf("  Models available: %d\n", len(models))
+			info("  Models available: %d", len(models))
 		}
 
 		// Check configured role models.
@@ -180,7 +180,7 @@ func runLLMDoctor() error {
 				continue
 			}
 			if roleCfg.Model == "" {
-				fmt.Printf("  ⚠ role %q: no model configured\n", role)
+				terminalOut("  ⚠ role %q: no model configured", role)
 				continue
 			}
 			check(fmt.Sprintf("role %q model %q", role, roleCfg.Model),
@@ -190,13 +190,13 @@ func runLLMDoctor() error {
 	}
 
 	if !flags.quiet {
-		fmt.Println()
+		info("")
 	}
 	if issues > 0 {
 		return fmt.Errorf("llm doctor: %d issue(s) found", issues)
 	}
 	if !flags.quiet {
-		fmt.Println("All LLM checks passed.")
+		info("All LLM checks passed.")
 	}
 	return nil
 }

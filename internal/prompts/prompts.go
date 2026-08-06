@@ -12,13 +12,14 @@ import (
 )
 
 const (
-	SceneBoundaries    = "scene-boundaries.md"
-	SceneExtraction    = "scene-extraction.md"
-	EntityResolution   = "entity-resolution.md"
-	RecordVerification = "record-verification.md"
-	ChapterSummary     = "chapter-summary.md"
-	BookSummary        = "book-summary.md"
-	AnswerQuestion     = "answer-question.md"
+	SceneBoundaries     = "scene-boundaries.md"
+	SceneExtraction     = "scene-extraction.md"
+	EntityResolution    = "entity-resolution.md"
+	PrincipalCharacters = "principal-characters.md"
+	RecordVerification  = "record-verification.md"
+	ChapterSummary      = "chapter-summary.md"
+	BookSummary         = "book-summary.md"
+	AnswerQuestion      = "answer-question.md"
 )
 
 // Loaded is a prompt loaded from a project prompt file or embedded defaults.
@@ -75,6 +76,14 @@ Return only valid JSON matching the requested schema. Do not add commentary outs
 Use only the supplied reverse-index scene IDs and surface texts; do not invent new occurrences.
 Preserve ambiguity: do not merge aliases unless the candidate evidence strongly supports one identity.
 Flag likely typos or suspicious variants instead of silently correcting original surface text.`,
+	},
+	PrincipalCharacters: {
+		version: "principal-characters-v1",
+		body: `You are a literary analyst classifying book-level character roles from canonical character entities and linked scene evidence.
+Return only valid JSON matching the requested schema. Do not add commentary outside the JSON object.
+Classify narrative function rather than frequency. A brief structurally essential character may be principal, and a frequent secondary character may remain supporting.
+Use only the supplied source_entity_ids and scene IDs. Aliases are context only; never treat an alias as a separate candidate.
+Do not force a fixed number of principal characters.`,
 	},
 	RecordVerification: {
 		version: "record-verification-v1",

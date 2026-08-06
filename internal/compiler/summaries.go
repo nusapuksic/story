@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -21,31 +20,45 @@ import (
 
 // SummaryRecord represents one synthesis record in model/summaries.jsonl.
 type SummaryRecord struct {
-	RecordType    string            `json:"record_type"` // "chapter_summary" or "book_summary"
-	ChapterID     string            `json:"chapter_id,omitempty"`
-	ChapterTitle  string            `json:"chapter_title,omitempty"`
-	Summary       string            `json:"summary"`
-	Themes        []string          `json:"themes,omitempty"`
-	Unresolved    []string          `json:"unresolved,omitempty"`
-	Evidence      []string          `json:"evidence"`
-	SourceRecords []string          `json:"source_records,omitempty"`
-	Generation    SummaryGeneration `json:"generation"`
-	Status        string            `json:"status"`
+	RecordType           string                `json:"record_type"` // "chapter_summary" or "book_summary"
+	ChapterID            string                `json:"chapter_id,omitempty"`
+	ChapterTitle         string                `json:"chapter_title,omitempty"`
+	Summary              string                `json:"summary"`
+	Themes               []string              `json:"themes,omitempty"`
+	Unresolved           []string              `json:"unresolved,omitempty"`
+	Evidence             []string              `json:"evidence"`
+	SourceRecords        []string              `json:"source_records,omitempty"`
+	CharacterFinalStates []CharacterFinalState `json:"character_final_states,omitempty"`
+	Generation           SummaryGeneration     `json:"generation"`
+	Status               string                `json:"status"`
 }
 
 // SummaryGeneration is the provenance section of a summary record.
 type SummaryGeneration struct {
-	RunID         string `json:"run_id"`
-	Model         string `json:"model"`
-	PromptVersion string `json:"prompt_version"`
-	GeneratedAt   string `json:"generated_at"`
+	RunID              string `json:"run_id"`
+	Model              string `json:"model"`
+	PromptVersion      string `json:"prompt_version"`
+	GeneratedAt        string `json:"generated_at"`
+	CharacterRolesHash string `json:"character_roles_hash,omitempty"`
+}
+
+// CharacterFinalState identifies a principal character's final book-summary state by book-level character ID.
+type CharacterFinalState struct {
+	CharacterID string `json:"character_id"`
+	State       string `json:"state"`
 }
 
 type rawSummary struct {
-	Summary    flexibleString       `json:"summary"`
-	Themes     flexibleStringList   `json:"themes"`
-	Unresolved flexibleStringList   `json:"unresolved"`
-	Evidence   flexibleEvidenceList `json:"evidence"`
+	Summary              flexibleString           `json:"summary"`
+	Themes               flexibleStringList       `json:"themes"`
+	Unresolved           flexibleStringList       `json:"unresolved"`
+	Evidence             flexibleEvidenceList     `json:"evidence"`
+	CharacterFinalStates []rawCharacterFinalState `json:"character_final_states"`
+}
+
+type rawCharacterFinalState struct {
+	CharacterID flexibleString `json:"character_id"`
+	State       flexibleString `json:"state"`
 }
 
 type summaryIndex struct {
@@ -54,15 +67,19 @@ type summaryIndex struct {
 }
 
 type principalCharacter struct {
-	Name            string
-	ChapterMentions int
+	CharacterID    string
+	Name           string
+	Classification string
+	Role           string
+	Confidence     float64
+	Rationale      string
 }
 
 const paragraphIDPatternSource = `p-[0-9A-HJKMNP-TV-Z]{26}`
 
 var (
 	paragraphIDPattern          = regexp.MustCompile(`\b` + paragraphIDPatternSource + `\b`)
-	paragraphCitationBlockRegex = regexp.MustCompile(`\s*\[(?:\s*` + paragraphIDPatternSource + `\s*,?)+\s*\]`)
+	paragraphCitationBlockRegex = regexp.MustCompile(`\s*[\[(](?:\s*` + paragraphIDPatternSource + `\s*,?)+\s*[\])]`)
 )
 
 // compileSummaries writes chapter summaries and, for whole-project runs, a
@@ -163,22 +180,21 @@ func compileSummaries(
 	if opts.ChapterID != "" {
 		return total, nil
 	}
-	if !opts.Force && chapterSummariesBuilt == 0 && idx.Book != nil && summaryRecordIsCurrent(*idx.Book, bookPromptVersion) {
-		return total, nil
-	}
-
 	chapterSummaries := orderedChapterSummaries(chapters, idx.Chapters)
 	if len(chapterSummaries) == 0 {
 		return total, nil
 	}
 
-	reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-start", Message: fmt.Sprintf("Book summary: extracting from %d chapter summary record(s)", len(chapterSummaries))})
-	principals, err := principalCharactersForBookSummary(st, chapters)
+	principals, characterRolesHash, err := principalCharactersForBookSummary(p, st, opts.ExtractionModel)
 	if err != nil {
 		return total, fmt.Errorf("resolve principal characters for book summary: %w", err)
 	}
+	if !opts.Force && chapterSummariesBuilt == 0 && idx.Book != nil && bookSummaryRecordIsCurrent(*idx.Book, bookPromptVersion, characterRolesHash) {
+		return total, nil
+	}
 
-	book, err := extractBookSummary(ctx, p, chapterSummaries, principals,
+	reportProgress(opts, ProgressEvent{Layer: LayerSummaries, Stage: "item-start", Message: fmt.Sprintf("Book summary: extracting from %d chapter summary record(s)", len(chapterSummaries))})
+	book, err := extractBookSummary(ctx, p, chapterSummaries, principals, characterRolesHash,
 		opts.ExtractionProvider, opts.ExtractionModel, cfg, run)
 	if err != nil {
 		return total, fmt.Errorf("extract book summary: %w", err)
@@ -387,6 +403,7 @@ func extractBookSummary(
 	p *project.Project,
 	chapterSummaries []SummaryRecord,
 	principals []principalCharacter,
+	characterRolesHash string,
 	prov provider.Provider,
 	model string,
 	cfg sceneDetectConfig,
@@ -424,6 +441,9 @@ func extractBookSummary(
 
 	rec, parseErr := parseSummaryResponse(resp.Content, "book_summary", "", "", sourceRecords,
 		validEvidenceIDs, fallbackSummary, fallbackEvidence, runID(run), model, promptVersion)
+	if rec != nil {
+		rec.Generation.CharacterRolesHash = characterRolesHash
+	}
 	if parseErr == nil {
 		parseErr = validateBookSummaryCoverage(rec, sourceRecords, principals)
 	}
@@ -486,14 +506,15 @@ func parseSummaryResponse(
 	}
 
 	return &SummaryRecord{
-		RecordType:    recordType,
-		ChapterID:     chapterID,
-		ChapterTitle:  chapterTitle,
-		Summary:       summary,
-		Themes:        []string(raw.Themes),
-		Unresolved:    []string(raw.Unresolved),
-		Evidence:      evidence,
-		SourceRecords: sourceRecords,
+		RecordType:           recordType,
+		ChapterID:            chapterID,
+		ChapterTitle:         chapterTitle,
+		Summary:              summary,
+		Themes:               []string(raw.Themes),
+		Unresolved:           []string(raw.Unresolved),
+		Evidence:             evidence,
+		SourceRecords:        sourceRecords,
+		CharacterFinalStates: characterFinalStatesFromRaw(raw.CharacterFinalStates),
 		Generation: SummaryGeneration{
 			RunID:         runID,
 			Model:         model,
@@ -526,6 +547,21 @@ func fallbackSummaryRecord(
 		},
 		Status: "generated",
 	}
+}
+
+func characterFinalStatesFromRaw(raw []rawCharacterFinalState) []CharacterFinalState {
+	seen := make(map[string]bool, len(raw))
+	out := make([]CharacterFinalState, 0, len(raw))
+	for _, item := range raw {
+		characterID := strings.TrimSpace(string(item.CharacterID))
+		state := strings.TrimSpace(string(item.State))
+		if characterID == "" || state == "" || seen[characterID] {
+			continue
+		}
+		seen[characterID] = true
+		out = append(out, CharacterFinalState{CharacterID: characterID, State: state})
+	}
+	return out
 }
 
 func readSummaryIndex(path string) (summaryIndex, error) {
@@ -566,6 +602,10 @@ func readSummaryIndex(path string) (summaryIndex, error) {
 func summaryRecordIsCurrent(rec SummaryRecord, promptVersion string) bool {
 	return strings.TrimSpace(rec.Summary) != "" && strings.TrimSpace(rec.Generation.PromptVersion) == strings.TrimSpace(promptVersion)
 }
+
+func bookSummaryRecordIsCurrent(rec SummaryRecord, promptVersion, characterRolesHash string) bool {
+	return summaryRecordIsCurrent(rec, promptVersion) && strings.TrimSpace(rec.Generation.CharacterRolesHash) == strings.TrimSpace(characterRolesHash)
+}
 func orderedChapterSummaries(chapters []store.ChapterRow, byID map[string]SummaryRecord) []SummaryRecord {
 	out := make([]SummaryRecord, 0, len(chapters))
 	for _, ch := range chapters {
@@ -590,10 +630,14 @@ func summaryEvidenceCandidates(evidence []string, summary string) []string {
 	return dedupeStrings(candidates)
 }
 
+func stripParagraphRefs(text string) string {
+	text = paragraphCitationBlockRegex.ReplaceAllString(text, "")
+	text = paragraphIDPattern.ReplaceAllString(text, "")
+	return strings.Join(strings.Fields(text), " ")
+}
+
 func chapterSummaryTextForBookPrompt(summary string) string {
-	summary = paragraphCitationBlockRegex.ReplaceAllString(summary, "")
-	summary = paragraphIDPattern.ReplaceAllString(summary, "")
-	return strings.Join(strings.Fields(summary), " ")
+	return stripParagraphRefs(summary)
 }
 
 func validateSummaryEvidence(evidence []string, validPIDs map[string]bool, recordType string) ([]string, error) {
@@ -757,7 +801,7 @@ func buildBookSummaryPrompt(title string, summaries []SummaryRecord, principals 
 	sb.WriteString("- Include the final state of every principal character listed below.\n")
 	sb.WriteString("- Compress prose, not information.\n")
 	sb.WriteString("Return JSON matching the schema:\n")
-	sb.WriteString(`{"summary":"...","themes":[],"unresolved":[],"evidence":["ch-..."]}`)
+	sb.WriteString(`{"summary":"...","themes":[],"unresolved":[],"evidence":["ch-..."],"character_final_states":[{"character_id":"char-...","state":"..."}]}`)
 	sb.WriteString("\nCite only chapter IDs from the records below. Do not cite paragraph IDs.\n")
 	sb.WriteString("Use unresolved only for questions or tensions that remain open at book-summary level.\n\n")
 	sb.WriteString("Required chapter coverage:\n")
@@ -776,14 +820,22 @@ func buildBookSummaryPrompt(title string, summaries []SummaryRecord, principals 
 	}
 	sb.WriteString("\nPrincipal characters requiring final-state coverage:\n")
 	if len(principals) == 0 {
-		sb.WriteString("- (none detected from compiled entities)\n")
+		sb.WriteString("- (none in character_roles artifact)\n")
 	} else {
 		for _, principal := range principals {
 			sb.WriteString("- ")
+			sb.WriteString(principal.CharacterID)
+			sb.WriteString(": ")
 			sb.WriteString(principal.Name)
-			sb.WriteString(" (mentioned in ")
-			sb.WriteString(fmt.Sprintf("%d", principal.ChapterMentions))
-			sb.WriteString(" chapter(s))\n")
+			if principal.Role != "" {
+				sb.WriteString("; role: ")
+				sb.WriteString(principal.Role)
+			}
+			if principal.Rationale != "" {
+				sb.WriteString("; rationale: ")
+				sb.WriteString(principal.Rationale)
+			}
+			sb.WriteString("\n")
 		}
 	}
 	sb.WriteString("\n")
@@ -828,102 +880,55 @@ func validateBookSummaryCoverage(rec *SummaryRecord, chapterIDs []string, princi
 		}
 	}
 
-	summaryLower := strings.ToLower(rec.Summary)
-	for _, principal := range principals {
-		name := strings.TrimSpace(principal.Name)
-		if name == "" {
+	states := make(map[string]string, len(rec.CharacterFinalStates))
+	for _, state := range rec.CharacterFinalStates {
+		if strings.TrimSpace(state.CharacterID) == "" {
 			continue
 		}
-		if !strings.Contains(summaryLower, strings.ToLower(name)) {
-			return fmt.Errorf("book summary missing final state for principal character %q", name)
+		states[strings.TrimSpace(state.CharacterID)] = strings.TrimSpace(state.State)
+	}
+	for _, principal := range principals {
+		characterID := strings.TrimSpace(principal.CharacterID)
+		if characterID == "" {
+			continue
+		}
+		if states[characterID] == "" {
+			return fmt.Errorf("book summary missing final state for principal character %s", characterID)
 		}
 	}
 	return nil
 }
 
-func principalCharactersForBookSummary(st *store.Store, chapters []store.ChapterRow) ([]principalCharacter, error) {
-	if st == nil || len(chapters) == 0 {
-		return nil, nil
-	}
-
-	selectedChapters := make(map[string]bool, len(chapters))
-	for _, ch := range chapters {
-		if strings.TrimSpace(ch.ID) != "" {
-			selectedChapters[ch.ID] = true
-		}
-	}
-
-	rows, err := st.EntityRowsForChapter("")
+func principalCharactersForBookSummary(p *project.Project, st *store.Store, model string) ([]principalCharacter, string, error) {
+	input, err := buildCharacterRoleInput(st)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-
-	type tally struct {
-		Name     string
-		Chapters map[string]bool
+	loadedPrompt := loadCompilerPrompt(p, storyprompts.PrincipalCharacters)
+	roles, snapshot, err := ReadLatestCharacterRoles(p.Path(filepath.Join(project.ModelDir, "character_roles.jsonl")))
+	if err != nil {
+		return nil, "", err
 	}
-	byName := make(map[string]*tally)
-	for _, row := range rows {
-		if !selectedChapters[row.ChapterID] {
+	if !characterRolesSnapshotIsCurrent(snapshot, input.InputHash, model, loadedPrompt.Version) {
+		return nil, "", fmt.Errorf("character roles are missing or stale: run 'story compile principals'")
+	}
+	out := make([]principalCharacter, 0, len(roles))
+	for _, role := range roles {
+		if role.Classification != CharacterClassificationPrincipal {
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(row.Type), "character") {
-			continue
-		}
-		name := strings.TrimSpace(row.CanonicalName)
-		if name == "" {
-			continue
-		}
-		key := strings.ToLower(name)
-		current, ok := byName[key]
-		if !ok {
-			current = &tally{Name: name, Chapters: make(map[string]bool)}
-			byName[key] = current
-		}
-		current.Chapters[row.ChapterID] = true
+		out = append(out, principalCharacter{
+			CharacterID:    role.CharacterID,
+			Name:           role.CanonicalName,
+			Classification: role.Classification,
+			Role:           role.Role,
+			Confidence:     role.Confidence,
+			Rationale:      role.Rationale,
+		})
 	}
-	for _, ch := range chapters {
-		refs, err := st.ReverseIndexRefsForChapter(ch.ID, []string{store.ReverseTermPOV})
-		if err != nil {
-			return nil, err
-		}
-		for _, ref := range refs {
-			name := strings.TrimSpace(ref.RawValue)
-			if name == "" {
-				name = strings.TrimSpace(ref.Term)
-			}
-			if name == "" {
-				continue
-			}
-			key := strings.ToLower(name)
-			current, ok := byName[key]
-			if !ok {
-				current = &tally{Name: name, Chapters: make(map[string]bool)}
-				byName[key] = current
-			}
-			current.Chapters[ch.ID] = true
-		}
-	}
-
-	threshold := (len(selectedChapters) + 1) / 2
-	out := make([]principalCharacter, 0, len(byName))
-	for _, entry := range byName {
-		count := len(entry.Chapters)
-		if count >= threshold {
-			out = append(out, principalCharacter{
-				Name:            entry.Name,
-				ChapterMentions: count,
-			})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].ChapterMentions != out[j].ChapterMentions {
-			return out[i].ChapterMentions > out[j].ChapterMentions
-		}
-		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
-	})
-	return out, nil
+	return out, snapshot.ArtifactHash, nil
 }
+
 func deriveChapterFallbackSummary(paragraphs []store.ParagraphRow) (string, []string) {
 	parts := make([]string, 0, 2)
 	evidence := make([]string, 0, 2)

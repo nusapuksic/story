@@ -2,7 +2,7 @@
 //
 // The pipeline converts a canonical manuscript into a layered story model.
 // Full compilation runs scenes, scene cards, optional verification, entities,
-// then summaries.
+// principal character classification, then summaries.
 //
 // Each compilation creates a run record under .story/runs/<run-id>/ that can
 // be used for resumability and provenance.
@@ -159,6 +159,9 @@ func newRun(p *project.Project, runType, layer, chapterID string) (*Run, error) 
 	if err := os.MkdirAll(filepath.Join(dir, "raw-responses"), 0o755); err != nil {
 		return nil, fmt.Errorf("create raw-responses directory: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "prompts"), 0o755); err != nil {
+		return nil, fmt.Errorf("create prompts directory: %w", err)
+	}
 	rec := RunRecord{
 		RunID:     runID,
 		RunType:   runType,
@@ -300,6 +303,10 @@ func generateWithAudit(
 ) (provider.GenerationResponse, taskTiming, error) {
 	timing := taskTiming{Started: time.Now().UTC()}
 	if run != nil {
+		if err := run.savePrompt(taskID, req); err != nil {
+			timing.Finished = time.Now().UTC()
+			return provider.GenerationResponse{}, timing, err
+		}
 		run.beginProviderCall()
 	}
 	resp, err := prov.Generate(ctx, req)
@@ -309,6 +316,40 @@ func generateWithAudit(
 		_ = run.saveRawResponse(taskID, resp, timing.duration())
 	}
 	return resp, timing, err
+}
+
+// savePrompt writes the exact provider messages for one compile task under prompts/.
+func (r *Run) savePrompt(taskID string, req provider.GenerationRequest) error {
+	path := filepath.Join(r.dir, "prompts", taskID+".md")
+	var sb strings.Builder
+	sb.WriteString("# Compile Prompt\n\n")
+	sb.WriteString("Task ID: `")
+	sb.WriteString(taskID)
+	sb.WriteString("`\n")
+	if strings.TrimSpace(req.Model) != "" {
+		sb.WriteString("Model: `")
+		sb.WriteString(req.Model)
+		sb.WriteString("`\n")
+	}
+	if req.MaxTokens > 0 {
+		sb.WriteString(fmt.Sprintf("Max tokens: `%d`\n", req.MaxTokens))
+	}
+	sb.WriteString(fmt.Sprintf("Temperature: `%g`\n", req.Temperature))
+	sb.WriteString(fmt.Sprintf("JSON mode: `%t`\n", req.JSONMode))
+	for _, msg := range req.Messages {
+		role := strings.TrimSpace(msg.Role)
+		if role == "" {
+			role = "message"
+		}
+		sb.WriteString("\n## ")
+		sb.WriteString(role)
+		sb.WriteString("\n\n")
+		sb.WriteString(msg.Content)
+		if !strings.HasSuffix(msg.Content, "\n") {
+			sb.WriteString("\n")
+		}
+	}
+	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }
 
 // saveRawResponse writes raw model content and provider metadata under raw-responses/.
@@ -380,7 +421,7 @@ func (r *Run) saveLocked() error {
 }
 
 // SaveSummary writes a summary.json to the run directory.
-func (r *Run) saveSummary(scenes, cards, sceneCardRecoveries int, sceneCardRecoveryEvents []SceneCardRecoveryEvent, entities, verifications, summaries int) error {
+func (r *Run) saveSummary(scenes, cards, sceneCardRecoveries int, sceneCardRecoveryEvents []SceneCardRecoveryEvent, entities, principals, verifications, summaries int) error {
 	record := r.recordSnapshot()
 	metrics := r.metricsSnapshot()
 	data, err := json.MarshalIndent(map[string]any{
@@ -394,6 +435,7 @@ func (r *Run) saveSummary(scenes, cards, sceneCardRecoveries int, sceneCardRecov
 		"scene_card_recoveries":             sceneCardRecoveries,
 		"scene_card_recovery_events":        sceneCardRecoveryEvents,
 		"entities_built":                    entities,
+		"principals_built":                  principals,
 		"verifications_built":               verifications,
 		"summaries_built":                   summaries,
 		"total_tasks":                       metrics.TaskCount,

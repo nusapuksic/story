@@ -115,6 +115,8 @@ Global options:
 --version           Print version.
 --help              Print help.
 
+Human-readable terminal output prefixes each non-empty line with a local timestamp in `YYYY-MM-DD HH:MM:SS` form. `--json` output remains raw machine-readable JSON without timestamp prefixes, and `--quiet` still suppresses nonessential human output.
+
 The CLI should return stable exit codes and avoid interactive prompts unless explicitly requested.
 
 ⸻
@@ -143,6 +145,7 @@ my-novel/
     events.jsonl
     character-states.jsonl
     unresolved.jsonl
+    character_roles.jsonl
     summaries.jsonl
   reviews/
     decisions.jsonl
@@ -150,6 +153,7 @@ my-novel/
     scene-boundaries.md
     scene-extraction.md
     entity-resolution.md
+    principal-characters.md
     record-verification.md
     chapter-summary.md
     book-summary.md
@@ -768,6 +772,40 @@ Occurrence record:
 
 Entity resolution must preserve ambiguity. Two possible aliases are not merged solely because the model considers the merge plausible. Occurrences must use only supplied reverse-index scene IDs and surface texts; uncertain variants should be flagged instead of silently corrected.
 
+Layer 4b: Principal character classification
+
+Principal character classification runs after entity consolidation and before whole-book summaries. It consumes only canonical character entities and their linked narrative evidence, including aliases, POV assignments, scene participation, scene-card summaries, actions, decisions, relationships, unresolved threads, turning points, and resolution evidence. It does not redo entity resolution, and aliases must never become separate candidates.
+
+The stage classifies narrative function rather than occurrence count. Supported classifications are `principal`, `major_supporting`, `supporting`, `minor`, and `uncertain`; the classifier must not force a fixed number of principal characters.
+
+Character role record:
+
+{
+  "record_type": "character_role",
+  "character_id": "char-01JZK...",
+  "source_entity_ids": ["entity-mara"],
+  "canonical_name": "Mara Vale",
+  "aliases": ["Mara"],
+  "classification": "principal",
+  "role": "protagonist",
+  "confidence": 0.92,
+  "rationale": "Drives the investigation and resolves the central conflict.",
+  "evidence": [
+    {
+      "scene_id": "sc-...",
+      "reason": "Establishes the central goal."
+    }
+  ],
+  "generation": {
+    "run_id": "compile-...",
+    "model": "configured-extraction-model",
+    "prompt_version": "principal-characters-v1"
+  },
+  "status": "generated"
+}
+
+Every role record must reference existing canonical character entities, and every source character entity appears in at most one role record. Principal records require a rationale and valid scene-scoped evidence; paragraph IDs are optional for this layer. `model/character_roles.jsonl` is the persisted source of truth for downstream principal use. Principal-only views are projections over this artifact and must not contain additional classification logic.
+
 Layer 5: Narrative records
 
 Narrative records use a common envelope:
@@ -848,6 +886,8 @@ verify evidence when enabled
 construct chapter synthesis
     ↓
 consolidate entities and scene-scoped occurrences from reverse-index signals
+    ↓
+classify principal characters from canonical entities
     ↓
 construct whole-book editorial summary
     ↓
@@ -940,7 +980,7 @@ The application must:
 6. store the raw response with the run record;
 7. write valid records as candidates.
 
-Invalid model output must never be written as accepted story state. For author-facing scene-card extraction, the default `retry-fallback` policy retries invalid structured output once with validation feedback, retries timed-out scene-card calls with a compact evidence packet, then writes a deterministic fallback scene card using only paragraphs from the scene. Oversized full-chapter scenes receive one scene-card attempt; successful cards are kept, while failed initial attempts are recorded as skipped scene-card markers that supersede older cards without entering the live index. Normal terminal compile runs must surface live progress for selected layers, chapter-level work, and long-running scene-card/summary/entity/verification calls; `--json` output remains machine-readable. When scene detection produces a single scene spanning an entire chapter with enough paragraphs to split, terminal progress and `story compile status` must suggest adding an explicit scene break and rerunning `story compile --layer scenes --chapter <chapter-id> --force`. Recovery events must be surfaced in compile output, `story compile status`, and `.story/runs/<run-id>/summary.json`, including scene ID, chapter ID, recovery action, and a chapter-level regeneration hint. Strict failure is available with `story compile --strict-extraction` or `[compile].scene_card_failure_policy = "strict"`.
+Invalid model output must never be written as accepted story state. For author-facing scene-card extraction, the default `retry-fallback` policy retries invalid structured output once with validation feedback, retries timed-out scene-card calls with a compact evidence packet, then writes a deterministic fallback scene card using only paragraphs from the scene. Oversized full-chapter scenes receive one scene-card attempt; successful cards are kept, while failed initial attempts are recorded as skipped scene-card markers that supersede older cards without entering the live index. Normal terminal compile runs must surface timestamped live progress for selected layers, chapter-level work, and long-running scene-card/summary/entity/verification calls; `--json` output remains machine-readable and is never timestamp-prefixed. When scene detection produces a single scene spanning an entire chapter with enough paragraphs to split, terminal progress and `story compile status` must suggest adding an explicit scene break and rerunning `story compile --layer scenes --chapter <chapter-id> --force`. Recovery events must be surfaced in compile output, `story compile status`, and `.story/runs/<run-id>/summary.json`, including scene ID, chapter ID, recovery action, and a chapter-level regeneration hint. Strict failure is available with `story compile --strict-extraction` or `[compile].scene_card_failure_policy = "strict"`.
 
 10.6 Evidence verification
 
@@ -1096,6 +1136,8 @@ story compile --resume
 story compile --force
 story compile --strict-extraction
 story compile status
+story compile principals
+story compile principals --force
 
 Supported layer names:
 
@@ -1103,6 +1145,7 @@ structure
 scenes
 scene-cards
 entities
+principals
 records
 verification
 synthesis
@@ -1116,6 +1159,8 @@ story inspect paragraph <id>
 story inspect summary book
 story inspect summary <chapter-id>
 story inspect index <theme|entity|participant|pov|location|unresolved> <term-or-prefix>
+story inspect principals
+story inspect character-roles
 story inspect scene <id>
 story inspect entity <id>
 story inspect claim <id>
@@ -1294,6 +1339,8 @@ Every compilation creates:
 .story/runs/<run-id>/
   run.json
   tasks.jsonl
+  prompts/
+    <task-id>.md
   raw-responses/
     <task-id>.json
     <task-id>.meta.json
@@ -1319,7 +1366,7 @@ failed
 skipped
 cancelled
 
-Task records include `started_at`, `finished_at`, and `duration_ms`. Raw response metadata includes finish reason, token counts, content size, empty-content status, and provider-call duration. `summary.json` includes `started_at`, `finished_at`, `wall_clock_duration_ms`, `total_tasks`, `total_provider_calls`, `total_prompt_tokens`, `total_output_tokens`, `total_provider_call_duration_ms`, `max_observed_provider_concurrency`, `task_type_counts`, `retry_tasks`, and `recovery_tasks`. Provider calls remain serial until provider parallelization is explicitly introduced; the observed-concurrency counter is audit telemetry and should remain no higher than 1 in this release.
+Task records include `started_at`, `finished_at`, and `duration_ms`. Compile prompt transcripts are written before provider calls. Raw response metadata includes finish reason, token counts, content size, empty-content status, and provider-call duration. `summary.json` includes `started_at`, `finished_at`, `wall_clock_duration_ms`, `total_tasks`, `total_provider_calls`, `total_prompt_tokens`, `total_output_tokens`, `total_provider_call_duration_ms`, `max_observed_provider_concurrency`, `task_type_counts`, `retry_tasks`, and `recovery_tasks`. Provider calls remain serial until provider parallelization is explicitly introduced; the observed-concurrency counter is audit telemetry and should remain no higher than 1 in this release.
 
 A run interrupted by process termination can resume:
 

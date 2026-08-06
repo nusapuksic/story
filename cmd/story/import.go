@@ -64,7 +64,7 @@ func newImportMDCmd() *cobra.Command {
 				info("Imported %d chapters, %d paragraphs (run %s)", res.Chapters, res.Paragraphs, res.RunID)
 			}
 			for _, w := range res.Warnings {
-				fmt.Fprintln(os.Stderr, "Warning:", w)
+				terminalErr("Warning: %s", w)
 			}
 			return nil
 		},

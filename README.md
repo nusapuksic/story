@@ -284,7 +284,7 @@ Missing environment config files are ignored and the built-in fallback uses `htt
    ./story --project ./my-novel llm doctor
    ```
 
-   Once this passes, `story compile`, `story compile --layer scene-cards`, `story compile --layer entities`, `story compile --layer verification`, `story compile --layer summaries`, and `story ask` can call the configured model. Full `story compile` uses the verification role when the effective `[compile].verification_mode` is not `off`; supported modes are `off`, `recovered`, `selective`, and `all`. If `verification_mode` is omitted, legacy `[compile].verification = true` maps to `all` and `false` maps to `off`. `story compile --layer scenes` can still build deterministic scene boundaries without an LLM.
+   Once this passes, `story compile`, `story compile --layer scene-cards`, `story compile --layer entities`, `story compile --layer principals`, `story compile --layer verification`, `story compile --layer summaries`, and `story ask` can call the configured model. Full `story compile` uses the verification role when the effective `[compile].verification_mode` is not `off`; supported modes are `off`, `recovered`, `selective`, and `all`. If `verification_mode` is omitted, legacy `[compile].verification = true` maps to `all` and `false` maps to `off`. `story compile --layer scenes` can still build deterministic scene boundaries without an LLM.
 
 ## Usage
 
@@ -300,6 +300,8 @@ These examples use `./story` for a binary in the current folder. In Windows Powe
 ./story --project ./my-novel inspect paragraph p-<ULID>
 ./story --project ./my-novel inspect summary book
 ./story --project ./my-novel inspect summary ch-0001
+./story --project ./my-novel inspect principals
+./story --project ./my-novel inspect character-roles
 ./story --project ./my-novel inspect index theme memory
 ./story --project ./my-novel import report
 ./story --project ./my-novel index rebuild
@@ -309,8 +311,10 @@ These examples use `./story` for a binary in the current folder. In Windows Powe
 ./story --project ./my-novel compile --layer scene-cards
 ./story --project ./my-novel compile --strict-extraction
 ./story --project ./my-novel compile --layer verification
-./story --project ./my-novel compile --layer summaries
 ./story --project ./my-novel compile --layer entities
+./story --project ./my-novel compile --layer principals
+./story --project ./my-novel compile principals --force
+./story --project ./my-novel compile --layer summaries
 ./story --project ./my-novel search "farmhouse fire"
 ./story --project ./my-novel search "Mara" --chapter ch-0004 --limit 10
 ./story --project ./my-novel ask "What does Mara know when she enters the farmhouse?"
@@ -326,7 +330,7 @@ The SQLite index at `.story/index.sqlite` is a rebuildable projection of the can
 
 The index also contains a rebuildable reverse index from scene-card themes, entities, participants, POVs, locations, and unresolved questions. Use `story inspect index <type> <term-or-prefix>` to inspect literal terms and their supporting scene-card refs.
 
-`story compile` builds the story model from the canonical manuscript in layers: `scenes`, `scene-cards`, optional `verification` selected by `[compile].verification_mode`, `entities`, and `summaries`. It also rebuilds the deterministic reverse index from current scene-card data without model calls, preserving decoded model-provided terms literally for v0.1.6. Normal terminal runs print live progress by layer, chapter, and long-running scene-card/summary/entity/verification calls. Verification provider calls remain serial in this release; run logs now record per-task timing, token totals, provider-call duration, and observed provider concurrency so future concurrency work can be measured without changing artifact behavior. Entity consolidation uses scene-card reverse-index refs as its evidence packet: it groups aliases and scene-scoped occurrences from terms already extracted into scene cards, and can flag likely typos without rereading chapter prose. Book summaries are coverage-first editorial synopses that prioritize complete story coverage over brevity and use compiled entity context to require final-state coverage for principal characters. Scene-card extraction retries invalid model citations once, retries timed-out scene-card calls with a compact evidence packet, then writes a simple valid fallback card instead of stopping the whole compile. Oversized full-chapter scenes get one scene-card attempt; successful cards are kept, but failed first attempts are marked skipped instead of retried or replaced with fallback cards. Use `--strict-extraction` or `[compile].scene_card_failure_policy = "strict"` for developer/debug runs. Recovered scene cards are listed in compile output, `story compile status`, and `.story/runs/<run-id>/summary.json`; fallback cards are marked as regeneration recommended and can be regenerated with `story compile --layer scene-cards --chapter <chapter-id> --force`. If scene detection leaves a long chapter as one full-chapter scene, compile progress and `story compile status` suggest adding an explicit scene break. `scenes` can run from explicit manuscript scene breaks without an LLM; model-assisted scene detection and the other compile layers require configured LLM roles (see `docs/cli-spec.md`).
+`story compile` builds the story model from the canonical manuscript in layers: `scenes`, `scene-cards`, optional `verification` selected by `[compile].verification_mode`, `entities`, `principals`, and `summaries`. It also rebuilds the deterministic reverse index from current scene-card data without model calls, preserving decoded model-provided terms literally for v0.1.6. Normal terminal runs print live progress by layer, chapter, and long-running scene-card/summary/entity/principal/verification calls. Verification provider calls remain serial in this release; run logs now record per-task timing, token totals, provider-call duration, and observed provider concurrency so future concurrency work can be measured without changing artifact behavior. Entity consolidation uses scene-card reverse-index refs as its evidence packet: it groups aliases and scene-scoped occurrences from terms already extracted into scene cards, and can flag likely typos without rereading chapter prose. Principal classification is a book-level compile stage over canonical character entities and their linked narrative evidence; it persists all role assessments in `model/character_roles.jsonl` and can be rerun with `story compile principals --force` without rebuilding scenes, scene cards, or entities. Book summaries are coverage-first editorial synopses that consume persisted principal classifications directly and require final-state coverage by book-level character ID. Scene-card extraction retries invalid model citations once, retries timed-out scene-card calls with a compact evidence packet, then writes a simple valid fallback card instead of stopping the whole compile. Oversized full-chapter scenes get one scene-card attempt; successful cards are kept, but failed first attempts are marked skipped instead of retried or replaced with fallback cards. Use `--strict-extraction` or `[compile].scene_card_failure_policy = "strict"` for developer/debug runs. Recovered scene cards are listed in compile output, `story compile status`, and `.story/runs/<run-id>/summary.json`; fallback cards are marked as regeneration recommended and can be regenerated with `story compile --layer scene-cards --chapter <chapter-id> --force`. If scene detection leaves a long chapter as one full-chapter scene, compile progress and `story compile status` suggest adding an explicit scene break. `scenes` can run from explicit manuscript scene breaks without an LLM; model-assisted scene detection and the other compile layers require configured LLM roles (see `docs/cli-spec.md`).
 
 ## Editing the Manuscript
 
@@ -365,6 +369,7 @@ Every project has editable prompt templates under `prompts/`:
 * `scene-boundaries.md`
 * `scene-extraction.md`
 * `entity-resolution.md`
+* `principal-characters.md`
 * `record-verification.md`
 * `chapter-summary.md`
 * `book-summary.md`
@@ -379,9 +384,10 @@ Canonical generated records live in `model/` as JSONL files:
 * `scenes.jsonl` stores scene boundaries and scene cards, including verification updates.
 * `entities.jsonl` stores consolidated entities, aliases, scene evidence, and typo/review flags.
 * `occurrences.jsonl` stores scene-scoped entity occurrence rows derived from scene-card reverse-index signals.
+* `character_roles.jsonl` stores book-level character IDs and narrative-role classifications derived from canonical character entities.
 * `summaries.jsonl` stores chapter and book summaries.
 
-Each compile run also writes `.story/runs/<run-id>/` with `run.json`, `summary.json`, task records, errors when present, and raw model responses. Task records include started/finished timestamps and durations; response audits include token counts, finish reason, content size, and provider-call duration. `summary.json` rolls up task counts, task type counts, token totals, provider-call duration, observed provider concurrency, retry counts, and recovery counts. These run files are provenance and debugging artifacts; the rebuildable SQLite index is still derived from the canonical project files.
+Each compile run also writes `.story/runs/<run-id>/` with `run.json`, `summary.json`, task records, prompt transcripts, errors when present, and raw model responses. Task records include started/finished timestamps and durations; response audits include token counts, finish reason, content size, and provider-call duration. `summary.json` rolls up task counts, task type counts, token totals, provider-call duration, observed provider concurrency, retry counts, and recovery counts. These run files are provenance and debugging artifacts; the rebuildable SQLite index is still derived from the canonical project files.
 
 `story ask` retrieves relevant evidence from the index, sends it to the configured discussion model, validates cited paragraph identifiers, and returns an answer with provenance. Character/entity-shaped questions automatically add compact compiled entity context with aliases and scene-scoped appearances. Broad structural questions can be answered from summary and scene-card context even when no paragraph-level citation is a good fit; ending-shaped fallback questions use the tail of the scene-card timeline instead of the full scene-card set. Each ask run writes `.story/runs/<query-id>/` with `run.json`, `request.json`, `prompt.md`, `raw-response.txt`, `raw-response.meta.json`, and `errors.jsonl` when present; completion or failure is also appended to `.story/logs/runs.jsonl`. Human output prints the run ID and artifact directory, and `--json` includes `model_run` plus `run_dir`. Available modes: `recall` (default), `continuity`, `interpretation`, `style`, `development`. When the index does not contain enough evidence to answer, the command exits with code 40.
 

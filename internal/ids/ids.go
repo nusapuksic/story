@@ -51,6 +51,11 @@ func NewEntityID() string {
 	return "entity-" + NewULID()
 }
 
+// NewCharacterID returns a book-level character identifier of the form char-<ULID>.
+func NewCharacterID() string {
+	return "char-" + NewULID()
+}
+
 // NewQueryRunID returns a new query run identifier of the form query-<ULID>.
 func NewQueryRunID() string {
 	return "query-" + NewULID()
