@@ -89,6 +89,60 @@ func TestSearchSceneCards(t *testing.T) {
 	}
 }
 
+func TestSearchSummariesAndEntities(t *testing.T) {
+	st := openTestStore(t)
+
+	if err := st.InsertChapterForTest("ch-0001", 1, "The Letter"); err != nil {
+		t.Fatalf("insert chapter: %v", err)
+	}
+	if err := st.InsertSummary(store.SummaryRow{
+		RecordType:      "chapter_summary",
+		ChapterID:       "ch-0001",
+		ChapterTitle:    "The Letter",
+		Summary:         "Mara keeps the secrecy around the hidden letter.",
+		Themes:          []string{"secrecy"},
+		Evidence:        []string{"p-0001"},
+		GenerationRun:   "compile-summary-test",
+		GenerationModel: "test-model",
+		PromptVersion:   "chapter-summary-v1",
+		GeneratedAt:     "2026-01-01T00:00:00Z",
+		Status:          "generated",
+		RawJSON:         "{}",
+	}); err != nil {
+		t.Fatalf("InsertSummary: %v", err)
+	}
+	if err := st.InsertEntity(store.EntityRow{
+		ID:              "ent-001",
+		ChapterID:       "ch-0001",
+		Type:            "character",
+		CanonicalName:   "Mara",
+		Aliases:         []string{"Maraa"},
+		Evidence:        []string{"sc-0001"},
+		GenerationRun:   "compile-entity-test",
+		GenerationModel: "test-model",
+		PromptVersion:   "entity-v1",
+		Status:          "generated",
+		RawJSON:         "{}",
+	}); err != nil {
+		t.Fatalf("InsertEntity: %v", err)
+	}
+
+	summaryResult, err := retrieval.Search(st, "secrecy", retrieval.Options{MaxSummaries: 10, MaxEntities: 10})
+	if err != nil {
+		t.Fatalf("Search summaries: %v", err)
+	}
+	if len(summaryResult.Summaries) != 1 || summaryResult.Summaries[0].RecordID != "chapter_summary:ch-0001" {
+		t.Fatalf("summary results = %#v, want chapter_summary:ch-0001", summaryResult.Summaries)
+	}
+
+	entityResult, err := retrieval.Search(st, "Maraa", retrieval.Options{MaxSummaries: 10, MaxEntities: 10})
+	if err != nil {
+		t.Fatalf("Search entities: %v", err)
+	}
+	if len(entityResult.Entities) != 1 || entityResult.Entities[0].ID != "ent-001" {
+		t.Fatalf("entity results = %#v, want ent-001", entityResult.Entities)
+	}
+}
 func TestSearchSceneCardsStatusPolicy(t *testing.T) {
 	st := openTestStore(t)
 
@@ -145,7 +199,7 @@ func TestSearchEmptyQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search with empty query: %v", err)
 	}
-	if len(result.Paragraphs) != 0 || len(result.SceneCards) != 0 {
+	if len(result.Paragraphs) != 0 || len(result.SceneCards) != 0 || len(result.Summaries) != 0 || len(result.Entities) != 0 {
 		t.Error("expected empty result for empty query")
 	}
 }

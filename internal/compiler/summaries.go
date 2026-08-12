@@ -108,7 +108,7 @@ func compileSummaries(
 		return 0, err
 	}
 	defer summariesFile.Close()
-	committer := compileArtifactCommitter{staging: staging, summariesFile: summariesFile}
+	committer := compileArtifactCommitter{st: st, staging: staging, summariesFile: summariesFile}
 	chapterPromptVersion := loadCompilerPrompt(p, storyprompts.ChapterSummary).Version
 	bookPromptVersion := loadCompilerPrompt(p, storyprompts.BookSummary).Version
 
@@ -224,6 +224,43 @@ func stageSummaryRecord(staging *RunStagingStore, sequence int, taskID, targetID
 		TargetID:      targetID,
 		SchemaVersion: 1,
 	}, stagedSummaryPayload{Record: record})
+}
+
+func summaryRowFromRecord(rec SummaryRecord) store.SummaryRow {
+	raw, _ := json.Marshal(rec)
+	return store.SummaryRow{
+		RecordID:             store.SummaryRecordID(rec.RecordType, rec.ChapterID),
+		RecordType:           rec.RecordType,
+		ChapterID:            rec.ChapterID,
+		ChapterTitle:         rec.ChapterTitle,
+		Summary:              rec.Summary,
+		Themes:               append([]string(nil), rec.Themes...),
+		Unresolved:           append([]string(nil), rec.Unresolved...),
+		Evidence:             append([]string(nil), rec.Evidence...),
+		SourceRecords:        append([]string(nil), rec.SourceRecords...),
+		CharacterFinalStates: summaryFinalStatesRowFromRecord(rec.CharacterFinalStates),
+		GenerationRun:        rec.Generation.RunID,
+		GenerationModel:      rec.Generation.Model,
+		PromptVersion:        rec.Generation.PromptVersion,
+		GeneratedAt:          rec.Generation.GeneratedAt,
+		CharacterRolesHash:   rec.Generation.CharacterRolesHash,
+		Status:               rec.Status,
+		RawJSON:              string(raw),
+	}
+}
+
+func summaryFinalStatesRowFromRecord(values []CharacterFinalState) []store.SummaryCharacterFinalState {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]store.SummaryCharacterFinalState, 0, len(values))
+	for _, value := range values {
+		out = append(out, store.SummaryCharacterFinalState{
+			CharacterID: value.CharacterID,
+			State:       value.State,
+		})
+	}
+	return out
 }
 
 const maxChapterSynthesisEvidencePerWindow = 3

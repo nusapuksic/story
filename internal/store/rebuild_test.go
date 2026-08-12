@@ -95,6 +95,98 @@ func TestRebuildRestoresScenesAndCardsFromJSONL(t *testing.T) {
 	}
 }
 
+func TestRebuildRestoresSummariesFromJSONL(t *testing.T) {
+	p, p1, _, _ := newProjectWithChapter(t)
+	writeSummariesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":   "chapter_summary",
+			"chapter_id":    "ch-0001",
+			"chapter_title": "Chapter One",
+			"summary":       "Mara hides the letter and chooses silence.",
+			"themes":        []string{"secrecy"},
+			"unresolved":    []string{"Who sent the letter?"},
+			"evidence":      []string{p1},
+			"generation": map[string]any{
+				"run_id":         "compile-summary-test",
+				"model":          "test-model",
+				"prompt_version": "chapter-summary-v1",
+				"generated_at":   "2026-01-01T00:00:00Z",
+			},
+			"status": "generated",
+		},
+		map[string]any{
+			"record_type":    "book_summary",
+			"summary":        "A story about secrecy and memory.",
+			"themes":         []string{"memory"},
+			"evidence":       []string{"ch-0001"},
+			"source_records": []string{"ch-0001"},
+			"generation": map[string]any{
+				"run_id":         "compile-summary-test",
+				"model":          "test-model",
+				"prompt_version": "book-summary-v1",
+				"generated_at":   "2026-01-01T00:00:00Z",
+			},
+			"status": "generated",
+		},
+	})
+
+	if err := store.Rebuild(p); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	st := openProjectStore(t, p)
+	summaries, chapterSummaries, bookSummaries, err := st.SummaryCounts()
+	if err != nil {
+		t.Fatalf("SummaryCounts: %v", err)
+	}
+	if summaries != 2 || chapterSummaries != 1 || bookSummaries != 1 {
+		t.Fatalf("summary counts = (%d, %d, %d), want (2, 1, 1)", summaries, chapterSummaries, bookSummaries)
+	}
+	chapter, err := st.InspectSummary("ch-0001")
+	if err != nil {
+		t.Fatalf("InspectSummary chapter: %v", err)
+	}
+	if chapter.RecordID != "chapter_summary:ch-0001" || chapter.Summary != "Mara hides the letter and chooses silence." {
+		t.Fatalf("chapter summary = %#v", chapter)
+	}
+	book, err := st.InspectSummary("book")
+	if err != nil {
+		t.Fatalf("InspectSummary book: %v", err)
+	}
+	if book.RecordID != "book_summary" {
+		t.Fatalf("book summary record_id = %q, want book_summary", book.RecordID)
+	}
+	found, err := st.SearchSummaries("chooses silence", "", 10)
+	if err != nil {
+		t.Fatalf("SearchSummaries: %v", err)
+	}
+	if len(found) == 0 || found[0].RecordID != "chapter_summary:ch-0001" {
+		t.Fatalf("summary search = %#v, want chapter_summary:ch-0001", found)
+	}
+}
+
+func TestRebuildFailsOnSummaryEvidenceOutsideChapter(t *testing.T) {
+	p, _, p2 := newProjectWithTwoChapters(t)
+	writeSummariesJSONL(t, p, []any{
+		map[string]any{
+			"record_type":   "chapter_summary",
+			"chapter_id":    "ch-0001",
+			"chapter_title": "Chapter One",
+			"summary":       "Chapter one claims evidence from chapter two.",
+			"evidence":      []string{p2},
+			"generation": map[string]any{
+				"run_id":         "compile-summary-test",
+				"model":          "test-model",
+				"prompt_version": "chapter-summary-v1",
+			},
+			"status": "generated",
+		},
+	})
+
+	err := store.Rebuild(p)
+	if err == nil || !strings.Contains(err.Error(), "is in chapter ch-0002") {
+		t.Fatalf("Rebuild error = %v, want cross-chapter summary evidence error", err)
+	}
+}
 func TestRebuildScenesJSONLAbsent(t *testing.T) {
 	p, _, _, _ := newProjectWithChapter(t)
 	if err := os.Remove(p.Path(filepath.Join(project.ModelDir, "scenes.jsonl"))); err != nil {
@@ -855,6 +947,51 @@ func newProjectWithChapter(t *testing.T) (*project.Project, string, string, stri
 	return p, p1, p2, p3
 }
 
+func newProjectWithTwoChapters(t *testing.T) (*project.Project, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	p, err := project.Init(dir, project.InitOptions{Title: "Test", Language: "en"})
+	if err != nil {
+		t.Fatalf("project.Init: %v", err)
+	}
+
+	chapters := []*manuscript.Chapter{
+		{
+			ID:        "ch-0001",
+			Order:     1,
+			Title:     "Chapter One",
+			File:      "chapters/ch-0001.md",
+			SourceKey: "01-chapter-one.md",
+			Blocks: []manuscript.Block{
+				{Type: manuscript.BlockParagraph, ParagraphID: "p-0001", Text: "Mara receives a letter."},
+			},
+		},
+		{
+			ID:        "ch-0002",
+			Order:     2,
+			Title:     "Chapter Two",
+			File:      "chapters/ch-0002.md",
+			SourceKey: "02-chapter-two.md",
+			Blocks: []manuscript.Block{
+				{Type: manuscript.BlockParagraph, ParagraphID: "p-0002", Text: "Elias burns the map."},
+			},
+		},
+	}
+	for _, ch := range chapters {
+		if err := manuscript.WriteChapter(p.Path(project.ManuscriptDir), ch); err != nil {
+			t.Fatalf("WriteChapter: %v", err)
+		}
+	}
+	toc := manuscript.TOC{Version: 1}
+	for _, ch := range chapters {
+		toc.Chapters = append(toc.Chapters, manuscript.TOCEntry{ID: ch.ID, Order: ch.Order, Title: ch.Title, File: ch.File, SourceKey: ch.SourceKey})
+	}
+	if err := manuscript.SaveTOC(p.Path(project.TOCPath), toc); err != nil {
+		t.Fatalf("SaveTOC: %v", err)
+	}
+	return p, "p-0001", "p-0002"
+}
+
 // newProjectWithEmptyChapter creates a minimal test project containing one
 // chapter that has no paragraph blocks.
 func newProjectWithEmptyChapter(t *testing.T) *project.Project {
@@ -895,6 +1032,11 @@ func writeEntitiesJSONL(t *testing.T, p *project.Project, records []any) {
 func writeOccurrencesJSONL(t *testing.T, p *project.Project, records []any) {
 	t.Helper()
 	writeJSONLLines(t, p.Path(filepath.Join(project.ModelDir, "occurrences.jsonl")), records, "occurrence")
+}
+
+func writeSummariesJSONL(t *testing.T, p *project.Project, records []any) {
+	t.Helper()
+	writeJSONLLines(t, p.Path(filepath.Join(project.ModelDir, "summaries.jsonl")), records, "summary")
 }
 
 func writeEntitySceneJSONL(t *testing.T, p *project.Project, paragraphStartID, paragraphEndID string) string {

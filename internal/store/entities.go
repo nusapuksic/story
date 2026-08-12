@@ -3,6 +3,7 @@ package store
 import (
 	"bufio"
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -108,28 +109,21 @@ type entityPendingBatch struct {
 	entities map[string]entityCandidate
 }
 
-// InsertEntity inserts or replaces one entity row.
-func (s *Store) InsertEntity(r EntityRow) error {
-	aliasesJSON, err := json.Marshal(r.Aliases)
-	if err != nil {
-		return fmt.Errorf("marshal aliases for entity %s: %w", r.ID, err)
-	}
-	evidenceJSON, err := json.Marshal(r.Evidence)
-	if err != nil {
-		return fmt.Errorf("marshal evidence for entity %s: %w", r.ID, err)
-	}
-	_, err = s.db.Exec(
-		`INSERT OR REPLACE INTO entities
-			(id, chapter_id, type, canonical_name, aliases_json, evidence_json, generation_run,
-			 generation_model, prompt_version, status, raw_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.ChapterID, r.Type, r.CanonicalName, string(aliasesJSON), string(evidenceJSON),
-		r.GenerationRun, r.GenerationModel, r.PromptVersion, r.Status, r.RawJSON,
-	)
+// InsertEntity inserts or replaces one entity row and its FTS entry.
+func (s *Store) InsertEntity(r EntityRow) (retErr error) {
+	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("insert entity %s: %w", r.ID, err)
 	}
-	return nil
+	defer func() {
+		if retErr != nil {
+			tx.Rollback()
+		}
+	}()
+	if err := insertEntityTx(tx, r); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // InsertOccurrence inserts or replaces one scene-scoped occurrence row.
@@ -249,6 +243,9 @@ func (s *Store) ReplaceEntityProjectionForChapter(
 	); err != nil {
 		return fmt.Errorf("replace entity projection for chapter %s: mark snapshot: %w", chapterID, err)
 	}
+	if err := rebuildEntitiesFTSTx(tx); err != nil {
+		return fmt.Errorf("replace entity projection for chapter %s: %w", chapterID, err)
+	}
 
 	return tx.Commit()
 }
@@ -274,6 +271,9 @@ func (s *Store) DeleteEntityOccurrencesForChapter(chapterID string) (retErr erro
 	}
 	if _, err := tx.Exec(`DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM occurrences)`); err != nil {
 		return fmt.Errorf("delete orphan entities after chapter %s: %w", chapterID, err)
+	}
+	if err := rebuildEntitiesFTSTx(tx); err != nil {
+		return fmt.Errorf("delete entity occurrences for chapter %s: %w", chapterID, err)
 	}
 	return tx.Commit()
 }
@@ -344,6 +344,74 @@ func (s *Store) EntityRowsForChapter(chapterID string) ([]EntityRow, error) {
 	return scanEntityRows(rows)
 }
 
+// InspectEntity returns one indexed entity by ID.
+func (s *Store) InspectEntity(id string) (EntityRow, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return EntityRow{}, fmt.Errorf("entity %s: %w", id, ErrNotFound)
+	}
+	rows, err := s.db.Query(
+		`SELECT id, chapter_id, type, canonical_name, aliases_json, evidence_json,
+		        generation_run, generation_model, prompt_version, status, raw_json
+		 FROM entities WHERE id = ?`,
+		id,
+	)
+	if err != nil {
+		return EntityRow{}, fmt.Errorf("inspect entity %s: %w", id, err)
+	}
+	defer rows.Close()
+	out, err := scanEntityRows(rows)
+	if err != nil {
+		return EntityRow{}, fmt.Errorf("inspect entity %s: %w", id, err)
+	}
+	if len(out) == 0 {
+		return EntityRow{}, fmt.Errorf("entity %s: %w", id, ErrNotFound)
+	}
+	return out[0], nil
+}
+
+// SearchEntities returns indexed entities whose name, aliases, or type match query.
+// If chapterID is non-empty, results are restricted to that chapter.
+func (s *Store) SearchEntities(query, chapterID string, limit int) ([]EntityRow, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	q := sanitizeFTSQuery(query)
+	if q == "" {
+		return nil, nil
+	}
+
+	where := `entities_fts MATCH ?`
+	args := []any{q}
+	if strings.TrimSpace(chapterID) != "" {
+		where += ` AND e.chapter_id = ?`
+		args = append(args, strings.TrimSpace(chapterID))
+	}
+	args = append(args, limit)
+
+	ids, err := s.queryFTSIDs(
+		`SELECT f.id
+		 FROM entities_fts f
+		 JOIN entities e ON e.id = f.id
+		 WHERE `+where+`
+		 ORDER BY rank LIMIT ?`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("search entities: %w", err)
+	}
+
+	out := make([]EntityRow, 0, len(ids))
+	for _, id := range ids {
+		entity, err := s.InspectEntity(id)
+		if err != nil {
+			continue
+		}
+		out = append(out, entity)
+	}
+	return out, nil
+}
+
 // OccurrencesForEntity returns scene-scoped occurrences for an entity in
 // manuscript order. If chapterID is non-empty, results are restricted to it.
 func (s *Store) OccurrencesForEntity(entityID, chapterID string, limit int) ([]OccurrenceRow, error) {
@@ -400,6 +468,65 @@ func scanEntityRows(rows interface {
 	return out, rows.Err()
 }
 
+func insertEntityTx(tx *sql.Tx, r EntityRow) error {
+	aliasesJSON, err := json.Marshal(r.Aliases)
+	if err != nil {
+		return fmt.Errorf("marshal aliases for entity %s: %w", r.ID, err)
+	}
+	evidenceJSON, err := json.Marshal(r.Evidence)
+	if err != nil {
+		return fmt.Errorf("marshal evidence for entity %s: %w", r.ID, err)
+	}
+	if _, err := tx.Exec(
+		`INSERT OR REPLACE INTO entities
+			(id, chapter_id, type, canonical_name, aliases_json, evidence_json, generation_run,
+			 generation_model, prompt_version, status, raw_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.ChapterID, r.Type, r.CanonicalName, string(aliasesJSON), string(evidenceJSON),
+		r.GenerationRun, r.GenerationModel, r.PromptVersion, r.Status, r.RawJSON,
+	); err != nil {
+		return fmt.Errorf("insert entity %s: %w", r.ID, err)
+	}
+	return insertEntityFTSTx(tx, r)
+}
+
+func insertEntityFTSTx(tx *sql.Tx, r EntityRow) error {
+	if _, err := tx.Exec(`DELETE FROM entities_fts WHERE id = ?`, r.ID); err != nil {
+		return fmt.Errorf("delete entity FTS %s: %w", r.ID, err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO entities_fts(id, canonical_name, aliases, type) VALUES (?, ?, ?, ?)`,
+		r.ID, r.CanonicalName, strings.Join(r.Aliases, " "), r.Type,
+	); err != nil {
+		return fmt.Errorf("index entity FTS %s: %w", r.ID, err)
+	}
+	return nil
+}
+
+func rebuildEntitiesFTSTx(tx *sql.Tx) error {
+	if _, err := tx.Exec(`DELETE FROM entities_fts`); err != nil {
+		return fmt.Errorf("rebuild entity FTS: %w", err)
+	}
+	rows, err := tx.Query(
+		`SELECT id, chapter_id, type, canonical_name, aliases_json, evidence_json,
+		        generation_run, generation_model, prompt_version, status, raw_json
+		 FROM entities ORDER BY id`,
+	)
+	if err != nil {
+		return fmt.Errorf("rebuild entity FTS: %w", err)
+	}
+	defer rows.Close()
+	entities, err := scanEntityRows(rows)
+	if err != nil {
+		return fmt.Errorf("rebuild entity FTS: %w", err)
+	}
+	for _, entity := range entities {
+		if err := insertEntityFTSTx(tx, entity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 func scanOccurrenceRows(rows interface {
 	Next() bool
 	Scan(...any) error
@@ -504,6 +631,10 @@ func (s *Store) IndexEntitiesJSONL(entitiesPath, occurrencesPath string) (retErr
 		); err != nil {
 			return fmt.Errorf("index occurrences jsonl: insert occurrence %s/%s: %w", rec.EntityID, rec.SceneID, err)
 		}
+	}
+
+	if err := rebuildEntitiesFTSTx(tx); err != nil {
+		return fmt.Errorf("index entities jsonl: %w", err)
 	}
 
 	chapterSnapshotIDs := sortedEntitySnapshotChapters(snapshots)

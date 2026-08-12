@@ -26,7 +26,7 @@ type scoredEntityContext struct {
 	index int
 }
 
-func entityContextForQuestion(st *store.Store, question, mode, chapterID string, intent queryIntent) ([]EntityContext, error) {
+func entityContextForQuestion(st *store.Store, question, mode, chapterID string, intent queryIntent, matchedEntities []store.EntityRow) ([]EntityContext, error) {
 	entities, err := st.EntityRowsForChapter(chapterID)
 	if err != nil {
 		return nil, err
@@ -37,9 +37,18 @@ func entityContextForQuestion(st *store.Store, question, mode, chapterID string,
 
 	normalizedQuestion := normalizeQuestionText(question)
 	wantsEntityContext := isCharacterQuestion(normalizedQuestion) || characterMode(mode)
+	matchedEntityIDs := make(map[string]bool, len(matchedEntities))
+	for _, entity := range matchedEntities {
+		if strings.TrimSpace(entity.ID) != "" {
+			matchedEntityIDs[strings.TrimSpace(entity.ID)] = true
+		}
+	}
 	var scored []scoredEntityContext
 	for i, entity := range entities {
 		score := entityQuestionScore(normalizedQuestion, entity, wantsEntityContext)
+		if matchedEntityIDs[strings.TrimSpace(entity.ID)] {
+			score += 60
+		}
 		if score == 0 {
 			continue
 		}

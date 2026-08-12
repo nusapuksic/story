@@ -181,6 +181,7 @@ func Ask(
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: %w", err)
 	}
+	opts.Summaries = mergeSummaryContexts(opts.Summaries, summaryContextsFromStoreRows(ret.Summaries))
 
 	endingQuestion := isEndingQuestion(question)
 
@@ -275,7 +276,7 @@ func Ask(
 		return nil, ErrInsufficientEvidence
 	}
 
-	entityContext, err := entityContextForQuestion(st, question, opts.Mode, opts.ChapterID, intent)
+	entityContext, err := entityContextForQuestion(st, question, opts.Mode, opts.ChapterID, intent, ret.Entities)
 	if err != nil {
 		return nil, fmt.Errorf("entity context: %w", err)
 	}
@@ -458,6 +459,57 @@ func containsQuestionPhrase(normalizedQuestion, phrase string) bool {
 		return false
 	}
 	return strings.Contains(" "+normalizedQuestion+" ", " "+phrase+" ")
+}
+func summaryContextsFromStoreRows(rows []store.SummaryRow) []SummaryContext {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]SummaryContext, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, SummaryContext{
+			RecordType:           row.RecordType,
+			ChapterID:            row.ChapterID,
+			ChapterTitle:         row.ChapterTitle,
+			Summary:              row.Summary,
+			Themes:               append([]string(nil), row.Themes...),
+			Unresolved:           append([]string(nil), row.Unresolved...),
+			Evidence:             append([]string(nil), row.Evidence...),
+			SourceRecords:        append([]string(nil), row.SourceRecords...),
+			CharacterFinalStates: summaryFinalStatesFromStoreRows(row.CharacterFinalStates),
+		})
+	}
+	return out
+}
+
+func summaryFinalStatesFromStoreRows(values []store.SummaryCharacterFinalState) []SummaryCharacterFinalState {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]SummaryCharacterFinalState, 0, len(values))
+	for _, value := range values {
+		out = append(out, SummaryCharacterFinalState{
+			CharacterID: value.CharacterID,
+			State:       value.State,
+		})
+	}
+	return out
+}
+
+func mergeSummaryContexts(base, extra []SummaryContext) []SummaryContext {
+	if len(extra) == 0 {
+		return base
+	}
+	out := make([]SummaryContext, 0, len(base)+len(extra))
+	seen := make(map[string]bool, len(base)+len(extra))
+	for _, summary := range append(append([]SummaryContext{}, base...), extra...) {
+		id := summaryRecordID(summary)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, summary)
+	}
+	return out
 }
 func sceneCardStatusPolicy(opts Options) store.SceneCardStatusPolicy {
 	if opts.SceneCardStatusPolicy != "" {

@@ -1,10 +1,7 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -209,7 +206,12 @@ func newInspectSummaryCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rec, err := latestSummaryRecord(p, args[0])
+			s, err := openIndex(p)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			rec, err := s.InspectSummary(args[0])
 			if err != nil {
 				return err
 			}
@@ -294,52 +296,7 @@ func normalizeReverseIndexTermType(value string) (string, error) {
 	}
 }
 
-func latestSummaryRecord(p *project.Project, target string) (compiler.SummaryRecord, error) {
-	target = strings.TrimSpace(target)
-	path := p.Path(filepath.Join(project.ModelDir, "summaries.jsonl"))
-	f, err := os.Open(path)
-	if err != nil {
-		return compiler.SummaryRecord{}, fmt.Errorf("read summaries: %w", err)
-	}
-	defer f.Close()
-
-	wantBook := target == "book" || target == "book_summary"
-	var latest compiler.SummaryRecord
-	found := false
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		var rec compiler.SummaryRecord
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
-		}
-		if wantBook {
-			if rec.RecordType != "book_summary" {
-				continue
-			}
-		} else if rec.RecordType != "chapter_summary" || rec.ChapterID != target {
-			continue
-		}
-		latest = rec
-		found = true
-	}
-	if err := sc.Err(); err != nil {
-		return compiler.SummaryRecord{}, fmt.Errorf("read summaries: %w", err)
-	}
-	if !found {
-		if wantBook {
-			return compiler.SummaryRecord{}, fmt.Errorf("no book summary found: run 'story compile --layer summaries'")
-		}
-		return compiler.SummaryRecord{}, fmt.Errorf("no chapter summary found for %s: run 'story compile --layer summaries'", target)
-	}
-	return latest, nil
-}
-
-func printSummaryRecord(rec compiler.SummaryRecord) {
+func printSummaryRecord(rec store.SummaryRow) {
 	switch rec.RecordType {
 	case "book_summary":
 		info("Book summary")
@@ -352,11 +309,11 @@ func printSummaryRecord(rec compiler.SummaryRecord) {
 	default:
 		info("Summary: %s", rec.RecordType)
 	}
-	if rec.Generation.GeneratedAt != "" {
-		info("Generated: %s", rec.Generation.GeneratedAt)
+	if rec.GeneratedAt != "" {
+		info("Generated: %s", rec.GeneratedAt)
 	}
-	if rec.Generation.Model != "" {
-		info("Model:     %s", rec.Generation.Model)
+	if rec.GenerationModel != "" {
+		info("Model:     %s", rec.GenerationModel)
 	}
 	info("")
 	info("Summary:")

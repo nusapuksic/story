@@ -110,6 +110,9 @@ func Rebuild(p *project.Project) (retErr error) {
 		); err != nil {
 			return err
 		}
+		if err := s.IndexSummariesJSONL(p.Path(filepath.Join(project.ModelDir, "summaries.jsonl"))); err != nil {
+			return err
+		}
 	}
 
 	if err := s.Close(); err != nil {

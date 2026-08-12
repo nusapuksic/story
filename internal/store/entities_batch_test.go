@@ -101,6 +101,14 @@ func TestReplaceEntityProjectionForChapterReplacesSingleChapterOnly(t *testing.T
 		t.Fatalf("ReplaceEntityProjectionForChapter ch-0002: %v", err)
 	}
 
+	maraMatches, err := s.SearchEntities("Maraa", "", 10)
+	if err != nil {
+		t.Fatalf("SearchEntities alias before replacement: %v", err)
+	}
+	if len(maraMatches) != 1 || maraMatches[0].ID != "ent-001" {
+		t.Fatalf("SearchEntities alias = %#v, want ent-001", maraMatches)
+	}
+
 	if err := s.ReplaceEntityProjectionForChapter("ch-0001", nil, nil, 0, 0, "2026-01-03T00:00:00Z"); err != nil {
 		t.Fatalf("ReplaceEntityProjectionForChapter ch-0001 empty: %v", err)
 	}
@@ -126,6 +134,20 @@ func TestReplaceEntityProjectionForChapterReplacesSingleChapterOnly(t *testing.T
 	}
 	if len(ch2Entities) != 1 || ch2Entities[0].ID != "ent-002" {
 		t.Fatalf("ch-0002 entities = %#v, want only ent-002", ch2Entities)
+	}
+	maraMatches, err = s.SearchEntities("Mara", "", 10)
+	if err != nil {
+		t.Fatalf("SearchEntities Mara after replacement: %v", err)
+	}
+	if len(maraMatches) != 0 {
+		t.Fatalf("SearchEntities Mara after replacement = %#v, want no stale ent-001", maraMatches)
+	}
+	eliasMatches, err := s.SearchEntities("Elias", "ch-0002", 10)
+	if err != nil {
+		t.Fatalf("SearchEntities Elias after replacement: %v", err)
+	}
+	if len(eliasMatches) != 1 || eliasMatches[0].ID != "ent-002" {
+		t.Fatalf("SearchEntities Elias after replacement = %#v, want ent-002", eliasMatches)
 	}
 
 	ch1Committed, err := s.IsEntitySnapshotCommitted("ch-0001")

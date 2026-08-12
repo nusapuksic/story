@@ -89,6 +89,9 @@ func (c compileArtifactCommitter) CommitVerification(output verificationWorkOutp
 }
 
 func (c compileArtifactCommitter) CommitSummary(output summaryWorkOutput) error {
+	if c.st == nil {
+		return fmt.Errorf("commit summary: store is nil")
+	}
 	if c.summariesFile == nil {
 		return fmt.Errorf("commit summary: summaries file is nil")
 	}
@@ -98,10 +101,16 @@ func (c compileArtifactCommitter) CommitSummary(output summaryWorkOutput) error 
 	if err := appendJSONL(c.summariesFile, output.Record); err != nil {
 		return err
 	}
+	if err := c.st.InsertSummary(summaryRowFromRecord(*output.Record)); err != nil {
+		return err
+	}
 	return c.recordCommit(output.Staged)
 }
 
 func (c compileArtifactCommitter) CommitBookSummary(ref StagedResultRef, record *SummaryRecord) error {
+	if c.st == nil {
+		return fmt.Errorf("commit book summary: store is nil")
+	}
 	if c.summariesFile == nil {
 		return fmt.Errorf("commit book summary: summaries file is nil")
 	}
@@ -109,6 +118,9 @@ func (c compileArtifactCommitter) CommitBookSummary(ref StagedResultRef, record 
 		return fmt.Errorf("commit book summary: record is nil")
 	}
 	if err := appendJSONL(c.summariesFile, record); err != nil {
+		return err
+	}
+	if err := c.st.InsertSummary(summaryRowFromRecord(*record)); err != nil {
 		return err
 	}
 	return c.recordCommit(ref)

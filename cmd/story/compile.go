@@ -375,6 +375,10 @@ func newCompileStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			summaries, chapterSummaries, bookSummaries, err := st.SummaryCounts()
+			if err != nil {
+				return err
+			}
 			recoveryEvents, err := indexedSceneCardRecoveryEvents(st)
 			if err != nil {
 				return err
@@ -400,6 +404,9 @@ func newCompileStatusCmd() *cobra.Command {
 					"scene_card_recovery_events":       recoveryEvents,
 					"entities":                         entities,
 					"occurrences":                      occurrences,
+					"summaries":                        summaries,
+					"chapter_summaries":                chapterSummaries,
+					"book_summaries":                   bookSummaries,
 					"character_roles":                  roles,
 					"principal_characters":             principalRoles,
 				})
@@ -415,6 +422,9 @@ func newCompileStatusCmd() *cobra.Command {
 			printSceneCardRecoveryHints(recoveryEvents)
 			info("Entities:              %d", entities)
 			info("Occurrences:           %d", occurrences)
+			info("Summaries:             %d", summaries)
+			info("Chapter summaries:     %d", chapterSummaries)
+			info("Book summaries:        %d", bookSummaries)
 			info("Character roles:       %d", roles)
 			info("Principal characters:  %d", principalRoles)
 			return nil

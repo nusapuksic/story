@@ -100,7 +100,7 @@ func runAsk(ctx context.Context, question, mode, chapterID string, maxEvidence i
 		return fail(fmt.Errorf("record ask model: %w", err))
 	}
 
-	summaries, err := summaryContextForAsk(p, st, chapterID)
+	summaries, err := summaryContextForAsk(st, chapterID)
 	if err != nil {
 		return fail(err)
 	}

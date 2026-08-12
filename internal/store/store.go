@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS paragraphs_fts USING fts5(id UNINDEXED, chapter_id UNINDEXED, text);
 CREATE VIRTUAL TABLE IF NOT EXISTS scene_cards_fts USING fts5(scene_id UNINDEXED, title, summary);
+CREATE VIRTUAL TABLE IF NOT EXISTS summaries_fts USING fts5(record_id UNINDEXED, summary, themes, unresolved);
+CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(id UNINDEXED, canonical_name, aliases, type);
 CREATE TABLE IF NOT EXISTS imports (
 	run_id      TEXT PRIMARY KEY,
 	type        TEXT NOT NULL,
@@ -83,6 +85,26 @@ CREATE TABLE IF NOT EXISTS scene_cards (
 	status           TEXT NOT NULL,
 	raw_json         TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS summaries (
+	record_id                   TEXT PRIMARY KEY,
+	record_type                 TEXT NOT NULL,
+	chapter_id                  TEXT,
+	chapter_title               TEXT NOT NULL,
+	summary                     TEXT NOT NULL,
+	themes_json                 TEXT NOT NULL,
+	unresolved_json             TEXT NOT NULL,
+	evidence_json               TEXT NOT NULL,
+	source_records_json         TEXT NOT NULL,
+	character_final_states_json TEXT NOT NULL,
+	generation_run              TEXT NOT NULL,
+	generation_model            TEXT NOT NULL,
+	prompt_version              TEXT NOT NULL,
+	generated_at                TEXT NOT NULL,
+	character_roles_hash        TEXT NOT NULL,
+	status                      TEXT NOT NULL,
+	raw_json                    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS summaries_chapter ON summaries(chapter_id);
 CREATE TABLE IF NOT EXISTS entities (
 	id               TEXT PRIMARY KEY,
 	chapter_id       TEXT NOT NULL REFERENCES chapters(id),
