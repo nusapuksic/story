@@ -39,8 +39,9 @@ type OrderedExecutorOptions struct {
 	WorkerLimit int
 }
 
-// RunOrderedWork runs work items with bounded goroutines, then commits only the
-// contiguous successful prefix in deterministic sequence order.
+// RunOrderedWork runs work items with bounded goroutines, then commits the
+// contiguous successful prefix in deterministic sequence order as it becomes
+// available.
 func RunOrderedWork[I, O any](
 	ctx context.Context,
 	items []OrderedWorkItem[I],
@@ -126,16 +127,21 @@ func RunOrderedWork[I, O any](
 		}
 	}()
 
-	wg.Wait()
-	close(results)
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
 	byPosition := make(map[int]orderedWorkerResult[I, O], len(ordered))
-	for result := range results {
-		byPosition[result.position] = result
+	nextCommitIndex := 0
+	received := 0
+	drainResults := func() {
+		for range results {
+		}
 	}
 
-	for _, queued := range ordered {
-		result, ok := byPosition[queued.position]
+	for received < len(ordered) {
+		result, ok := <-results
 		if !ok {
 			if err := getFirstErr(); err != nil {
 				return err
@@ -143,17 +149,39 @@ func RunOrderedWork[I, O any](
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			return fmt.Errorf("ordered executor: missing result for sequence %d", queued.item.Sequence)
+			if nextCommitIndex < len(ordered) {
+				return fmt.Errorf("ordered executor: missing result for sequence %d", ordered[nextCommitIndex].item.Sequence)
+			}
+			return nil
 		}
-		if result.err != nil {
-			return result.err
-		}
-		if err := commit(ctx, OrderedWorkResult[O]{
-			Sequence: result.item.Sequence,
-			TaskID:   result.item.TaskID,
-			Output:   result.output,
-		}); err != nil {
-			return fmt.Errorf("commit ordered work sequence %d: %w", result.item.Sequence, err)
+		received++
+		byPosition[result.position] = result
+
+		for nextCommitIndex < len(ordered) {
+			queued := ordered[nextCommitIndex]
+			result, ok := byPosition[queued.position]
+			if !ok {
+				break
+			}
+			delete(byPosition, queued.position)
+			if result.err != nil {
+				cancel()
+				drainResults()
+				if firstErr := getFirstErr(); errors.Is(result.err, context.Canceled) && firstErr != nil {
+					return firstErr
+				}
+				return result.err
+			}
+			if err := commit(ctx, OrderedWorkResult[O]{
+				Sequence: result.item.Sequence,
+				TaskID:   result.item.TaskID,
+				Output:   result.output,
+			}); err != nil {
+				cancel()
+				drainResults()
+				return fmt.Errorf("commit ordered work sequence %d: %w", result.item.Sequence, err)
+			}
+			nextCommitIndex++
 		}
 	}
 

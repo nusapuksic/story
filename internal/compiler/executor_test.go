@@ -88,6 +88,65 @@ func TestRunOrderedWorkOutOfOrderCompletionCommitsInOrder(t *testing.T) {
 	}
 }
 
+func TestRunOrderedWorkCommitsReadyPrefixBeforeAllWorkersFinish(t *testing.T) {
+	items := makeOrderedIntItems(2)
+	releaseSecond := make(chan struct{})
+	secondStarted := make(chan struct{})
+	committed := make(chan int, 2)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- RunOrderedWork(context.Background(), items, OrderedExecutorOptions{WorkerLimit: 2}, func(ctx context.Context, item OrderedWorkItem[int]) (int, error) {
+			if item.Sequence == 1 {
+				close(secondStarted)
+				select {
+				case <-releaseSecond:
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				}
+			}
+			return item.Input, nil
+		}, func(ctx context.Context, result OrderedWorkResult[int]) error {
+			committed <- result.Output
+			return nil
+		})
+	}()
+
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second worker did not start")
+	}
+
+	select {
+	case got := <-committed:
+		if got != 0 {
+			t.Fatalf("first streamed commit = %d, want 0", got)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("first result was not committed before later worker finished")
+	}
+
+	close(releaseSecond)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunOrderedWork: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunOrderedWork did not finish")
+	}
+
+	select {
+	case got := <-committed:
+		if got != 1 {
+			t.Fatalf("second streamed commit = %d, want 1", got)
+		}
+	default:
+		t.Fatal("missing second commit")
+	}
+}
 func TestRunOrderedWorkCommitsContiguousPrefixBeforeFailure(t *testing.T) {
 	boom := errors.New("boom")
 	items := makeOrderedIntItems(5)

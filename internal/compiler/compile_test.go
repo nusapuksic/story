@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nusapuksic/story/internal/compiler"
 	"github.com/nusapuksic/story/internal/ids"
@@ -427,6 +428,83 @@ func TestCompileReportsSceneCardProgress(t *testing.T) {
 	}
 }
 
+func TestCompileReportsSceneCardCompletionBeforeChapterFinishes(t *testing.T) {
+	p, st := buildTestProject(t)
+
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer: compiler.LayerScenes,
+	})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
+
+	secondStarted := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	completionEvents := make(chan string, 2)
+	release := func() {
+		select {
+		case <-releaseSecond:
+		default:
+			close(releaseSecond)
+		}
+	}
+	defer release()
+
+	fake := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
+		if idx == 1 {
+			close(secondStarted)
+			<-releaseSecond
+		}
+		return `{"title":"Mara walks","summary":"Mara walks the road.","evidence":[]}`
+	}}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+			Layer:              compiler.LayerSceneCards,
+			ExtractionProvider: fake,
+			ExtractionModel:    "fake-model",
+			Progress: func(event compiler.ProgressEvent) {
+				if event.Layer == compiler.LayerSceneCards && event.Stage == "item-complete" {
+					completionEvents <- event.SceneID
+				}
+			},
+		})
+		done <- err
+	}()
+
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second scene extraction did not start")
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("compile finished before second scene was released: %v", err)
+	default:
+	}
+
+	select {
+	case sceneID := <-completionEvents:
+		if sceneID == "" {
+			t.Fatal("first scene-card completion event had no scene id")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("first scene-card completion was not reported while the chapter was still running")
+	}
+
+	release()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("compile scene-cards: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("compile scene-cards did not finish")
+	}
+}
 func principalRoleResponseFromPrompt(t *testing.T, prompt string) string {
 	t.Helper()
 	entityID := promptIDAfter(t, prompt, "Character entity records:", "entity-")
