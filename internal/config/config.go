@@ -35,14 +35,18 @@ type ManuscriptConfig struct {
 type CompileConfig struct {
 	TargetContextTokens int `toml:"target_context_tokens"`
 	// MaximumOutputTokens caps generated output tokens; zero leaves the provider default unchanged.
-	MaximumOutputTokens     int     `toml:"maximum_output_tokens"`
-	WindowOverlapParagraphs int     `toml:"window_overlap_paragraphs"`
-	SceneDetection          string  `toml:"scene_detection"`
-	SceneCardFailurePolicy  string  `toml:"scene_card_failure_policy"`
-	Verification            bool    `toml:"verification"`
-	VerificationMode        string  `toml:"verification_mode"`
-	AutoAcceptVerified      bool    `toml:"auto_accept_verified"`
-	Temperature             float64 `toml:"temperature"`
+	MaximumOutputTokens     int    `toml:"maximum_output_tokens"`
+	WindowOverlapParagraphs int    `toml:"window_overlap_paragraphs"`
+	SceneDetection          string `toml:"scene_detection"`
+	// SceneTargetCount requests roughly even deterministic fallback scenes when scene detection finds no boundaries.
+	SceneTargetCount int `toml:"scene_target_count"`
+	// SceneMaxParagraphs is a legacy deterministic fallback cap; chunks are balanced to avoid tiny tails.
+	SceneMaxParagraphs     int     `toml:"scene_max_paragraphs"`
+	SceneCardFailurePolicy string  `toml:"scene_card_failure_policy"`
+	Verification           bool    `toml:"verification"`
+	VerificationMode       string  `toml:"verification_mode"`
+	AutoAcceptVerified     bool    `toml:"auto_accept_verified"`
+	Temperature            float64 `toml:"temperature"`
 }
 
 // LLMProviderConfig configures one LLM provider endpoint.

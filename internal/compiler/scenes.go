@@ -19,7 +19,8 @@ const (
 	sceneDetectionModel          = "model"
 	sceneDetectionParagraphCount = "paragraph-count"
 
-	defaultSceneMaxParagraphs = 24
+	defaultSceneTargetCount         = 4
+	minDeterministicSceneParagraphs = 2
 
 	boundarySourceExplicit       = "explicit"
 	boundarySourceModel          = "model"
@@ -142,51 +143,139 @@ func buildExplicitBreakMap(
 	return out
 }
 
+type deterministicSceneSpan struct {
+	start      int
+	end        int
+	sceneCount int
+}
+
 func mergeParagraphCountBreaks(paragraphs []store.ParagraphRow, breakSources map[string]string, cfg sceneDetectConfig) {
+	if len(paragraphs) <= 1 || breakSources == nil || !sceneDetectionUsesParagraphCount(cfg) {
+		return
+	}
+
+	spans := deterministicSceneSpans(paragraphs, breakSources)
+	if len(spans) == 0 {
+		return
+	}
+
+	baseCount := 0
 	maxParagraphs := effectiveSceneMaxParagraphs(cfg)
-	if maxParagraphs <= 0 || len(paragraphs) <= maxParagraphs || !sceneDetectionUsesParagraphCount(cfg) {
-		return
-	}
-	if breakSources == nil {
-		return
-	}
-
-	step := maxParagraphs - normalizedOverlapParagraphs(cfg.OverlapParagraphs, maxParagraphs)
-	if step <= 0 {
-		step = 1
+	for i := range spans {
+		spans[i].sceneCount = 1
+		if maxParagraphs > 0 {
+			spans[i].sceneCount = clampDeterministicSceneCount(ceilDiv(spanLength(spans[i]), maxParagraphs), spanLength(spans[i]))
+		}
+		baseCount += spans[i].sceneCount
 	}
 
+	desiredCount := effectiveSceneTargetCount(cfg)
+	if desiredCount < baseCount {
+		desiredCount = baseCount
+	}
+	addDeterministicSceneCount(spans, desiredCount-baseCount)
+
+	for _, span := range spans {
+		addEvenParagraphCountBreaks(paragraphs, span, breakSources)
+	}
+}
+
+func deterministicSceneSpans(paragraphs []store.ParagraphRow, breakSources map[string]string) []deterministicSceneSpan {
+	spans := make([]deterministicSceneSpan, 0, len(breakSources)+1)
 	spanStart := 0
 	for i, p := range paragraphs {
 		_, existingBreak := breakSources[p.ID]
 		if !existingBreak && i != len(paragraphs)-1 {
 			continue
 		}
-		addParagraphCountBreaks(paragraphs, spanStart, i, maxParagraphs, step, breakSources)
+		if spanStart <= i {
+			spans = append(spans, deterministicSceneSpan{start: spanStart, end: i, sceneCount: 1})
+		}
 		spanStart = i + 1
+	}
+	return spans
+}
+
+func addDeterministicSceneCount(spans []deterministicSceneSpan, additional int) {
+	for additional > 0 {
+		best := -1
+		bestScore := 0.0
+		for i, span := range spans {
+			if span.sceneCount >= maxDeterministicSceneCount(spanLength(span)) {
+				continue
+			}
+			score := float64(spanLength(span)) / float64(span.sceneCount+1)
+			if best < 0 || score > bestScore {
+				best = i
+				bestScore = score
+			}
+		}
+		if best < 0 {
+			return
+		}
+		spans[best].sceneCount++
+		additional--
 	}
 }
 
-func addParagraphCountBreaks(paragraphs []store.ParagraphRow, start, end, maxParagraphs, step int, breakSources map[string]string) {
-	if start > end || end-start+1 <= maxParagraphs {
+func addEvenParagraphCountBreaks(paragraphs []store.ParagraphRow, span deterministicSceneSpan, breakSources map[string]string) {
+	spanLen := spanLength(span)
+	sceneCount := clampDeterministicSceneCount(span.sceneCount, spanLen)
+	if sceneCount <= 1 {
 		return
 	}
-	for cut := start + step - 1; cut < end; cut += step {
+
+	baseSize := spanLen / sceneCount
+	extra := spanLen % sceneCount
+	cursor := span.start
+	for sceneIndex := 0; sceneIndex < sceneCount-1; sceneIndex++ {
+		size := baseSize
+		if sceneIndex < extra {
+			size++
+		}
+		cut := cursor + size - 1
+		if cut >= span.end {
+			return
+		}
 		pid := paragraphs[cut].ID
 		if _, exists := breakSources[pid]; !exists {
 			breakSources[pid] = boundarySourceParagraphCount
 		}
+		cursor = cut + 1
 	}
 }
 
-func normalizedOverlapParagraphs(overlap, maxParagraphs int) int {
-	if overlap < 0 {
+func spanLength(span deterministicSceneSpan) int {
+	if span.end < span.start {
 		return 0
 	}
-	if overlap >= maxParagraphs {
-		return maxParagraphs - 1
+	return span.end - span.start + 1
+}
+
+func clampDeterministicSceneCount(sceneCount, paragraphCount int) int {
+	if paragraphCount <= 0 || sceneCount <= 1 {
+		return 1
 	}
-	return overlap
+	maxScenes := maxDeterministicSceneCount(paragraphCount)
+	if sceneCount > maxScenes {
+		return maxScenes
+	}
+	return sceneCount
+}
+
+func maxDeterministicSceneCount(paragraphCount int) int {
+	maxScenes := paragraphCount / minDeterministicSceneParagraphs
+	if maxScenes < 1 {
+		return 1
+	}
+	return maxScenes
+}
+
+func ceilDiv(n, d int) int {
+	if d <= 0 {
+		return 0
+	}
+	return (n + d - 1) / d
 }
 
 // buildScenesFromBreaks converts the boundary map into ordered SceneRecord
@@ -363,6 +452,7 @@ type sceneDetectConfig struct {
 	TargetContextTokens int
 	MaxOutputTokens     int
 	OverlapParagraphs   int
+	TargetSceneCount    int
 	MaxParagraphs       int
 	Temperature         float64
 }
@@ -383,15 +473,22 @@ func sceneDetectionUsesParagraphCount(cfg sceneDetectConfig) bool {
 	if mode == sceneDetectionExplicit {
 		return false
 	}
-	return mode == sceneDetectionParagraphCount || cfg.MaxParagraphs > 0
+	return mode == sceneDetectionParagraphCount || cfg.TargetSceneCount > 0 || cfg.MaxParagraphs > 0
+}
+
+func effectiveSceneTargetCount(cfg sceneDetectConfig) int {
+	if cfg.TargetSceneCount > 0 {
+		return cfg.TargetSceneCount
+	}
+	if normalizeSceneDetectionMode(cfg.Mode) == sceneDetectionParagraphCount && cfg.MaxParagraphs <= 0 {
+		return defaultSceneTargetCount
+	}
+	return 0
 }
 
 func effectiveSceneMaxParagraphs(cfg sceneDetectConfig) int {
 	if cfg.MaxParagraphs > 0 {
 		return cfg.MaxParagraphs
-	}
-	if normalizeSceneDetectionMode(cfg.Mode) == sceneDetectionParagraphCount {
-		return defaultSceneMaxParagraphs
 	}
 	return 0
 }

@@ -119,6 +119,8 @@ func Compile(ctx context.Context, p *project.Project, st *store.Store, opts Opti
 		TargetContextTokens: p.Config.Compile.TargetContextTokens,
 		MaxOutputTokens:     p.Config.Compile.MaximumOutputTokens,
 		OverlapParagraphs:   p.Config.Compile.WindowOverlapParagraphs,
+		TargetSceneCount:    p.Config.Compile.SceneTargetCount,
+		MaxParagraphs:       p.Config.Compile.SceneMaxParagraphs,
 		Temperature:         p.Config.Compile.Temperature,
 	}
 	if cfg.TargetContextTokens <= 0 {
