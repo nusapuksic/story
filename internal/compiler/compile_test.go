@@ -660,6 +660,69 @@ func assertRunPendingPayloadOmits(t *testing.T, p *project.Project, runID, layer
 	}
 }
 
+func TestCompileSceneCardsSkipsTruncatedJSONInsteadOfSavingFallback(t *testing.T) {
+	p, st := buildTestProject(t)
+
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer: compiler.LayerScenes,
+	})
+	if err != nil {
+		t.Fatalf("compile scenes: %v", err)
+	}
+	paragraphs, err := st.ParagraphsByChapter("ch-0001")
+	if err != nil {
+		t.Fatalf("ParagraphsByChapter: %v", err)
+	}
+	if len(paragraphs) < 2 {
+		t.Fatalf("expected two paragraphs, got %d", len(paragraphs))
+	}
+
+	truncated := `{"title":"Unfinished","summary":"Mara starts`
+	fake := &fakeProvider{responses: []string{
+		truncated,
+		truncated,
+		`{"title":"Sunrise","summary":"The sun rises over the hills.","evidence":["` + paragraphs[1].ID + `"]}`,
+	}}
+
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerSceneCards,
+		ExtractionProvider: fake,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile scene-cards should skip truncated JSON: %v", err)
+	}
+	if result.CardsBuilt != 1 {
+		t.Fatalf("CardsBuilt = %d, want 1 valid card", result.CardsBuilt)
+	}
+	if result.SceneCardRecoveries != 0 {
+		t.Fatalf("SceneCardRecoveries = %d, want 0 for skipped truncated output", result.SceneCardRecoveries)
+	}
+	if len(fake.requests) != 3 {
+		t.Fatalf("Generate calls = %d, want 3", len(fake.requests))
+	}
+
+	cards, err := st.AllSceneCards()
+	if err != nil {
+		t.Fatalf("AllSceneCards: %v", err)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %d, want only the valid second scene card", len(cards))
+	}
+	if cards[0].SceneID == "" || len(cards[0].Evidence) != 1 || cards[0].Evidence[0] != paragraphs[1].ID {
+		t.Fatalf("stored card = %#v, want valid second scene card", cards[0])
+	}
+
+	scenesJSONL, err := os.ReadFile(p.Path(filepath.Join(project.ModelDir, "scenes.jsonl")))
+	if err != nil {
+		t.Fatalf("read scenes.jsonl: %v", err)
+	}
+	for _, want := range []string{`"status":"skipped"`, `"action":"skipped"`, `"attempts":2`, `truncated model JSON after retry`} {
+		if !strings.Contains(string(scenesJSONL), want) {
+			t.Fatalf("scenes.jsonl missing %q:\n%s", want, scenesJSONL)
+		}
+	}
+}
 func TestCompileSceneCardsRecoversInvalidEvidence(t *testing.T) {
 	p, st := buildTestProject(t)
 

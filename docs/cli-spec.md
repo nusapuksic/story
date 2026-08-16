@@ -206,6 +206,8 @@ target_context_tokens = 12000
 maximum_output_tokens = 0
 window_overlap_paragraphs = 3
 scene_detection = "hybrid"
+scene_target_count = 0
+scene_max_paragraphs = 0
 scene_card_failure_policy = "retry-fallback"
 verification = true
 verification_mode = "all"
@@ -678,6 +680,8 @@ manual
 
 A chapter boundary is a hard scene boundary in v0.1. Scenes do not span chapters.
 
+When deterministic fallback scene splitting is enabled, the preferred control is `[compile].scene_target_count`: `3` or `4` asks the compiler to divide otherwise unbroken chapter spans into roughly even scene-sized ranges. `scene_detection = "paragraph-count"` uses a default target of 4 when no target or max is set. `[compile].scene_max_paragraphs` remains available as a legacy cap, but it is converted into a balanced scene count so a chapter does not end with a dangling one-paragraph scene unless existing explicit/model boundaries already force one.
+
 Layer 3: Scene cards
 
 Each scene receives a compact structured record:
@@ -980,7 +984,7 @@ The application must:
 6. store the raw response with the run record;
 7. write valid records as candidates.
 
-Invalid model output must never be written as accepted story state. For author-facing scene-card extraction, the default `retry-fallback` policy retries invalid structured output once with validation feedback, retries timed-out scene-card calls with a compact evidence packet, then writes a deterministic fallback scene card using only paragraphs from the scene. Oversized full-chapter scenes receive one scene-card attempt; successful cards are kept, while failed initial attempts are recorded as skipped scene-card markers that supersede older cards without entering the live index. Normal terminal compile runs must surface timestamped live progress for selected layers, chapter-level work, and long-running scene-card/summary/entity/verification calls; `--json` output remains machine-readable and is never timestamp-prefixed. When scene detection produces a single scene spanning an entire chapter with enough paragraphs to split, terminal progress and `story compile status` must suggest adding an explicit scene break and rerunning `story compile --layer scenes --chapter <chapter-id> --force`. Recovery events must be surfaced in compile output, `story compile status`, and `.story/runs/<run-id>/summary.json`, including scene ID, chapter ID, recovery action, and a chapter-level regeneration hint. Strict failure is available with `story compile --strict-extraction` or `[compile].scene_card_failure_policy = "strict"`.
+Invalid model output must never be written as accepted story state. For author-facing scene-card extraction, the default `retry-fallback` policy retries invalid structured output once with validation feedback, retries timed-out scene-card calls with a compact evidence packet, and may write a deterministic fallback scene card for semantic validation failures using only paragraphs from the scene. Incomplete or truncated JSON after retry is recorded as a skipped scene-card marker instead of an accepted fallback card. Oversized full-chapter scenes receive one scene-card attempt; successful cards are kept, while failed initial attempts are recorded as skipped scene-card markers that supersede older cards without entering the live index. Normal terminal compile runs must surface timestamped live progress for selected layers, chapter-level work, and long-running scene-card/summary/entity/verification calls; `--json` output remains machine-readable and is never timestamp-prefixed. When scene detection produces a single scene spanning an entire chapter with enough paragraphs to split, terminal progress and `story compile status` must suggest adding an explicit scene break and rerunning `story compile --layer scenes --chapter <chapter-id> --force`. Recovery events must be surfaced in compile output, `story compile status`, and `.story/runs/<run-id>/summary.json`, including scene ID, chapter ID, recovery action, and a chapter-level regeneration hint. Strict failure is available with `story compile --strict-extraction` or `[compile].scene_card_failure_policy = "strict"`.
 
 10.6 Evidence verification
 

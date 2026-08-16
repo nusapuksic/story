@@ -236,7 +236,7 @@ func TestExtractSceneCardMissingTitleAndSummaryUsesSceneText(t *testing.T) {
 	}
 }
 
-func TestExtractSceneCardTruncatedJSONUsesSceneText(t *testing.T) {
+func TestExtractSceneCardTruncatedJSONSkipsInsteadOfFallback(t *testing.T) {
 	paragraphs := []store.ParagraphRow{
 		{ID: "p-A", ChapterID: "ch-0001", Ordinal: 1, Text: "Mara accepts the key and enters the lower vault. The guard waits outside."},
 	}
@@ -250,16 +250,26 @@ func TestExtractSceneCardTruncatedJSONUsesSceneText(t *testing.T) {
 
 	card, err := compiler.ExtractSceneCardForTest(fake, scene, paragraphs, "test-model")
 	if err != nil {
-		t.Fatalf("expected truncated JSON to fall back to scene text, got %v", err)
+		t.Fatalf("expected truncated JSON to skip scene card, got %v", err)
 	}
-	if card.Summary != "Mara accepts the key and enters the lower vault." {
-		t.Errorf("Summary = %q", card.Summary)
+	if card.Status != compiler.SceneCardStatusSkipped {
+		t.Fatalf("Status = %q, want skipped", card.Status)
 	}
-	if card.Title != "Mara accepts the key and enters the lower vault" {
-		t.Errorf("Title = %q", card.Title)
+	if card.Title != "" || card.Summary != "" || len(card.Evidence) != 0 {
+		t.Fatalf("skipped card should not contain fallback title/summary/evidence: %#v", card)
 	}
-	if len(card.Evidence) != 1 || card.Evidence[0] != "p-A" {
-		t.Errorf("Evidence = %v", card.Evidence)
+	if card.Recovery == nil || card.Recovery.Action != "skipped" || card.Recovery.Attempts != 2 {
+		t.Fatalf("Recovery = %#v, want skipped after 2 attempts", card.Recovery)
+	}
+	if !strings.Contains(card.Recovery.Reason, "truncated model JSON") {
+		t.Fatalf("Recovery reason = %q, want truncated JSON", card.Recovery.Reason)
+	}
+	if len(fake.requests) != 2 {
+		t.Fatalf("Generate calls = %d, want 2", len(fake.requests))
+	}
+	retryPrompt := fake.requests[1].Messages[1].Content
+	if !strings.Contains(retryPrompt, "incomplete JSON") {
+		t.Fatalf("retry prompt missing incomplete JSON guidance:\n%s", retryPrompt)
 	}
 }
 

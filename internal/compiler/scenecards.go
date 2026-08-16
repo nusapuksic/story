@@ -20,7 +20,7 @@ import (
 // Scene-card failure policies.
 const (
 	// SceneCardFailurePolicyRetryFallback retries invalid scene-card model output once,
-	// then writes a deterministic valid fallback card if the retry still fails.
+	// then writes a deterministic valid fallback card for semantic validation failures. Truncated JSON is skipped.
 	SceneCardFailurePolicyRetryFallback = "retry-fallback"
 	// SceneCardFailurePolicyStrict preserves developer/debug behavior by failing
 	// the compile on invalid scene-card model output.
@@ -275,7 +275,7 @@ func objectText(value map[string]any) string {
 
 // extractSceneCard calls the LLM extraction prompt for one scene, validates
 // the response, and returns a SceneCardRecord. Invalid model output is retried
-// once by default, then replaced with a deterministic valid fallback card.
+// once by default. Semantic validation failures may fall back to a source-text card; truncated JSON is skipped instead of saved as a bad fallback.
 // Timeout failures get a compact-context retry before falling back.
 func extractSceneCard(
 	ctx context.Context,
@@ -345,6 +345,12 @@ func extractSceneCard(
 	}
 
 	reason := sceneCardRecoveryReason(parseErr, retryParseErr, retryGenErr)
+	if shouldSkipSceneCardAfterValidationFailure(parseErr, retryParseErr, retryGenErr) {
+		reason = "truncated model JSON after retry: " + reason
+		emitProgress(progress, ProgressEvent{Layer: LayerSceneCards, Stage: "skip", ChapterID: scene.ChapterID, SceneID: scene.ID, Message: fmt.Sprintf("Scene card %s: retry returned incomplete JSON; skipping card", scene.ID)})
+		recordSceneCardSkippedTaskWithAttempts(run, scene.ID, loadedPrompt.Version, reason, 2)
+		return skippedSceneCardRecordWithAttempts(scene.ID, runID(run), model, loadedPrompt.Version, policy, reason, 2), nil
+	}
 	emitProgress(progress, ProgressEvent{Layer: LayerSceneCards, Stage: "fallback", ChapterID: scene.ChapterID, SceneID: scene.ID, Message: fmt.Sprintf("Scene card %s: retry failed; writing fallback card", scene.ID)})
 	fallback := fallbackSceneCardFromSceneText(scene.ID, paragraphs, runID(run), model, loadedPrompt.Version)
 	fallback.Recovery = &SceneCardRecovery{
@@ -489,10 +495,21 @@ func sceneCardRowFromRecord(card SceneCardRecord) store.SceneCardRow {
 }
 
 func recordSceneCardSkippedTask(run *Run, sceneID, promptVersion, reason string) {
+	recordSceneCardSkippedTaskWithAttempts(run, sceneID, promptVersion, reason, 1)
+}
+
+func recordSceneCardSkippedTaskWithAttempts(run *Run, sceneID, promptVersion, reason string, attempts int) {
 	recordSceneCardTask(run, ids.NewTaskID(), sceneID, "scene-extraction-skipped", TaskStatusSkipped, promptVersion, reason)
 }
 
 func skippedSceneCardRecord(sceneID, runID, model, promptVersion, policy, reason string) *SceneCardRecord {
+	return skippedSceneCardRecordWithAttempts(sceneID, runID, model, promptVersion, policy, reason, 1)
+}
+
+func skippedSceneCardRecordWithAttempts(sceneID, runID, model, promptVersion, policy, reason string, attempts int) *SceneCardRecord {
+	if attempts <= 0 {
+		attempts = 1
+	}
 	return &SceneCardRecord{
 		RecordType: "scene_card",
 		SceneID:    sceneID,
@@ -505,7 +522,7 @@ func skippedSceneCardRecord(sceneID, runID, model, promptVersion, policy, reason
 		Recovery: &SceneCardRecovery{
 			Policy:   policy,
 			Action:   "skipped",
-			Attempts: 1,
+			Attempts: attempts,
 			Reason:   reason,
 		},
 		Status: SceneCardStatusSkipped,
@@ -634,9 +651,19 @@ func parseSceneCardResponse(
 	}, nil
 }
 
+func shouldSkipSceneCardAfterValidationFailure(firstParseErr, retryParseErr, retryGenErr error) bool {
+	if retryParseErr != nil {
+		return isTruncatedJSONError(retryParseErr)
+	}
+	return retryGenErr != nil && isTruncatedJSONError(firstParseErr)
+}
+
 func isTruncatedJSONError(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "unexpected end of JSON input") || strings.Contains(msg, "unexpected EOF")
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unexpected end of json input") || strings.Contains(msg, "unexpected eof")
 }
 
 func fallbackSceneCardFromSceneText(sceneID string, paragraphs []store.ParagraphRow, runID, model, promptVersion string) *SceneCardRecord {
@@ -741,10 +768,15 @@ func fallbackSceneCardTitle(sceneID string) string {
 	return "Scene " + sceneID
 }
 
-func buildSceneCardRetryPrompt(scene store.SceneRow, paragraphs []store.ParagraphRow, _ error) string {
+func buildSceneCardRetryPrompt(scene store.SceneRow, paragraphs []store.ParagraphRow, validationErr error) string {
 	var sb strings.Builder
-	sb.WriteString("The previous scene-card response cited paragraph IDs outside the allowed list and was rejected.\n")
-	sb.WriteString("Return a corrected scene card. Cite only paragraph IDs from the allowed list below.\n\n")
+	if isTruncatedJSONError(validationErr) {
+		sb.WriteString("The previous scene-card response was incomplete JSON and could not be parsed.\n")
+		sb.WriteString("Return one complete JSON object matching the schema. Keep the summary concise and cite only paragraph IDs from the allowed list below.\n\n")
+	} else {
+		sb.WriteString("The previous scene-card response failed validation and may have cited paragraph IDs outside the allowed list.\n")
+		sb.WriteString("Return a corrected scene card. Cite only paragraph IDs from the allowed list below.\n\n")
+	}
 	sb.WriteString(buildSceneCardPrompt(scene, paragraphs))
 	return sb.String()
 }

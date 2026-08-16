@@ -628,7 +628,7 @@ func compileSceneCards(
 				if err := committer.CommitSceneCard(output); err != nil {
 					return err
 				}
-				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-skip", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Scene card %s %d/%d: skipped after initial failure for oversized full-chapter scene", input.Scene.ID, input.SceneIndex+1, input.SceneTotal)})
+				reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-skip", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: sceneCardSkippedProgressMessage(input, output.Card)})
 				return nil
 			}
 
@@ -651,6 +651,19 @@ func compileSceneCards(
 	return total, recoveries, nil
 }
 
+func sceneCardSkippedProgressMessage(input sceneCardWorkInput, card *SceneCardRecord) string {
+	detail := "skipped; no valid scene card was saved"
+	if card != nil && card.Recovery != nil {
+		reason := strings.ToLower(card.Recovery.Reason)
+		switch {
+		case strings.Contains(reason, "oversized full-chapter"):
+			detail = "skipped after initial failure for oversized full-chapter scene"
+		case strings.Contains(reason, "truncated model json") || strings.Contains(reason, "incomplete json"):
+			detail = "skipped after truncated model JSON; no fallback card was saved"
+		}
+	}
+	return fmt.Sprintf("Scene card %s %d/%d: %s", input.Scene.ID, input.SceneIndex+1, input.SceneTotal, detail)
+}
 func reportSceneCardWorkStart(opts Options, input sceneCardWorkInput) {
 	if input.SkipRecoveryOnFailure {
 		reportProgress(opts, ProgressEvent{Layer: LayerSceneCards, Stage: "item-start", ChapterID: input.ChapterID, SceneID: input.Scene.ID, Current: input.SceneIndex + 1, Total: input.SceneTotal, Message: fmt.Sprintf("Scene card %s %d/%d: full-chapter oversized prompt (~%d tokens); trying once without retry/fallback", input.Scene.ID, input.SceneIndex+1, input.SceneTotal, input.PromptTokens)})
