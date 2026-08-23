@@ -379,7 +379,7 @@ func extractCharacterRoles(
 			})
 			messages = append(messages, provider.Message{
 				Role:    "user",
-				Content: buildCharacterRoleRetryPrompt(input, lastParseErr),
+				Content: buildCharacterRoleRetryPrompt(),
 			})
 		}
 		req := provider.GenerationRequest{
@@ -415,36 +415,44 @@ func extractCharacterRoles(
 func buildCharacterRolePrompt(input characterRoleInputSet) string {
 	var sb strings.Builder
 	sb.WriteString("Classify book-level character roles as JSON.\n")
-	sb.WriteString("Use the supplied canonical character entity records as candidates. Only combine source_entity_ids when canonical names, aliases, and linked evidence clearly identify the same book-level character. Then classify each book-level character by narrative function.\n")
-	sb.WriteString("Return JSON matching the schema:\n")
+	sb.WriteString("Use supplied canonical character entities as candidates. Merge source_entity_ids only when names, aliases, and linked evidence clearly identify the same book-level character; classify narrative function.\n")
+	sb.WriteString("Return JSON:\n")
 	sb.WriteString(`{"characters":[{"source_entity_ids":["entity-..."],"canonical_name":"...","classification":"principal|major_supporting|supporting|minor|uncertain","role":"...","confidence":0.9,"rationale":"...","evidence":[{"scene_id":"sc-...","reason":"..."}]}]}`)
 	sb.WriteString("\nRules:\n")
-	sb.WriteString("- Use every source_entity_id exactly once.\n")
-	sb.WriteString("- Use only source_entity_ids and scene IDs listed below.\n")
-	sb.WriteString("- Do not redo entity resolution from scene text; aliases are metadata, not candidates.\n")
+	sb.WriteString("- Use every source_entity_id exactly once; never use aliases, names, or invented IDs.\n")
+	sb.WriteString("- Use only listed source_entity_ids and scene IDs.\n")
+	sb.WriteString("- evidence.scene_id must be in allowed_scene_ids for a source_entity_id in the same role; merged roles use the union.\n")
+	sb.WriteString("- Do not redo entity resolution from scene text; aliases are metadata.\n")
 	sb.WriteString("- Evidence is scene-scoped; do not invent paragraph IDs.\n")
-	sb.WriteString("- Classify narrative importance, not frequency or chapter percentage.\n")
-	sb.WriteString("- Do not force a fixed number of principal characters.\n\n")
-	sb.WriteString("Character entity records:\n")
+	sb.WriteString("- Classify importance, not frequency; do not force a fixed number of principals.\n\n")
+	writeCharacterRoleRefGuide(&sb, input)
+	return sb.String()
+}
+
+func writeCharacterRoleRefGuide(sb *strings.Builder, input characterRoleInputSet) {
+	sb.WriteString("Role refs:\n")
 	for _, entity := range input.SourceEntities {
-		sb.WriteString("- ")
+		sb.WriteString("- source_entity_id: ")
 		sb.WriteString(entity.EntityID)
-		sb.WriteString(" (")
-		sb.WriteString(entity.ChapterID)
-		sb.WriteString("): ")
+		if entity.ChapterID != "" {
+			sb.WriteString("; ch: ")
+			sb.WriteString(entity.ChapterID)
+		}
+		sb.WriteString("; name: ")
 		sb.WriteString(entity.CanonicalName)
 		if len(entity.Aliases) > 0 {
 			sb.WriteString("; aliases: ")
 			sb.WriteString(strings.Join(entity.Aliases, "; "))
 		}
+		sb.WriteString("; allowed_scene_ids: ")
 		if len(entity.EvidenceScenes) > 0 {
-			sb.WriteString("; linked scenes: ")
 			sb.WriteString(strings.Join(entity.EvidenceScenes, ", "))
+		} else {
+			sb.WriteString("(none)")
 		}
-
 		sb.WriteString("\n")
 	}
-	sb.WriteString("\nLinked scene evidence:\n")
+	sb.WriteString("\nScene refs:\n")
 	for _, scene := range input.SceneContext {
 		sb.WriteString("- ")
 		sb.WriteString(scene.SceneID)
@@ -475,33 +483,15 @@ func buildCharacterRolePrompt(input characterRoleInputSet) string {
 		}
 		sb.WriteString("\n")
 	}
-	return sb.String()
 }
 
-func buildCharacterRoleRetryPrompt(input characterRoleInputSet, parseErr error) string {
-	var sb strings.Builder
-	sb.WriteString("The previous principal character classification JSON response failed validation: ")
-	if parseErr != nil {
-		sb.WriteString(parseErr.Error())
-	} else {
-		sb.WriteString("invalid output")
-	}
-	sb.WriteString("\nRetry the same task. Return a complete replacement JSON object matching the requested schema, not a patch.\n")
-	sb.WriteString("Allowed source_entity_ids are: ")
-	sb.WriteString(strings.Join(characterRoleSourceEntityIDs(input), ", "))
-	sb.WriteString("\nUse every allowed source_entity_id exactly once. Do not use aliases, character names, or invented IDs as source_entity_ids.")
-	return sb.String()
-}
-
-func characterRoleSourceEntityIDs(input characterRoleInputSet) []string {
-	ids := make([]string, 0, len(input.SourceEntities))
-	for _, entity := range input.SourceEntities {
-		if strings.TrimSpace(entity.EntityID) != "" {
-			ids = append(ids, entity.EntityID)
-		}
-	}
-	sort.Strings(ids)
-	return ids
+func buildCharacterRoleRetryPrompt() string {
+	return strings.Join([]string{
+		"Previous response failed validation.",
+		"Return a complete replacement JSON object, not a patch.",
+		"Use the source_entity_id and allowed_scene_ids from the previous prompt.",
+		"Every evidence.scene_id must belong to a source_entity_id in the same role.",
+	}, "\n")
 }
 
 func compactProgressError(err error) string {

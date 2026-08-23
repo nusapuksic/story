@@ -507,9 +507,32 @@ func TestCompileReportsSceneCardCompletionBeforeChapterFinishes(t *testing.T) {
 }
 func principalRoleResponseFromPrompt(t *testing.T, prompt string) string {
 	t.Helper()
-	entityID := promptIDAfter(t, prompt, "Character entity records:", "entity-")
-	sceneID := promptIDAfter(t, prompt, "Linked scene evidence:", "sc-")
+	entityID := promptIDAfter(t, prompt, "Role refs:", "entity-")
+	sceneID := promptIDAfter(t, prompt, "allowed_scene_ids:", "sc-")
 	return `{"characters":[{"source_entity_ids":["` + entityID + `"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + sceneID + `","reason":"Shows Mara carrying the scene action."}]}]}`
+}
+
+func promptEntityIDForName(t *testing.T, prompt, name string) string {
+	t.Helper()
+	line := promptLineContaining(t, prompt, "; name: "+name)
+	return promptIDAfter(t, line, "source_entity_id:", "entity-")
+}
+
+func promptAllowedSceneForName(t *testing.T, prompt, name string) string {
+	t.Helper()
+	line := promptLineContaining(t, prompt, "; name: "+name)
+	return promptIDAfter(t, line, "allowed_scene_ids:", "sc-")
+}
+
+func promptLineContaining(t *testing.T, prompt, needle string) string {
+	t.Helper()
+	for _, line := range strings.Split(prompt, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	t.Fatalf("prompt missing line containing %q:\n%s", needle, prompt)
+	return ""
 }
 
 func bookSummaryWithFinalStateFromPrompt(t *testing.T, prompt, summary, state string) string {

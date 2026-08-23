@@ -66,9 +66,11 @@ func TestCompilePrincipalsWithFakeProvider(t *testing.T) {
 	}
 	prompt := principalProvider.requests[0].Messages[1].Content
 	for _, want := range []string{
-		"Use the supplied canonical character entity records as candidates.",
+		"Use supplied canonical character entities as candidates.",
 		"Do not redo entity resolution from scene text",
-		"; linked scenes: " + scenes[0].ID,
+		"evidence.scene_id must be in allowed_scene_ids",
+		"; allowed_scene_ids: " + scenes[0].ID,
+		"Scene refs:",
 		"summary: Mara meets Old Petar, chooses silence, and remembers the lake.",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -156,12 +158,17 @@ func TestCompilePrincipalsRetriesInvalidSourceEntityID(t *testing.T) {
 	}
 	retryPrompt := principalProvider.requests[1].Messages[2].Content
 	for _, want := range []string{
-		`unknown source_entity_id "entity-not-in-prompt"`,
-		"Allowed source_entity_ids are: entity-",
-		"complete replacement JSON object",
+		"Return a complete replacement JSON object, not a patch.",
+		"Use the source_entity_id and allowed_scene_ids from the previous prompt.",
+		"Every evidence.scene_id must belong to a source_entity_id in the same role.",
 	} {
 		if !strings.Contains(retryPrompt, want) {
 			t.Fatalf("retry prompt missing %q:\n%s", want, retryPrompt)
+		}
+	}
+	for _, unwanted := range []string{"entity-not-in-prompt", scenes[0].ID, "Role refs:"} {
+		if strings.Contains(retryPrompt, unwanted) {
+			t.Fatalf("retry prompt should not repeat %q:\n%s", unwanted, retryPrompt)
 		}
 	}
 
@@ -191,6 +198,68 @@ func TestCompilePrincipalsRetriesInvalidSourceEntityID(t *testing.T) {
 	}
 }
 
+func TestCompilePrincipalsRetriesEvidenceSceneNotLinkedToSourceEntity(t *testing.T) {
+	p, st := buildTestProject(t)
+	scenes := seedEntityReverseIndex(t, p, st)
+	seedSecondSceneCrewReverseIndex(t, p, st, scenes)
+	entityProvider := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","aliases":["Maraa"],"occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara","Maraa"],"confidence":0.95}]},{"canonical_name":"Crew","type":"character","aliases":["good-for-nothing crew"],"occurrences":[{"scene_id":"` + scenes[1].ID + `","surface_texts":["good-for-nothing crew"],"confidence":0.9}]}]}`}
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: entityProvider,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities: %v", err)
+	}
+
+	principalProvider := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
+		prompt := req.Messages[1].Content
+		maraID := promptEntityIDForName(t, prompt, "Mara")
+		crewID := promptEntityIDForName(t, prompt, "Crew")
+		maraScene := promptAllowedSceneForName(t, prompt, "Mara")
+		crewScene := promptAllowedSceneForName(t, prompt, "Crew")
+		if idx == 0 {
+			return `{"characters":[{"source_entity_ids":["` + maraID + `"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + crewScene + `","reason":"Wrongly cites the crew scene for Mara."}]},{"source_entity_ids":["` + crewID + `"],"classification":"supporting","role":"antagonistic group","confidence":0.7,"rationale":"The crew pressures Mara.","evidence":[]}]}`
+		}
+		return `{"characters":[{"source_entity_ids":["` + maraID + `"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + maraScene + `","reason":"Shows Mara carrying the scene action."}]},{"source_entity_ids":["` + crewID + `"],"classification":"supporting","role":"antagonistic group","confidence":0.7,"rationale":"The crew pressures Mara.","evidence":[]}]}`
+	}}
+	var events []compiler.ProgressEvent
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerPrincipals,
+		ExtractionProvider: principalProvider,
+		ExtractionModel:    "fake-model",
+		Progress: func(event compiler.ProgressEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile principals with linked-scene retry: %v", err)
+	}
+	if result.PrincipalsBuilt != 2 {
+		t.Fatalf("PrincipalsBuilt = %d, want 2", result.PrincipalsBuilt)
+	}
+	if len(principalProvider.requests) != 2 {
+		t.Fatalf("principal provider calls = %d, want 2", len(principalProvider.requests))
+	}
+	if !progressEventsContain(events, compiler.LayerPrincipals, "item-retry", "is not linked to the role source entities") {
+		t.Fatalf("progress events missing linked-scene retry reason: %#v", events)
+	}
+	retryPrompt := principalProvider.requests[1].Messages[2].Content
+	for _, want := range []string{
+		"Return a complete replacement JSON object, not a patch.",
+		"Use the source_entity_id and allowed_scene_ids from the previous prompt.",
+		"Every evidence.scene_id must belong to a source_entity_id in the same role.",
+	} {
+		if !strings.Contains(retryPrompt, want) {
+			t.Fatalf("retry prompt missing %q:\n%s", want, retryPrompt)
+		}
+	}
+	for _, unwanted := range []string{scenes[0].ID, scenes[1].ID, "Role refs:", "name: Mara", "name: Crew"} {
+		if strings.Contains(retryPrompt, unwanted) {
+			t.Fatalf("retry prompt should not repeat %q:\n%s", unwanted, retryPrompt)
+		}
+	}
+}
 func TestCompilePrincipalsFailsAfterRetryingInvalidSourceEntityID(t *testing.T) {
 	p, st := buildTestProject(t)
 	scenes := seedEntityReverseIndex(t, p, st)
