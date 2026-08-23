@@ -25,6 +25,10 @@ const (
 	CharacterClassificationSupporting      = "supporting"
 	CharacterClassificationMinor           = "minor"
 	CharacterClassificationUncertain       = "uncertain"
+
+	principalCharacterClassificationMaxAttempts = 3
+	principalCharacterTaskType                  = "principal-characters"
+	principalCharacterRetryTaskType             = "principal-characters-retry"
 )
 
 // CharacterRoleRecord is one book-level character identity and narrative-role assessment.
@@ -175,7 +179,7 @@ func compilePrincipals(
 			return 0, errors.New("no LLM provider configured: principals require an extraction provider; configure [llm] in story.toml")
 		}
 		reportProgress(opts, ProgressEvent{Layer: LayerPrincipals, Stage: "item-start", Message: fmt.Sprintf("Principals: classifying %d character entity record(s)", len(input.SourceEntities))})
-		records, err = extractCharacterRoles(ctx, p, input, currentRecords, opts.ExtractionProvider, opts.ExtractionModel, cfg, loadedPrompt, generation, run)
+		records, err = extractCharacterRoles(ctx, p, input, currentRecords, opts.ExtractionProvider, opts.ExtractionModel, cfg, loadedPrompt, generation, run, opts.Progress)
 		if err != nil {
 			return 0, err
 		}
@@ -355,36 +359,57 @@ func extractCharacterRoles(
 	loadedPrompt storyprompts.Loaded,
 	generation CharacterRoleGeneration,
 	run *Run,
+	progress ProgressFunc,
 ) ([]CharacterRoleRecord, error) {
-	taskID := ids.NewTaskID()
-	req := provider.GenerationRequest{
-		Model: model,
-		Messages: []provider.Message{
-			{Role: "system", Content: loadedPrompt.Content},
-			{Role: "user", Content: buildCharacterRolePrompt(input)},
-		},
-		Temperature: cfg.Temperature,
-		MaxTokens:   cfg.MaxOutputTokens,
-		JSONMode:    true,
+	baseMessages := []provider.Message{
+		{Role: "system", Content: loadedPrompt.Content},
+		{Role: "user", Content: buildCharacterRolePrompt(input)},
 	}
-	resp, timing, err := generateWithAudit(ctx, run, taskID, prov, req)
-	if err != nil {
-		recordCharacterRoleTask(run, taskID, TaskStatusFailed, loadedPrompt.Version, err.Error(), timing)
-		return nil, fmt.Errorf("principal character classification LLM call: %w", err)
-	}
+	var lastParseErr error
+	for attempt := 1; attempt <= principalCharacterClassificationMaxAttempts; attempt++ {
+		taskID := ids.NewTaskID()
+		messages := append([]provider.Message(nil), baseMessages...)
+		if lastParseErr != nil {
+			emitProgress(progress, ProgressEvent{
+				Layer:   LayerPrincipals,
+				Stage:   "item-retry",
+				Current: attempt,
+				Total:   principalCharacterClassificationMaxAttempts,
+				Message: fmt.Sprintf("Principals: retrying classification after invalid model output (attempt %d/%d): %s", attempt, principalCharacterClassificationMaxAttempts, compactProgressError(lastParseErr)),
+			})
+			messages = append(messages, provider.Message{
+				Role:    "user",
+				Content: buildCharacterRoleRetryPrompt(input, lastParseErr),
+			})
+		}
+		req := provider.GenerationRequest{
+			Model:       model,
+			Messages:    messages,
+			Temperature: cfg.Temperature,
+			MaxTokens:   cfg.MaxOutputTokens,
+			JSONMode:    true,
+		}
+		resp, timing, err := generateWithAudit(ctx, run, taskID, prov, req)
+		taskType := characterRoleTaskTypeForAttempt(attempt)
+		if err != nil {
+			recordCharacterRoleTask(run, taskID, taskType, TaskStatusFailed, loadedPrompt.Version, err.Error(), timing)
+			return nil, fmt.Errorf("principal character classification LLM call: %w", err)
+		}
 
-	records, parseErr := parseCharacterRoleResponse(resp.Content, input, currentRecords, generation)
-	status := TaskStatusCompleted
-	errMsg := ""
-	if parseErr != nil {
-		status = TaskStatusFailed
-		errMsg = parseErr.Error()
+		records, parseErr := parseCharacterRoleResponse(resp.Content, input, currentRecords, generation)
+		status := TaskStatusCompleted
+		errMsg := ""
+		if parseErr != nil {
+			status = TaskStatusFailed
+			errMsg = parseErr.Error()
+		}
+		recordCharacterRoleTask(run, taskID, taskType, status, loadedPrompt.Version, errMsg, timing)
+		if parseErr == nil {
+			return records, nil
+		}
+		lastParseErr = parseErr
 	}
-	recordCharacterRoleTask(run, taskID, status, loadedPrompt.Version, errMsg, timing)
-	if parseErr != nil {
-		return nil, fmt.Errorf("principal character classification output: %w", parseErr)
-	}
-	return records, nil
+	return nil, fmt.Errorf("principal character classification output: failed after %d attempts: %w", principalCharacterClassificationMaxAttempts, lastParseErr)
 }
 
 func buildCharacterRolePrompt(input characterRoleInputSet) string {
@@ -451,6 +476,48 @@ func buildCharacterRolePrompt(input characterRoleInputSet) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+func buildCharacterRoleRetryPrompt(input characterRoleInputSet, parseErr error) string {
+	var sb strings.Builder
+	sb.WriteString("The previous principal character classification JSON response failed validation: ")
+	if parseErr != nil {
+		sb.WriteString(parseErr.Error())
+	} else {
+		sb.WriteString("invalid output")
+	}
+	sb.WriteString("\nRetry the same task. Return a complete replacement JSON object matching the requested schema, not a patch.\n")
+	sb.WriteString("Allowed source_entity_ids are: ")
+	sb.WriteString(strings.Join(characterRoleSourceEntityIDs(input), ", "))
+	sb.WriteString("\nUse every allowed source_entity_id exactly once. Do not use aliases, character names, or invented IDs as source_entity_ids.")
+	return sb.String()
+}
+
+func characterRoleSourceEntityIDs(input characterRoleInputSet) []string {
+	ids := make([]string, 0, len(input.SourceEntities))
+	for _, entity := range input.SourceEntities {
+		if strings.TrimSpace(entity.EntityID) != "" {
+			ids = append(ids, entity.EntityID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func compactProgressError(err error) string {
+	if err == nil {
+		return "invalid output"
+	}
+	const maxRunes = 240
+	text := strings.Join(strings.Fields(err.Error()), " ")
+	if text == "" {
+		return "invalid output"
+	}
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return strings.TrimSpace(string(runes[:maxRunes])) + "..."
 }
 
 func parseCharacterRoleResponse(content string, input characterRoleInputSet, currentRecords []CharacterRoleRecord, generation CharacterRoleGeneration) ([]CharacterRoleRecord, error) {
@@ -817,14 +884,24 @@ func characterRolesSnapshotIsCurrent(snapshot *CharacterRolesSnapshotRecord, inp
 		strings.TrimSpace(snapshot.ArtifactHash) != ""
 }
 
-func recordCharacterRoleTask(run *Run, taskID, status, promptVersion, errMsg string, timings ...taskTiming) {
+func characterRoleTaskTypeForAttempt(attempt int) string {
+	if attempt > 1 {
+		return principalCharacterRetryTaskType
+	}
+	return principalCharacterTaskType
+}
+
+func recordCharacterRoleTask(run *Run, taskID, taskType, status, promptVersion, errMsg string, timings ...taskTiming) {
 	if run == nil {
 		return
+	}
+	if strings.TrimSpace(taskType) == "" {
+		taskType = principalCharacterTaskType
 	}
 	record := TaskRecord{
 		TaskID:        taskID,
 		RunID:         runID(run),
-		TaskType:      "principal-characters",
+		TaskType:      taskType,
 		Status:        status,
 		PromptVersion: promptVersion,
 		Error:         errMsg,

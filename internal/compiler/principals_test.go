@@ -111,6 +111,136 @@ func TestCompilePrincipalsWithFakeProvider(t *testing.T) {
 	}
 }
 
+func TestCompilePrincipalsRetriesInvalidSourceEntityID(t *testing.T) {
+	p, st := buildTestProject(t)
+	scenes := seedEntityReverseIndex(t, p, st)
+	entityProvider := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","aliases":["Maraa"],"occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara","Maraa"],"confidence":0.95}]}]}`}
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: entityProvider,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities: %v", err)
+	}
+
+	principalProvider := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
+		if idx == 0 {
+			return `{"characters":[{"source_entity_ids":["entity-not-in-prompt"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + scenes[0].ID + `","reason":"Shows Mara carrying the scene action."}]}]}`
+		}
+		return principalRoleResponseFromPrompt(t, req.Messages[1].Content)
+	}}
+	var events []compiler.ProgressEvent
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerPrincipals,
+		ExtractionProvider: principalProvider,
+		ExtractionModel:    "fake-model",
+		Progress: func(event compiler.ProgressEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile principals with retry: %v", err)
+	}
+	if result.PrincipalsBuilt != 1 {
+		t.Fatalf("PrincipalsBuilt = %d, want 1", result.PrincipalsBuilt)
+	}
+	if len(principalProvider.requests) != 2 {
+		t.Fatalf("principal provider calls = %d, want 2", len(principalProvider.requests))
+	}
+	if len(principalProvider.requests[1].Messages) < 3 {
+		t.Fatalf("retry request messages = %d, want corrective user message", len(principalProvider.requests[1].Messages))
+	}
+	if !progressEventsContain(events, compiler.LayerPrincipals, "item-retry", `unknown source_entity_id "entity-not-in-prompt"`) {
+		t.Fatalf("progress events missing principal retry reason: %#v", events)
+	}
+	retryPrompt := principalProvider.requests[1].Messages[2].Content
+	for _, want := range []string{
+		`unknown source_entity_id "entity-not-in-prompt"`,
+		"Allowed source_entity_ids are: entity-",
+		"complete replacement JSON object",
+	} {
+		if !strings.Contains(retryPrompt, want) {
+			t.Fatalf("retry prompt missing %q:\n%s", want, retryPrompt)
+		}
+	}
+
+	runDir := p.Path(filepath.Join(project.RunsDir, result.RunID))
+	tasks, err := os.ReadFile(filepath.Join(runDir, "tasks.jsonl"))
+	if err != nil {
+		t.Fatalf("read tasks.jsonl: %v", err)
+	}
+	for _, want := range []string{
+		`"task_type":"principal-characters"`,
+		`"task_type":"principal-characters-retry"`,
+		`"status":"failed"`,
+		`"status":"completed"`,
+	} {
+		if !strings.Contains(string(tasks), want) {
+			t.Fatalf("tasks missing %s:\n%s", want, tasks)
+		}
+	}
+	summary, err := os.ReadFile(filepath.Join(runDir, "summary.json"))
+	if err != nil {
+		t.Fatalf("read summary.json: %v", err)
+	}
+	for _, want := range []string{`"total_provider_calls": 2`, `"retry_tasks": 1`} {
+		if !strings.Contains(string(summary), want) {
+			t.Fatalf("summary missing %s:\n%s", want, summary)
+		}
+	}
+}
+
+func TestCompilePrincipalsFailsAfterRetryingInvalidSourceEntityID(t *testing.T) {
+	p, st := buildTestProject(t)
+	scenes := seedEntityReverseIndex(t, p, st)
+	entityProvider := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","aliases":["Maraa"],"occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara","Maraa"],"confidence":0.95}]}]}`}
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerEntities,
+		ExtractionProvider: entityProvider,
+		ExtractionModel:    "fake-model",
+	})
+	if err != nil {
+		t.Fatalf("compile entities: %v", err)
+	}
+
+	badProvider := &fakeProvider{response: `{"characters":[{"source_entity_ids":["entity-not-in-prompt"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + scenes[0].ID + `","reason":"Shows Mara carrying the scene action."}]}]}`}
+	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
+		Layer:              compiler.LayerPrincipals,
+		ExtractionProvider: badProvider,
+		ExtractionModel:    "fake-model",
+	})
+	if err == nil {
+		t.Fatal("expected principals compile to fail after retry attempts")
+	}
+	if !strings.Contains(err.Error(), "failed after 3 attempts") || !strings.Contains(err.Error(), `unknown source_entity_id "entity-not-in-prompt"`) {
+		t.Fatalf("error = %v, want exhausted retry detail with unknown source_entity_id", err)
+	}
+	if len(badProvider.requests) != 3 {
+		t.Fatalf("principal provider calls = %d, want 3", len(badProvider.requests))
+	}
+
+	tasks, err := os.ReadFile(p.Path(filepath.Join(project.RunsDir, result.RunID, "tasks.jsonl")))
+	if err != nil {
+		t.Fatalf("read tasks.jsonl: %v", err)
+	}
+	if got := strings.Count(string(tasks), `"task_type":"principal-characters-retry"`); got != 2 {
+		t.Fatalf("retry task count = %d, want 2\n%s", got, tasks)
+	}
+	if got := strings.Count(string(tasks), `"status":"failed"`); got != 3 {
+		t.Fatalf("failed task count = %d, want 3\n%s", got, tasks)
+	}
+
+	rolesPath := p.Path(filepath.Join(project.ModelDir, "character_roles.jsonl"))
+	data, err := os.ReadFile(rolesPath)
+	if err != nil {
+		t.Fatalf("read character_roles.jsonl: %v", err)
+	}
+	if strings.Contains(string(data), `"record_type":"character_roles_snapshot"`) {
+		t.Fatalf("invalid principals output should not commit snapshot:\n%s", data)
+	}
+}
+
 func TestCompilePrincipalsRejectsAliasAsSourceCandidate(t *testing.T) {
 	p, st := buildTestProject(t)
 	scenes := seedEntityReverseIndex(t, p, st)
