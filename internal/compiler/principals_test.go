@@ -50,6 +50,7 @@ func TestCompilePrincipalsWithFakeProvider(t *testing.T) {
 		t.Fatalf("InsertSceneCard with cited summary: %v", err)
 	}
 
+	compileTestCharacterIdentities(t, p, st)
 	principalProvider := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
 		return principalRoleResponseFromPrompt(t, req.Messages[1].Content)
 	}}
@@ -66,9 +67,9 @@ func TestCompilePrincipalsWithFakeProvider(t *testing.T) {
 	}
 	prompt := principalProvider.requests[0].Messages[1].Content
 	for _, want := range []string{
-		"Use supplied canonical character entities as candidates.",
+		"Use supplied resolved character_id candidates and classify narrative function.",
 		"Do not redo entity resolution from scene text",
-		"evidence.scene_id must be in allowed_scene_ids",
+		"Evidence is scene-scoped and must be linked to that identity.",
 		"; allowed_scene_ids: " + scenes[0].ID,
 		"Scene refs:",
 		"summary: Mara meets Old Petar, chooses silence, and remembers the lake.",
@@ -125,6 +126,7 @@ func TestCompilePrincipalsRetriesInvalidSourceEntityID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile entities: %v", err)
 	}
+	compileTestCharacterIdentities(t, p, st)
 
 	principalProvider := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
 		if idx == 0 {
@@ -159,7 +161,7 @@ func TestCompilePrincipalsRetriesInvalidSourceEntityID(t *testing.T) {
 	retryPrompt := principalProvider.requests[1].Messages[2].Content
 	for _, want := range []string{
 		"Return a complete replacement JSON object, not a patch.",
-		"Use the source_entity_id and allowed_scene_ids from the previous prompt.",
+		"Use the character_id candidates and allowed_scene_ids from the previous prompt.",
 		"Every evidence.scene_id must belong to a source_entity_id in the same role.",
 	} {
 		if !strings.Contains(retryPrompt, want) {
@@ -211,6 +213,7 @@ func TestCompilePrincipalsRetriesEvidenceSceneNotLinkedToSourceEntity(t *testing
 	if err != nil {
 		t.Fatalf("compile entities: %v", err)
 	}
+	compileTestCharacterIdentities(t, p, st)
 
 	principalProvider := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
 		prompt := req.Messages[1].Content
@@ -219,9 +222,9 @@ func TestCompilePrincipalsRetriesEvidenceSceneNotLinkedToSourceEntity(t *testing
 		maraScene := promptAllowedSceneForName(t, prompt, "Mara")
 		crewScene := promptAllowedSceneForName(t, prompt, "Crew")
 		if idx == 0 {
-			return `{"characters":[{"source_entity_ids":["` + maraID + `"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + crewScene + `","reason":"Wrongly cites the crew scene for Mara."}]},{"source_entity_ids":["` + crewID + `"],"classification":"supporting","role":"antagonistic group","confidence":0.7,"rationale":"The crew pressures Mara.","evidence":[]}]}`
+			return `{"characters":[{"character_id":"` + maraID + `","classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + crewScene + `","reason":"Wrongly cites the crew scene for Mara."}]},{"character_id":"` + crewID + `","classification":"supporting","role":"antagonistic group","confidence":0.7,"rationale":"The crew pressures Mara.","evidence":[]}]}`
 		}
-		return `{"characters":[{"source_entity_ids":["` + maraID + `"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + maraScene + `","reason":"Shows Mara carrying the scene action."}]},{"source_entity_ids":["` + crewID + `"],"classification":"supporting","role":"antagonistic group","confidence":0.7,"rationale":"The crew pressures Mara.","evidence":[]}]}`
+		return `{"characters":[{"character_id":"` + maraID + `","classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + maraScene + `","reason":"Shows Mara carrying the scene action."}]},{"character_id":"` + crewID + `","classification":"supporting","role":"antagonistic group","confidence":0.7,"rationale":"The crew pressures Mara.","evidence":[]}]}`
 	}}
 	var events []compiler.ProgressEvent
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -247,7 +250,7 @@ func TestCompilePrincipalsRetriesEvidenceSceneNotLinkedToSourceEntity(t *testing
 	retryPrompt := principalProvider.requests[1].Messages[2].Content
 	for _, want := range []string{
 		"Return a complete replacement JSON object, not a patch.",
-		"Use the source_entity_id and allowed_scene_ids from the previous prompt.",
+		"Use the character_id candidates and allowed_scene_ids from the previous prompt.",
 		"Every evidence.scene_id must belong to a source_entity_id in the same role.",
 	} {
 		if !strings.Contains(retryPrompt, want) {
@@ -272,6 +275,7 @@ func TestCompilePrincipalsFailsAfterRetryingInvalidSourceEntityID(t *testing.T) 
 	if err != nil {
 		t.Fatalf("compile entities: %v", err)
 	}
+	compileTestCharacterIdentities(t, p, st)
 
 	badProvider := &fakeProvider{response: `{"characters":[{"source_entity_ids":["entity-not-in-prompt"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + scenes[0].ID + `","reason":"Shows Mara carrying the scene action."}]}]}`}
 	result, err := compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -322,6 +326,7 @@ func TestCompilePrincipalsRejectsAliasAsSourceCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile entities: %v", err)
 	}
+	compileTestCharacterIdentities(t, p, st)
 
 	aliasProvider := &fakeProvider{response: `{"characters":[{"source_entity_ids":["Maraa"],"classification":"principal","rationale":"Alias was incorrectly treated as a candidate.","evidence":[{"scene_id":"` + scenes[0].ID + `","reason":"Bad alias evidence."}]}]}`}
 	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{
@@ -343,5 +348,60 @@ func TestCompilePrincipalsRejectsAliasAsSourceCandidate(t *testing.T) {
 	}
 	if strings.Contains(string(data), `"record_type":"character_roles_snapshot"`) {
 		t.Fatalf("invalid principals output should not commit snapshot:\n%s", data)
+	}
+}
+
+func TestCompilePrincipalsRequiresCurrentCharacterIdentities(t *testing.T) {
+	p, st := buildTestProject(t)
+	scenes := seedEntityReverseIndex(t, p, st)
+	entityProvider := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara"],"confidence":0.9}]}]}`}
+	if _, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerEntities, ExtractionProvider: entityProvider, ExtractionModel: "fake-model"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerPrincipals, ExtractionModel: "fake-model"})
+	if err == nil || !strings.Contains(err.Error(), "story compile --layer character-identities") {
+		t.Fatalf("error = %v, want actionable identity prerequisite", err)
+	}
+}
+func TestCompilePrincipalsRejectsStaleCharacterIdentities(t *testing.T) {
+	p, st := buildTestProject(t)
+	scenes := seedEntityReverseIndex(t, p, st)
+	entityProvider := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara"],"confidence":0.9}]}]}`}
+	if _, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerEntities, ExtractionProvider: entityProvider, ExtractionModel: "fake-model"}); err != nil {
+		t.Fatal(err)
+	}
+	compileTestCharacterIdentities(t, p, st)
+	if err := st.InsertSceneCard(store.SceneCardRow{SceneID: scenes[0].ID, Title: "Changed", Summary: "Changed evidence", RawJSON: `{"title":"Changed","summary":"Changed evidence"}`, Status: "generated"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerPrincipals, ExtractionModel: "fake-model"})
+	if err == nil || !strings.Contains(err.Error(), "character-identities --force") {
+		t.Fatalf("error = %v, want stale identity prerequisite", err)
+	}
+}
+func TestCompileCharacterIdentitiesRetryExhaustionPreservesAcceptedSnapshot(t *testing.T) {
+	p, st := buildTestProject(t)
+	scenes := seedEntityReverseIndex(t, p, st)
+	entityProvider := &fakeProvider{response: `{"entities":[{"canonical_name":"Mara","type":"character","occurrences":[{"scene_id":"` + scenes[0].ID + `","surface_texts":["Mara"],"confidence":0.9}]}]}`}
+	if _, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerEntities, ExtractionProvider: entityProvider, ExtractionModel: "fake-model"}); err != nil {
+		t.Fatal(err)
+	}
+	compileTestCharacterIdentities(t, p, st)
+	path := p.Path(filepath.Join(project.ModelDir, "character_identities.jsonl"))
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := &fakeProvider{response: `{"characters":[{"source_entity_ids":["entity-unknown"],"canonical_name":"Mara"}]}`}
+	_, err = compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerCharacterIdentities, Force: true, ExtractionProvider: bad, ExtractionModel: "fake-model"})
+	if err == nil || !strings.Contains(err.Error(), "failed after 3 attempts") {
+		t.Fatalf("error = %v, want retry exhaustion", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("invalid retry changed accepted identity snapshot\nbefore=%s\nafter=%s", before, after)
 	}
 }

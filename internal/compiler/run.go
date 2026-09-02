@@ -421,7 +421,7 @@ func (r *Run) saveLocked() error {
 }
 
 // SaveSummary writes a summary.json to the run directory.
-func (r *Run) saveSummary(scenes, cards, sceneCardRecoveries int, sceneCardRecoveryEvents []SceneCardRecoveryEvent, entities, principals, verifications, summaries int) error {
+func (r *Run) saveSummary(scenes, cards, sceneCardRecoveries int, sceneCardRecoveryEvents []SceneCardRecoveryEvent, entities, characterIdentities, principals, verifications, summaries int) error {
 	record := r.recordSnapshot()
 	metrics := r.metricsSnapshot()
 	data, err := json.MarshalIndent(map[string]any{
@@ -435,6 +435,7 @@ func (r *Run) saveSummary(scenes, cards, sceneCardRecoveries int, sceneCardRecov
 		"scene_card_recoveries":             sceneCardRecoveries,
 		"scene_card_recovery_events":        sceneCardRecoveryEvents,
 		"entities_built":                    entities,
+		"character_identities_built":        characterIdentities,
 		"principals_built":                  principals,
 		"verifications_built":               verifications,
 		"summaries_built":                   summaries,

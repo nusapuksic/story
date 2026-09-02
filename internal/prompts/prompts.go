@@ -15,6 +15,7 @@ const (
 	SceneBoundaries     = "scene-boundaries.md"
 	SceneExtraction     = "scene-extraction.md"
 	EntityResolution    = "entity-resolution.md"
+	CharacterIdentities = "character-identities.md"
 	PrincipalCharacters = "principal-characters.md"
 	RecordVerification  = "record-verification.md"
 	ChapterSummary      = "chapter-summary.md"
@@ -78,12 +79,20 @@ Use only the supplied reverse-index scene IDs and surface texts; do not invent n
 Preserve ambiguity: do not merge aliases unless the candidate evidence strongly supports one identity.
 Flag likely typos or suspicious variants instead of silently correcting original surface text.`,
 	},
+	CharacterIdentities: {
+		version: "character-identities-v1",
+		body: `You are a literary analyst resolving book-level character identities from supplied canonical entity records and linked scene-card evidence.
+Return only valid JSON matching the requested schema. Do not add commentary outside the JSON object.
+Use every supplied source_entity_id exactly once, and never invent IDs.
+Choose canonical names and aliases only from supplied entity names and aliases.
+Preserve ambiguity: keep questionable merges separate or mark variants uncertain.`,
+	},
 	PrincipalCharacters: {
 		version: "principal-characters-v1",
-		body: `You are a literary analyst classifying book-level character roles from canonical character entities and linked scene evidence.
+		body: `You are a literary analyst classifying book-level character roles from resolved character identities and linked scene evidence.
 Return only valid JSON matching the requested schema. Do not add commentary outside the JSON object.
 Classify narrative function rather than frequency. A brief structurally essential character may be principal, and a frequent secondary character may remain supporting.
-Use only the supplied source_entity_ids and scene IDs. Aliases are context only; never treat an alias as a separate candidate.
+Use only the supplied character_id candidates and scene IDs. Resolved identities and source entity groupings are fixed; do not regroup them or invent IDs.
 Do not force a fixed number of principal characters.`,
 	},
 	RecordVerification: {

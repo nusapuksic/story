@@ -145,6 +145,7 @@ my-novel/
     events.jsonl
     character-states.jsonl
     unresolved.jsonl
+    character_identities.jsonl
     character_roles.jsonl
     summaries.jsonl
   reviews/
@@ -776,9 +777,13 @@ Occurrence record:
 
 Entity resolution must preserve ambiguity. Two possible aliases are not merged solely because the model considers the merge plausible. Occurrences must use only supplied reverse-index scene IDs and surface texts; uncertain variants should be flagged instead of silently corrected.
 
+Layer 4a: Character identity resolution
+
+Character identity resolution runs after entity consolidation and before principal character classification. It groups only supplied canonical character entity IDs, preserves aliases and uncertain variants, and writes `model/character_identities.jsonl`; IDs are generated in code as `char-<ULID>` values and reused when a rerun produces the same sorted source-entity set. Invalid model output is rejected and retried without changing accepted artifacts.
+
 Layer 4b: Principal character classification
 
-Principal character classification runs after entity consolidation and before whole-book summaries. It consumes only canonical character entities and their linked narrative evidence, including aliases, POV assignments, scene participation, scene-card summaries, actions, decisions, relationships, unresolved threads, turning points, and resolution evidence. It does not redo entity resolution, and aliases must never become separate candidates.
+Principal character classification runs after character identity resolution and before whole-book summaries. It consumes only resolved character identity candidates and their linked narrative evidence, including aliases, POV assignments, scene participation, scene-card summaries, actions, decisions, relationships, unresolved threads, turning points, and resolution evidence. It does not redo entity resolution, and aliases must never become separate candidates.
 
 The stage classifies narrative function rather than occurrence count. Supported classifications are `principal`, `major_supporting`, `supporting`, `minor`, and `uncertain`; the classifier must not force a fixed number of principal characters.
 
@@ -808,7 +813,7 @@ Character role record:
   "status": "generated"
 }
 
-Every role record must reference existing canonical character entities, and every source character entity appears in at most one role record. Principal records require a rationale and valid scene-scoped evidence; paragraph IDs are optional for this layer. `model/character_roles.jsonl` is the persisted source of truth for downstream principal use. Principal-only views are projections over this artifact and must not contain additional classification logic.
+Every role record must reference an existing resolved character identity, and every source character entity appears in exactly one identity before role classification. Principal records require a rationale and valid scene-scoped evidence; paragraph IDs are optional for this layer. `model/character_roles.jsonl` is the persisted source of truth for downstream principal use. Principal-only views are projections over this artifact and must not contain additional classification logic.
 
 Layer 5: Narrative records
 
@@ -891,11 +896,11 @@ construct chapter synthesis
     ↓
 consolidate entities and scene-scoped occurrences from reverse-index signals
     ↓
-classify principal characters from canonical entities
+resolve character identities conservatively
+    ↓
+classify principal characters from resolved identities
     ↓
 construct whole-book editorial summary
-    ↓
-resolve aliases conservatively
     ↓
 extract narrative records
     ↓
@@ -1140,6 +1145,7 @@ story compile --resume
 story compile --force
 story compile --strict-extraction
 story compile status
+story compile --layer character-identities
 story compile principals
 story compile principals --force
 
@@ -1149,6 +1155,7 @@ structure
 scenes
 scene-cards
 entities
+character-identities
 principals
 records
 verification
@@ -1163,6 +1170,8 @@ story inspect paragraph <id>
 story inspect summary book
 story inspect summary <chapter-id>
 story inspect index <theme|entity|participant|pov|location|unresolved> <term-or-prefix>
+story inspect character-identities
+story inspect name-variants
 story inspect principals
 story inspect character-roles
 story inspect scene <id>

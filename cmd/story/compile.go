@@ -34,10 +34,11 @@ Supported layers:
   scene-cards   Extract structured scene cards using the configured LLM
   verification  Verify generated scene cards against cited manuscript evidence
   entities      Consolidate entities and scene-scoped occurrences from scene-card signals
-  principals    Create book-level character IDs and classify principal character roles
+  character-identities Resolve book-level character identities from canonical entities
+  principals    Classify narrative roles for resolved character identities
   summaries     Generate chapter summaries and an editorial book synopsis using the configured LLM
 
-Without --layer, all implemented layers are run in order: scenes, scene-cards, verification when enabled, entities, principals, summaries.
+Without --layer, all implemented layers are run in order: scenes, scene-cards, verification when enabled, entities, character-identities, principals, summaries.
 
 Scene-card extraction retries invalid model output once, retries timeouts with compact context, and then writes a deterministic fallback card. Use --strict-extraction for developer/debug runs that should fail immediately.`,
 		Args: cobra.NoArgs,
@@ -45,7 +46,7 @@ Scene-card extraction retries invalid model output once, retries timeouts with c
 			return runCompile(cmd.Context(), layer, chapterID, force, strictExtraction)
 		},
 	}
-	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes, scene-cards, verification, entities, principals, or summaries")
+	cmd.Flags().StringVar(&layer, "layer", "", "restrict to one layer: scenes, scene-cards, verification, entities, character-identities, principals, or summaries")
 	cmd.Flags().StringVar(&chapterID, "chapter", "", "restrict to one chapter (e.g. ch-0001)")
 	cmd.Flags().BoolVar(&force, "force", false, "recompute already-generated records")
 	cmd.Flags().BoolVar(&strictExtraction, "strict-extraction", false, "fail on invalid scene-card model output or timeouts instead of retrying and falling back")
@@ -143,6 +144,7 @@ func runCompile(ctx context.Context, layer, chapterID string, force, strictExtra
 			"scene_card_recoveries":      result.SceneCardRecoveries,
 			"scene_card_recovery_events": result.SceneCardRecoveryEvents,
 			"entities_built":             result.EntitiesBuilt,
+			"character_identities_built": result.CharacterIdentitiesBuilt,
 			"principals_built":           result.PrincipalsBuilt,
 			"verifications_built":        result.VerificationsBuilt,
 			"summaries_built":            result.SummariesBuilt,
@@ -154,6 +156,7 @@ func runCompile(ctx context.Context, layer, chapterID string, force, strictExtra
 	info("Scene card recoveries: %d", result.SceneCardRecoveries)
 	printSceneCardRecoveryHints(result.SceneCardRecoveryEvents)
 	info("Entities built:        %d", result.EntitiesBuilt)
+	info("Character identities:  %d", result.CharacterIdentitiesBuilt)
 	info("Principals built:      %d", result.PrincipalsBuilt)
 	info("Verifications built: %d", result.VerificationsBuilt)
 	info("Summaries built:     %d", result.SummariesBuilt)
@@ -334,7 +337,7 @@ func newCompilePrincipalsCmd() *cobra.Command {
 
 func compileNeedsExtractionProvider(layer, sceneDetection string) bool {
 	switch layer {
-	case "", compiler.LayerSceneCards, compiler.LayerEntities, compiler.LayerPrincipals, compiler.LayerSummaries:
+	case "", compiler.LayerSceneCards, compiler.LayerEntities, compiler.LayerCharacterIdentities, compiler.LayerPrincipals, compiler.LayerSummaries:
 		return true
 	case compiler.LayerScenes:
 		return compiler.SceneDetectionUsesModel(sceneDetection)
@@ -389,6 +392,7 @@ func newCompileStatusCmd() *cobra.Command {
 				return err
 			}
 			roles, principalRoles, err := indexedCharacterRoleCounts(p)
+			identities, _, err := compiler.ReadLatestCharacterIdentities(p.Path(filepath.Join(project.ModelDir, "character_identities.jsonl")))
 			if err != nil {
 				return err
 			}
@@ -403,12 +407,14 @@ func newCompileStatusCmd() *cobra.Command {
 					"scene_card_fallbacks":             fallbacks,
 					"scene_card_recovery_events":       recoveryEvents,
 					"entities":                         entities,
-					"occurrences":                      occurrences,
-					"summaries":                        summaries,
-					"chapter_summaries":                chapterSummaries,
-					"book_summaries":                   bookSummaries,
-					"character_roles":                  roles,
-					"principal_characters":             principalRoles,
+					"character_identities":             len(identities),
+
+					"occurrences":          occurrences,
+					"summaries":            summaries,
+					"chapter_summaries":    chapterSummaries,
+					"book_summaries":       bookSummaries,
+					"character_roles":      roles,
+					"principal_characters": principalRoles,
 				})
 			}
 			info("Chapters:              %d", chapters)
@@ -421,6 +427,7 @@ func newCompileStatusCmd() *cobra.Command {
 			info("Scene card fallbacks:  %d", fallbacks)
 			printSceneCardRecoveryHints(recoveryEvents)
 			info("Entities:              %d", entities)
+			info("Character identities:  %d", len(identities))
 			info("Occurrences:           %d", occurrences)
 			info("Summaries:             %d", summaries)
 			info("Chapter summaries:     %d", chapterSummaries)

@@ -937,7 +937,21 @@ func validateBookSummaryCoverage(rec *SummaryRecord, chapterIDs []string, princi
 }
 
 func principalCharactersForBookSummary(p *project.Project, st *store.Store, model string) ([]principalCharacter, string, error) {
-	input, err := buildCharacterRoleInput(st)
+	identities, identitySnapshot, err := ReadLatestCharacterIdentities(p.Path(filepath.Join(project.ModelDir, "character_identities.jsonl")))
+	if err != nil {
+		return nil, "", err
+	}
+	if identitySnapshot == nil {
+		return nil, "", fmt.Errorf("character identities are missing: run 'story compile --layer character-identities'")
+	}
+	identityInput, err := buildCharacterIdentityInput(st)
+	if err != nil {
+		return nil, "", err
+	}
+	if identitySnapshot.InputHash != identityInput.InputHash {
+		return nil, "", fmt.Errorf("character identities are stale: run 'story compile --layer character-identities --force'")
+	}
+	input, err := buildCharacterRoleInputFromIdentities(st, identities)
 	if err != nil {
 		return nil, "", err
 	}

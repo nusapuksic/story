@@ -17,10 +17,78 @@ func newInspectCmd() *cobra.Command {
 		Use:   "inspect",
 		Short: "Inspect indexed project objects",
 	}
-	cmd.AddCommand(newInspectChapterCmd(), newInspectParagraphCmd(), newInspectSummaryCmd(), newInspectIndexCmd(), newInspectCharacterRolesCmd(), newInspectPrincipalsCmd())
+	cmd.AddCommand(newInspectChapterCmd(), newInspectParagraphCmd(), newInspectSummaryCmd(), newInspectIndexCmd(), newInspectCharacterRolesCmd(), newInspectPrincipalsCmd(), newInspectCharacterIdentitiesCmd(), newInspectNameVariantsCmd())
 	return cmd
 }
 
+func newInspectCharacterIdentitiesCmd() *cobra.Command {
+	return &cobra.Command{Use: "character-identities", Short: "Inspect resolved book-level character identities", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		p, err := openProject()
+		if err != nil {
+			return err
+		}
+		records, snapshot, err := compiler.ReadLatestCharacterIdentities(p.Path(filepath.Join(project.ModelDir, "character_identities.jsonl")))
+		if err != nil {
+			return err
+		}
+		if snapshot == nil {
+			return fmt.Errorf("no character identities found: run 'story compile --layer character-identities'")
+		}
+		if flags.jsonOut {
+			return printJSON(map[string]any{"snapshot": snapshot, "records": records})
+		}
+		info("Character identities")
+		info("Run:  %s", snapshot.RunID)
+		info("Hash: %s", snapshot.ArtifactHash)
+		for _, r := range records {
+			info("")
+			info("%s  %s", r.CharacterID, r.CanonicalName)
+			printStringList("Source entities", r.SourceEntityIDs)
+			printStringList("Aliases", r.Aliases)
+			if len(r.Variants) > 0 {
+				info("Variants:")
+				for _, v := range r.Variants {
+					info("  - %s: %s (%s)", v.Type, v.Value, v.Reason)
+				}
+			}
+		}
+		return nil
+	}}
+}
+
+func newInspectNameVariantsCmd() *cobra.Command {
+	return &cobra.Command{Use: "name-variants", Short: "Inspect advisory character name variants", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		p, err := openProject()
+		if err != nil {
+			return err
+		}
+		records, snapshot, err := compiler.ReadLatestCharacterIdentities(p.Path(filepath.Join(project.ModelDir, "character_identities.jsonl")))
+		if err != nil {
+			return err
+		}
+		if snapshot == nil {
+			return fmt.Errorf("no character identities found: run 'story compile --layer character-identities'")
+		}
+		variants := []map[string]any{}
+		for _, r := range records {
+			for _, v := range r.Variants {
+				variants = append(variants, map[string]any{"character_id": r.CharacterID, "canonical_name": r.CanonicalName, "type": v.Type, "value": v.Value, "source_entity_id": v.SourceEntityID, "evidence": v.Evidence, "reason": v.Reason})
+			}
+		}
+		if flags.jsonOut {
+			return printJSON(map[string]any{"snapshot": snapshot, "variants": variants})
+		}
+		info("Name variants")
+		if len(variants) == 0 {
+			info("No variants.")
+			return nil
+		}
+		for _, v := range variants {
+			info("  - %s: %s (%s)", v["canonical_name"], v["value"], v["type"])
+		}
+		return nil
+	}}
+}
 func newInspectPrincipalsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "principals",

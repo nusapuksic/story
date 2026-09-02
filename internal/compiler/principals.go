@@ -81,6 +81,7 @@ type rawPrincipalResponse struct {
 }
 
 type rawCharacterRole struct {
+	CharacterID     flexibleString             `json:"character_id"`
 	SourceEntityIDs flexibleStringList         `json:"source_entity_ids"`
 	SourceEntityID  flexibleString             `json:"source_entity_id"`
 	EntityIDs       flexibleStringList         `json:"entity_ids"`
@@ -110,11 +111,13 @@ type characterRoleInputSet struct {
 }
 
 type principalSourceEntity struct {
-	EntityID       string   `json:"entity_id"`
-	ChapterID      string   `json:"chapter_id"`
-	CanonicalName  string   `json:"canonical_name"`
-	Aliases        []string `json:"aliases,omitempty"`
-	EvidenceScenes []string `json:"evidence_scenes"`
+	EntityID        string   `json:"entity_id"`
+	CharacterID     string   `json:"character_id,omitempty"`
+	SourceEntityIDs []string `json:"source_entity_ids,omitempty"`
+	ChapterID       string   `json:"chapter_id"`
+	CanonicalName   string   `json:"canonical_name"`
+	Aliases         []string `json:"aliases,omitempty"`
+	EvidenceScenes  []string `json:"evidence_scenes"`
 }
 
 type principalSceneContext struct {
@@ -149,10 +152,22 @@ func compilePrincipals(
 		return 0, err
 	}
 
-	input, err := buildCharacterRoleInput(st)
+	identityPath := p.Path(filepath.Join(project.ModelDir, "character_identities.jsonl"))
+	identities, identitySnapshot, identityErr := ReadLatestCharacterIdentities(identityPath)
+	if identityErr != nil {
+		return 0, identityErr
+	}
+	if identitySnapshot == nil {
+		return 0, fmt.Errorf("principals require committed character identities; run story compile --layer character-identities first")
+	}
+	identityInput, err := buildCharacterIdentityInput(st)
 	if err != nil {
 		return 0, err
 	}
+	if identitySnapshot.InputHash != identityInput.InputHash {
+		return 0, fmt.Errorf("principals require current character identities; run story compile --layer character-identities --force first")
+	}
+	input, err := buildCharacterRoleInputFromIdentities(st, identities)
 	rolesPath := p.Path(filepath.Join(project.ModelDir, "character_roles.jsonl"))
 	currentRecords, currentSnapshot, err := ReadLatestCharacterRoles(rolesPath)
 	if err != nil {
@@ -323,6 +338,57 @@ func buildCharacterRoleInput(st *store.Store) (characterRoleInputSet, error) {
 	return input, nil
 }
 
+// buildCharacterRoleInputFromIdentities projects resolved identity groups into
+// the role classifier input. The classifier receives identity candidates and
+// cannot alter their grouping.
+func buildCharacterRoleInputFromIdentities(st *store.Store, identities []CharacterIdentityRecord) (characterRoleInputSet, error) {
+	base, err := buildCharacterRoleInput(st)
+	if err != nil {
+		return characterRoleInputSet{}, err
+	}
+	out := characterRoleInputSet{EntityByID: map[string]principalSourceEntity{}, SceneIDs: map[string]bool{}, SourceScenesByID: map[string]map[string]bool{}, SceneContext: base.SceneContext}
+	for _, scene := range base.SceneContext {
+		out.SceneIDs[scene.SceneID] = true
+	}
+	for _, identity := range identities {
+		if strings.TrimSpace(identity.CharacterID) == "" {
+			return characterRoleInputSet{}, fmt.Errorf("character identity has empty character_id")
+		}
+		candidate := principalSourceEntity{EntityID: identity.CharacterID, CharacterID: identity.CharacterID, SourceEntityIDs: sortedCleanStrings(identity.SourceEntityIDs), CanonicalName: identity.CanonicalName, Aliases: dedupeStrings(identity.Aliases)}
+		for _, variant := range identity.Variants {
+			candidate.Aliases = append(candidate.Aliases, variant.Value)
+		}
+		candidate.Aliases = dedupeStrings(candidate.Aliases)
+		scenes := map[string]bool{}
+		for _, sourceID := range identity.SourceEntityIDs {
+			source, ok := base.EntityByID[sourceID]
+			if !ok {
+				return characterRoleInputSet{}, fmt.Errorf("character identity references missing indexed source entity %q", sourceID)
+			}
+			if candidate.ChapterID == "" {
+				candidate.ChapterID = source.ChapterID
+			}
+			for sceneID := range base.SourceScenesByID[sourceID] {
+				scenes[sceneID] = true
+			}
+		}
+		for sceneID := range scenes {
+			candidate.EvidenceScenes = append(candidate.EvidenceScenes, sceneID)
+			out.SceneIDs[sceneID] = true
+		}
+		sort.Strings(candidate.EvidenceScenes)
+		out.SourceEntities = append(out.SourceEntities, candidate)
+		out.EntityByID[candidate.EntityID] = candidate
+		out.SourceScenesByID[candidate.EntityID] = scenes
+		for _, sourceID := range candidate.SourceEntityIDs {
+			out.EntityByID[sourceID] = candidate
+			out.SourceScenesByID[sourceID] = scenes
+		}
+	}
+	sort.SliceStable(out.SourceEntities, func(i, j int) bool { return out.SourceEntities[i].CharacterID < out.SourceEntities[j].CharacterID })
+	out.InputHash, err = hashCharacterRoleInput(out)
+	return out, err
+}
 func principalSceneContextFromCard(ctx principalSceneContext, card store.SceneCardRow) principalSceneContext {
 	ctx.Title = card.Title
 	ctx.Summary = stripParagraphRefs(card.Summary)
@@ -414,26 +480,36 @@ func extractCharacterRoles(
 
 func buildCharacterRolePrompt(input characterRoleInputSet) string {
 	var sb strings.Builder
+	identityMode := len(input.SourceEntities) > 0 && input.SourceEntities[0].CharacterID != ""
 	sb.WriteString("Classify book-level character roles as JSON.\n")
-	sb.WriteString("Use supplied canonical character entities as candidates. Merge source_entity_ids only when names, aliases, and linked evidence clearly identify the same book-level character; classify narrative function.\n")
-	sb.WriteString("Return JSON:\n")
-	sb.WriteString(`{"characters":[{"source_entity_ids":["entity-..."],"canonical_name":"...","classification":"principal|major_supporting|supporting|minor|uncertain","role":"...","confidence":0.9,"rationale":"...","evidence":[{"scene_id":"sc-...","reason":"..."}]}]}`)
-	sb.WriteString("\nRules:\n")
-	sb.WriteString("- Use every source_entity_id exactly once; never use aliases, names, or invented IDs.\n")
-	sb.WriteString("- Use only listed source_entity_ids and scene IDs.\n")
-	sb.WriteString("- evidence.scene_id must be in allowed_scene_ids for a source_entity_id in the same role; merged roles use the union.\n")
-	sb.WriteString("- Do not redo entity resolution from scene text; aliases are metadata.\n")
-	sb.WriteString("- Evidence is scene-scoped; do not invent paragraph IDs.\n")
-	sb.WriteString("- Classify importance, not frequency; do not force a fixed number of principals.\n\n")
+	if identityMode {
+		sb.WriteString("Use supplied resolved character_id candidates and classify narrative function. Do not regroup identities or create IDs.\n")
+		sb.WriteString("Return JSON:\n")
+		sb.WriteString(`{"characters":[{"character_id":"char-...","classification":"principal|major_supporting|supporting|minor|uncertain","role":"...","confidence":0.9,"rationale":"...","evidence":[{"scene_id":"sc-...","reason":"..."}]}]}`)
+		sb.WriteString("\nRules:\n- Use every character_id exactly once; never use source IDs, aliases, or invented IDs as candidates.\n- Evidence is scene-scoped and must be linked to that identity.\n")
+	} else {
+		sb.WriteString("Use supplied canonical character entities as candidates. Merge source_entity_ids only when names, aliases, and linked evidence clearly identify the same book-level character; classify narrative function.\n")
+		sb.WriteString("Return JSON:\n")
+		sb.WriteString(`{"characters":[{"source_entity_ids":["entity-..."],"canonical_name":"...","classification":"principal|major_supporting|supporting|minor|uncertain","role":"...","confidence":0.9,"rationale":"...","evidence":[{"scene_id":"sc-...","reason":"..."}]}]}`)
+		sb.WriteString("\nRules:\n- Use every source_entity_id exactly once; never use aliases, names, or invented IDs.\n- Use only listed source_entity_ids and scene IDs.\n- evidence.scene_id must be in allowed_scene_ids for a source_entity_id in the same role; merged roles use the union.\n")
+	}
+	sb.WriteString("- Do not redo entity resolution from scene text; aliases are metadata.\n- Evidence is scene-scoped; do not invent paragraph IDs.\n- Classify importance, not frequency; do not force a fixed number of principals.\n\n")
 	writeCharacterRoleRefGuide(&sb, input)
 	return sb.String()
 }
-
 func writeCharacterRoleRefGuide(sb *strings.Builder, input characterRoleInputSet) {
 	sb.WriteString("Role refs:\n")
 	for _, entity := range input.SourceEntities {
-		sb.WriteString("- source_entity_id: ")
-		sb.WriteString(entity.EntityID)
+		sb.WriteString("- ")
+		if entity.CharacterID != "" {
+			sb.WriteString("character_id: ")
+			sb.WriteString(entity.CharacterID)
+			sb.WriteString("; source_entity_ids: ")
+			sb.WriteString(strings.Join(entity.SourceEntityIDs, ", "))
+		} else {
+			sb.WriteString("source_entity_id: ")
+			sb.WriteString(entity.EntityID)
+		}
 		if entity.ChapterID != "" {
 			sb.WriteString("; ch: ")
 			sb.WriteString(entity.ChapterID)
@@ -489,7 +565,7 @@ func buildCharacterRoleRetryPrompt() string {
 	return strings.Join([]string{
 		"Previous response failed validation.",
 		"Return a complete replacement JSON object, not a patch.",
-		"Use the source_entity_id and allowed_scene_ids from the previous prompt.",
+		"Use the character_id candidates and allowed_scene_ids from the previous prompt.",
 		"Every evidence.scene_id must belong to a source_entity_id in the same role.",
 	}, "\n")
 }
@@ -560,9 +636,29 @@ func characterRolesFromRaw(rawRoles []rawCharacterRole, input characterRoleInput
 	seenSourceIDs := make(map[string]bool, len(input.SourceEntities))
 	records := make([]CharacterRoleRecord, 0, len(rawRoles))
 	for _, raw := range rawRoles {
+		characterID := strings.TrimSpace(string(raw.CharacterID))
 		sourceIDs := rawRoleSourceEntityIDs(raw)
+		identityMode := len(input.SourceEntities) > 0 && input.SourceEntities[0].CharacterID != ""
+		if identityMode && characterID == "" {
+			for _, sourceID := range sourceIDs {
+				if _, ok := input.EntityByID[sourceID]; !ok {
+					return nil, fmt.Errorf("character role references unknown source_entity_id %q", sourceID)
+				}
+			}
+			return nil, fmt.Errorf("character role missing character_id")
+		}
+		if characterID != "" {
+			candidate, ok := input.EntityByID[characterID]
+			if !ok {
+				return nil, fmt.Errorf("character role references unknown character_id %q", characterID)
+			}
+			if len(sourceIDs) > 0 && characterRoleSourceKey(sourceIDs) != characterRoleSourceKey(candidate.SourceEntityIDs) {
+				return nil, fmt.Errorf("character role character_id %q cannot regroup source entities", characterID)
+			}
+			sourceIDs = candidate.SourceEntityIDs
+		}
 		if len(sourceIDs) == 0 {
-			return nil, fmt.Errorf("character role missing source_entity_ids")
+			return nil, fmt.Errorf("character role missing character_id")
 		}
 		allowedScenes := make(map[string]bool)
 		var sourceEntities []principalSourceEntity
@@ -575,6 +671,9 @@ func characterRolesFromRaw(rawRoles []rawCharacterRole, input characterRoleInput
 				return nil, fmt.Errorf("source_entity_id %q appears in more than one character role", entityID)
 			}
 			seenSourceIDs[entityID] = true
+			if entity.CharacterID != "" {
+				seenSourceIDs[entity.EntityID] = true
+			}
 			sourceEntities = append(sourceEntities, entity)
 			for sceneID := range input.SourceScenesByID[entityID] {
 				allowedScenes[sceneID] = true
@@ -600,7 +699,10 @@ func characterRolesFromRaw(rawRoles []rawCharacterRole, input characterRoleInput
 		}
 
 		sourceKey := characterRoleSourceKey(sourceIDs)
-		characterID := existingIDs[sourceKey]
+		characterID = strings.TrimSpace(string(raw.CharacterID))
+		if characterID == "" {
+			characterID = existingIDs[sourceKey]
+		}
 		if characterID == "" {
 			characterID = ids.NewCharacterID()
 		}
@@ -619,7 +721,13 @@ func characterRolesFromRaw(rawRoles []rawCharacterRole, input characterRoleInput
 			Status:          "generated",
 		})
 	}
-	if len(seenSourceIDs) != len(input.SourceEntities) {
+	covered := 0
+	for _, entity := range input.SourceEntities {
+		if seenSourceIDs[entity.EntityID] {
+			covered++
+		}
+	}
+	if covered != len(input.SourceEntities) {
 		missing := make([]string, 0)
 		for _, entity := range input.SourceEntities {
 			if !seenSourceIDs[entity.EntityID] {

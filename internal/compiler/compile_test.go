@@ -505,16 +505,61 @@ func TestCompileReportsSceneCardCompletionBeforeChapterFinishes(t *testing.T) {
 		t.Fatal("compile scene-cards did not finish")
 	}
 }
-func principalRoleResponseFromPrompt(t *testing.T, prompt string) string {
+func characterIdentityResponseFromPrompt(t *testing.T, prompt string) string {
 	t.Helper()
-	entityID := promptIDAfter(t, prompt, "Role refs:", "entity-")
-	sceneID := promptIDAfter(t, prompt, "allowed_scene_ids:", "sc-")
-	return `{"characters":[{"source_entity_ids":["` + entityID + `"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + sceneID + `","reason":"Shows Mara carrying the scene action."}]}]}`
+	var records []string
+	for _, line := range strings.Split(prompt, "\n") {
+		marker := "- entity_id: "
+		start := strings.Index(line, marker)
+		if start < 0 {
+			continue
+		}
+		parts := strings.Split(line[start+len(marker):], ";")
+		id := strings.TrimSpace(parts[0])
+		name := "Unnamed character"
+		for _, part := range parts[1:] {
+			part = strings.TrimSpace(part)
+			if strings.HasPrefix(part, "canonical_name: ") {
+				name = strings.TrimSpace(strings.TrimPrefix(part, "canonical_name: "))
+			}
+		}
+		if id != "" {
+			records = append(records, `{"source_entity_ids":["`+id+`"],"canonical_name":"`+name+`"}`)
+		}
+	}
+	if len(records) == 0 {
+		t.Fatalf("identity prompt contains no source entity IDs:\n%s", prompt)
+	}
+	return `{"characters":[` + strings.Join(records, ",") + `]}`
 }
 
+func compileTestCharacterIdentities(t *testing.T, p *project.Project, st *store.Store) {
+	t.Helper()
+	provider := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
+		return characterIdentityResponseFromPrompt(t, req.Messages[1].Content)
+	}}
+	if _, err := compiler.Compile(context.Background(), p, st, compiler.Options{Layer: compiler.LayerCharacterIdentities, ExtractionProvider: provider, ExtractionModel: "fake-model"}); err != nil {
+		t.Fatalf("compile character identities: %v", err)
+	}
+}
+
+func principalRoleResponseFromPrompt(t *testing.T, prompt string) string {
+	t.Helper()
+	if strings.Contains(prompt, "character_id: char-") {
+		characterID := promptIDAfter(t, prompt, "Role refs:", "char-")
+		sceneID := promptIDAfter(t, prompt, "allowed_scene_ids:", "sc-")
+		return `{"characters":[{"character_id":"` + characterID + `","classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + sceneID + `","reason":"Shows the character carrying the central action."}]}]}`
+	}
+	entityID := promptIDAfter(t, prompt, "Role refs:", "entity-")
+	sceneID := promptIDAfter(t, prompt, "allowed_scene_ids:", "sc-")
+	return `{"characters":[{"source_entity_ids":["` + entityID + `"],"classification":"principal","role":"protagonist","confidence":0.94,"rationale":"Mara drives the central action.","evidence":[{"scene_id":"` + sceneID + `","reason":"Shows Mara carrying the central action."}]}]}`
+}
 func promptEntityIDForName(t *testing.T, prompt, name string) string {
 	t.Helper()
 	line := promptLineContaining(t, prompt, "; name: "+name)
+	if strings.Contains(line, "character_id: ") {
+		return promptIDAfter(t, line, "character_id:", "char-")
+	}
 	return promptIDAfter(t, line, "source_entity_id:", "entity-")
 }
 
@@ -959,6 +1004,8 @@ func TestCompileAllRunsEntitiesBeforeSummaries(t *testing.T) {
 			return cardJSON
 		case strings.Contains(prompt, "Consolidate candidate entities"):
 			return entitiesJSON
+		case strings.Contains(prompt, "Resolve book-level character identities"):
+			return characterIdentityResponseFromPrompt(t, prompt)
 		case strings.Contains(prompt, "Classify book-level character roles"):
 			return principalRoleResponseFromPrompt(t, prompt)
 		case strings.Contains(prompt, "Summarize this chapter"):
@@ -978,18 +1025,19 @@ func TestCompileAllRunsEntitiesBeforeSummaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile all layers: %v", err)
 	}
-	if result.CardsBuilt != 2 || result.SummariesBuilt != 2 || result.EntitiesBuilt != 1 || result.PrincipalsBuilt != 1 {
-		t.Fatalf("built counts = cards %d, summaries %d, entities %d, principals %d; want 2, 2, 1, 1",
-			result.CardsBuilt, result.SummariesBuilt, result.EntitiesBuilt, result.PrincipalsBuilt)
+	if result.CardsBuilt != 2 || result.SummariesBuilt != 2 || result.EntitiesBuilt != 1 || result.CharacterIdentitiesBuilt != 1 || result.PrincipalsBuilt != 1 {
+		t.Fatalf("built counts = cards %d, summaries %d, entities %d, identities %d, principals %d; want 2, 2, 1, 1, 1",
+			result.CardsBuilt, result.SummariesBuilt, result.EntitiesBuilt, result.CharacterIdentitiesBuilt, result.PrincipalsBuilt)
 	}
-	if len(fake.requests) != 6 {
-		t.Fatalf("Generate calls = %d, want 6", len(fake.requests))
+	if len(fake.requests) != 7 {
+		t.Fatalf("Generate calls = %d, want 7", len(fake.requests))
 	}
 
 	wantPrompts := []string{
 		"Extract a structured scene card",
 		"Extract a structured scene card",
 		"Consolidate candidate entities",
+		"Resolve book-level character identities",
 		"Classify book-level character roles",
 		"Summarize this chapter",
 		"Produce a comprehensive editorial synopsis",
@@ -1494,6 +1542,8 @@ func TestCompileSummariesRunsEntitiesPrerequisiteFirst(t *testing.T) {
 		switch {
 		case strings.Contains(prompt, "Consolidate candidate entities"):
 			return entitiesJSON
+		case strings.Contains(prompt, "Resolve book-level character identities"):
+			return characterIdentityResponseFromPrompt(t, prompt)
 		case strings.Contains(prompt, "Classify book-level character roles"):
 			return principalRoleResponseFromPrompt(t, prompt)
 		case strings.Contains(prompt, "Summarize this chapter"):
@@ -1514,22 +1564,22 @@ func TestCompileSummariesRunsEntitiesPrerequisiteFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile summaries: %v", err)
 	}
-	if result.SummariesBuilt != 2 || result.PrincipalsBuilt != 1 {
-		t.Fatalf("built counts = summaries %d, principals %d; want 2, 1", result.SummariesBuilt, result.PrincipalsBuilt)
+	if result.SummariesBuilt != 2 || result.CharacterIdentitiesBuilt != 1 || result.PrincipalsBuilt != 1 {
+		t.Fatalf("built counts = summaries %d, identities %d, principals %d; want 2, 1, 1", result.SummariesBuilt, result.CharacterIdentitiesBuilt, result.PrincipalsBuilt)
 	}
-	if len(fake.requests) != 4 {
-		t.Fatalf("Generate calls = %d, want 4 (entities + principals prerequisites + chapter + book)", len(fake.requests))
+	if len(fake.requests) != 5 {
+		t.Fatalf("Generate calls = %d, want 5 (entities + identities + principals prerequisites + chapter + book)", len(fake.requests))
 	}
 	if !strings.Contains(fake.requests[0].Messages[1].Content, "Consolidate candidate entities from scene-card reverse-index results") {
 		t.Fatalf("first request should be entity consolidation, got: %s", fake.requests[0].Messages[1].Content)
 	}
-	if !strings.Contains(fake.requests[1].Messages[1].Content, "Classify book-level character roles") {
-		t.Fatalf("second request should be principal classification, got: %s", fake.requests[1].Messages[1].Content)
+	if !strings.Contains(fake.requests[1].Messages[1].Content, "Resolve book-level character identities") {
+		t.Fatalf("second request should be identity resolution, got: %s", fake.requests[1].Messages[1].Content)
 	}
-	if !strings.Contains(fake.requests[2].Messages[1].Content, "Summarize this chapter as evidence-backed JSON.") {
-		t.Fatalf("third request should be chapter summary, got: %s", fake.requests[2].Messages[1].Content)
+	if !strings.Contains(fake.requests[2].Messages[1].Content, "Classify book-level character roles") {
+		t.Fatalf("third request should be principal classification, got: %s", fake.requests[2].Messages[1].Content)
 	}
-	bookPrompt := fake.requests[3].Messages[1].Content
+	bookPrompt := fake.requests[4].Messages[1].Content
 	if !strings.Contains(bookPrompt, "Principal characters requiring final-state coverage:") || !strings.Contains(bookPrompt, "char-") || !strings.Contains(bookPrompt, "Mara") {
 		t.Fatalf("book summary prompt missing character-role artifact requirements: %s", bookPrompt)
 	}
@@ -1568,6 +1618,7 @@ func TestCompileSummariesFailsWhenBookSummaryMissesPrincipalFinalState(t *testin
 	if err != nil {
 		t.Fatalf("compile entities: %v", err)
 	}
+	compileTestCharacterIdentities(t, p, st)
 	principalsProvider := &fakeProvider{responseFunc: func(req provider.GenerationRequest, idx int) string {
 		return principalRoleResponseFromPrompt(t, req.Messages[1].Content)
 	}}
